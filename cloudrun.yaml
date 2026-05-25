@@ -1,0 +1,89 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: knobbyauth
+  namespace: 871965503155
+  selfLink: /apis/serving.knative.dev/v1/namespaces/871965503155/services/knobbyauth
+  uid: 4805a74a-95e2-481d-abcf-a3a72e302867
+  resourceVersion: AAZSqGvINck
+  generation: 8
+  creationTimestamp: "2026-05-25T17:03:15.280797Z"
+  labels:
+    run.googleapis.com/satisfiesPzs: "true"
+    cloud.googleapis.com/location: asia-southeast1
+  annotations:
+    serving.knative.dev/creator: priyavijai.kalyan2007@proton.me
+    serving.knative.dev/lastModifier: priyavijai.kalyan2007@proton.me
+    run.googleapis.com/client-name: cloud-console
+    run.googleapis.com/operation-id: d5b6b222-151b-4ced-8e42-ac6d52394648
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+    run.googleapis.com/maxScale: 1
+    run.googleapis.com/urls: "[\"https://knobbyauth-871965503155.asia-southeast1.run.app\"\
+      ,\"https://knobbyauth-5qvdsp73la-as.a.run.app\"]"
+spec:
+  template:
+    metadata:
+      labels:
+        client.knative.dev/nonce: f6fbc5cb-f913-4b35-bf14-2c54af1b043b
+        run.googleapis.com/startupProbeType: Default
+      annotations:
+        autoscaling.knative.dev/maxScale: 1
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/client-name: cloud-console
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 10
+      timeoutSeconds: 300
+      serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
+      containers:
+      - name: keycloak-1
+        image: asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak@sha256:916af884331a946ab7aac2d5325ebd6bea6a003d5a2c629e841f59970f91357f
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_URL
+          value: jdbc:postgresql://ep-solitary-bar-aodntij6-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?user=neondb_owner&sslmode=require&channelBinding=require
+        - name: KC_DB_USERNAME
+          value: neondb_owner
+        - name: KC_HOSTNAME
+          value: auth.knobby.io
+        - name: KC_HOSTNAME_STRICT
+          value: "true"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_PROXY_HEADERS
+          value: xforwarded
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        - name: KC_METRICS_ENABLED
+          value: "true"
+        - name: KC_BOOTSTRAP_ADMIN_USERNAME
+          value: admin
+        - name: KC_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: knobby-keycloak-db-password
+        - name: KC_BOOTSTRAP_ADMIN_PASSWORD=
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: knobby-keycloak-bootstrap-password
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          timeoutSeconds: 240
+          periodSeconds: 240
+          failureThreshold: 1
+          tcpSocket:
+            port: 8080
+  traffic:
+  - percent: 100
+    latestRevision: true
