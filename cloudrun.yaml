@@ -1,0 +1,89 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: yourappauth
+  namespace: 123456789012
+  selfLink: /apis/serving.knative.dev/v1/namespaces/123456789012/services/yourappauth
+  uid: 4805a74a-95e2-481d-abcf-a3a72e302867
+  resourceVersion: AAZSqGvINck
+  generation: 8
+  creationTimestamp: "2026-05-25T17:03:15.280797Z"
+  labels:
+    run.googleapis.com/satisfiesPzs: "true"
+    cloud.googleapis.com/location: your-region
+  annotations:
+    serving.knative.dev/creator: operator@example.com
+    serving.knative.dev/lastModifier: operator@example.com
+    run.googleapis.com/client-name: cloud-console
+    run.googleapis.com/operation-id: d5b6b222-151b-4ced-8e42-ac6d52394648
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+    run.googleapis.com/maxScale: 1
+    run.googleapis.com/urls: "[\"https://yourappauth-123456789012.your-region.run.app\"\
+      ,\"https://yourappauth-5qvdsp73la-as.a.run.app\"]"
+spec:
+  template:
+    metadata:
+      labels:
+        client.knative.dev/nonce: f6fbc5cb-f913-4b35-bf14-2c54af1b043b
+        run.googleapis.com/startupProbeType: Default
+      annotations:
+        autoscaling.knative.dev/maxScale: 1
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/client-name: cloud-console
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 10
+      timeoutSeconds: 300
+      serviceAccountName: 123456789012-compute@developer.gserviceaccount.com
+      containers:
+      - name: keycloak-1
+        image: your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak@sha256:916af884331a946ab7aac2d5325ebd6bea6a003d5a2c629e841f59970f91357f
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_URL
+          value: jdbc:postgresql://ep-solitary-bar-aodntij6-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?user=neondb_owner&sslmode=require&channelBinding=require
+        - name: KC_DB_USERNAME
+          value: neondb_owner
+        - name: KC_HOSTNAME
+          value: auth.yourapp.com
+        - name: KC_HOSTNAME_STRICT
+          value: "true"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_PROXY_HEADERS
+          value: xforwarded
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        - name: KC_METRICS_ENABLED
+          value: "true"
+        - name: KC_BOOTSTRAP_ADMIN_USERNAME
+          value: admin
+        - name: KC_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: yourapp-keycloak-db-password
+        - name: KC_BOOTSTRAP_ADMIN_PASSWORD=
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: yourapp-keycloak-bootstrap-password
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        startupProbe:
+          timeoutSeconds: 240
+          periodSeconds: 240
+          failureThreshold: 1
+          tcpSocket:
+            port: 8080
+  traffic:
+  - percent: 100
+    latestRevision: true
