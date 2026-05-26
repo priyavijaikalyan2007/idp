@@ -1,11 +1,11 @@
 {
   "keycloak_version": "26.6.0",
-  "git_commit": "6996f2e",
-  "version_tag": "26.6.0-6996f2e",
+  "git_commit": "4c72a48",
+  "version_tag": "26.6.0-4c72a48",
   "local_tag": "keycloak:local",
-  "remote_tag": "asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak:26.6.0-6996f2e",
+  "remote_tag": "asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak:26.6.0-4c72a48",
   "registry": "asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak",
   "region": "asia-southeast1",
   "project_id": "stellar-zoo-478023-v4",
-  "built_at": "2026-05-26T18:21:51Z"
+  "built_at": "2026-05-26T18:39:06Z"
 }
