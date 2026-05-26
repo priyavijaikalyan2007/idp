@@ -4,7 +4,7 @@ FROM quay.io/keycloak/keycloak:26.6.0 AS builder
 ENV KC_DB=postgres
 ENV KC_HEALTH_ENABLED=true
 ENV KC_METRICS_ENABLED=true
-ENV KC_CACHE=ispn
+ENV KC_CACHE=local
 
 RUN /opt/keycloak/bin/kc.sh build
 
@@ -17,5 +17,6 @@ COPY --from=builder /opt/keycloak/ /opt/keycloak/
 ENV KC_HOSTNAME_STRICT=true
 ENV KC_HTTP_ENABLED=true
 ENV KC_PROXY_HEADERS=xforwarded
+ENV KC_CACHE=local
 
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh", "start", "--optimized"]
