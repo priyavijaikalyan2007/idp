@@ -698,6 +698,7 @@ All secrets follow the convention `yourapp-<system>-<purpose>-<credential-type>-
 | `yourapp-google-oauth-client-secret-{env}` | Keycloak → Google (broker auth) | Google Cloud OAuth client |
 | `yourapp-github-oauth-client-secret-{env}` | Keycloak → GitHub (broker auth) | GitHub OAuth App |
 | `yourapp-keycloak-db-password-{env}` | Keycloak → Postgres | Postgres user |
+| `yourapp-mcp-handoff-hmac-key-{env}` | Keycloak SPI ↔ yourapp.com backend (path iii handoff) | Generated; 256-bit random, base64. Rotated quarterly with two-key overlap (§16.8.5). |
 
 ### 10.6 Audit
 
@@ -764,6 +765,19 @@ Authoritative table. The OpenTofu IaC (§13) reads from this table.
 | yourapp.com backchannel logout URL | `https://{app-hostname}/auth/backchannel-logout` | `https://prod.yourapp.com/auth/backchannel-logout` |
 | yourapp.com MS admin consent callback | `https://{app-hostname}/auth/microsoft/admin-consent-callback` | `https://prod.yourapp.com/auth/microsoft/admin-consent-callback` |
 | Keycloak theme name | `yourapp` | `yourapp` |
+| **MCP — DCR Client Registration Policy name** | `mcp-dcr-policy` (one per realm) | `mcp-dcr-policy` |
+| **MCP — default Client Scope (audience binding)** | `mcp-default` (one per realm) | `mcp-default` |
+| **MCP — atomic Client Scope names** | `yourapp:{verb}` for each of the 6 atoms (§16.3.1) | `yourapp:read`, `yourapp:write`, `yourapp:admin`, etc. |
+| **MCP — resource server audience** | `yourapp-mcp-api` (constant; not per-env — env isolation via realm separation) | `yourapp-mcp-api` |
+| **MCP — DCR endpoint** | `<issuer>/clients-registrations/openid-connect` | `https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect` |
+| **MCP — authentication flow name** | `browser-mcp-tenant-pick` (one per realm; appended SPI step) | `browser-mcp-tenant-pick` |
+| **MCP — Realm Resource Provider callback** | `<issuer>/mcp-picker-callback` | `https://auth.yourapp.com/realms/yourapp-prod/mcp-picker-callback` |
+| **MCP — consent wizard URL (yourapp.com side)** | `https://{app-hostname}/mcp/consent` | `https://prod.yourapp.com/mcp/consent` |
+| **MCP — SPI JAR name** | `yourapp-keycloak-mcp-spi-{version}.jar` | `yourapp-keycloak-mcp-spi-1.0.0.jar` |
+| **MCP — handoff HMAC key secret** | `yourapp-mcp-handoff-hmac-key-{env}` | `yourapp-mcp-handoff-hmac-key-prod` |
+| **MCP — DCR'd client IDs** | Auto-generated UUIDs by Keycloak (no convention; tracked via DCR metadata `client_name`) | `9a8b7c6d-...` |
+
+**Note on MCP:** there is intentionally **no static `yourapp-{env}-mcp-server` OIDC client.** DCR creates first-class Keycloak clients per MCP-client-install (one per `Claude Code on user X's laptop`, one per `Cursor on user Y's laptop`, etc.). The yourapp.com MCP server itself is a *resource server*, not a Keycloak client — identified by the audience string `yourapp-mcp-api` set via the `mcp-default` Client Scope. See §16.4 for the full architecture.
 
 ---
 
@@ -1211,6 +1225,8 @@ For each enterprise customer, three things must happen: a yourapp.com Organizati
 
 **Implementation note throughout this section:** sub-sections describe the *required behavior and persisted state* for tenant onboarding. They do not prescribe specific table names, column types, or storage choices. Map each requirement to yourapp.com's existing data model. Consult the codebase before introducing new persistence — yourapp.com may already have organization, user, or tenant-connection structures that should be extended rather than duplicated.
 
+> **⚠️ Architecture-in-evolution note.** This section currently describes separate-per-IdP-family persistence (`org_microsoft_connection`, `org_google_connection`, etc.). That model is **interim**. A planned rewrite (see §15: *Directory-binding tenancy model*) will collapse these into a single polymorphic `yourapp_org_directory_binding` model where a tenant has 1..N `(idp_type, identifier)` bindings, and tenant context is resolved per-session by matching the current token's `(idp, microsoftTenantId | googleHd | …)` tuple against active bindings. The eventual model preserves cross-IdP user identity (one Keycloak user can authenticate via Microsoft, Google, GitHub) while gating tenant access by the current session's IdP — which gives correct offboarding, clean directory migrations (Microsoft → Google Workspace), and explicit handling of "personal-IdP sessions of someone who's also in a corporate tenant." Implementations of the per-IdP-family sub-sections below should be written so they can be refactored into the polymorphic model without data loss.
+
 ### 12.1 Pattern & Rationale
 
 1. **A yourapp.com Organization exists** (created during customer signup).
@@ -1454,11 +1470,65 @@ Section commits to OpenTofu and reflects v1.6's drop of Organizations. Actual `.
 
 ## 15. Future Work (Tracked, Out of Scope for v1.6)
 
-- **OpenTofu IaC implementation** (per §13 — next major session).
+### Directory-binding tenancy model (highest-priority follow-up)
+
+**Status:** discussed and agreed; deferred to a focused next session after auth migration completes.
+
+**Problem this resolves.** The current §12 persistence model treats per-IdP-family connections as separate concepts (`org_microsoft_connection`, `org_google_connection`, anticipated `org_saml_connection`). This obscures a more fundamental concept: **a tenant is an abstract organizational entity, separate from the directories that authenticate its members.** A tenant can have multiple directory bindings over its lifetime (e.g., Microsoft Entra → Google Workspace migration), multiple concurrent bindings (multi-IdP enterprises), or zero bindings (open sign-in by verified email domain).
+
+The first-broker-login-no-prompt flow (§11.4) auto-links a user's federated identities across IdPs by email match. This produces a single Keycloak user with multiple identity links (Microsoft + Google + GitHub all pointing to the same user record). User-attribute claims like `microsoftTenantId` and `googleHd` persist on that user record indefinitely (§8.3). Without an explicit session-scoped tenant resolution rule, this creates an authorization risk: a user signed in via GitHub could inappropriately inherit tenant access granted to their Microsoft-authenticated identity, simply because they share an email.
+
+**Target model.**
+
+A tenant (one row in `yourapp_org`) has 0..N **directory bindings**. Each binding is a polymorphic `(idp_type, identifier)` tuple, with an `active` flag for lifecycle management:
+
+| Binding type | Identifier semantics | Example |
+|---|---|---|
+| `microsoft-oidc` | Microsoft Entra tenant GUID | `(microsoft-oidc, 8a2b9c4d-...)` |
+| `google` | Google Workspace primary domain | `(google, acme.corp)` |
+| `saml-<slug>` | Keycloak SAML IdP alias (one per customer) | `(saml-acme, n/a)` |
+| `any-idp` (open sign-in) | verified email domain | `(any-idp, acme.corp)` — opt-in low-security model |
+
+Tenant context is resolved **per-session**, not per-user. On every authenticated request, yourapp.com's middleware:
+
+1. Builds the session tuple from token claims:
+   - `(microsoft-oidc, claims["microsoftTenantId"])` when `idp == "microsoft-oidc"`
+   - `(google, claims["googleHd"])` when `idp == "google"` and `hd` is present
+   - `(github, *)` when `idp == "github"` (matches only `any-idp` bindings if at all)
+   - `(saml-<alias>, *)` when `idp` starts with `saml-`
+2. Looks up the active `yourapp_org_directory_binding` rows matching this tuple
+3. Resolves tenant context (or "no tenant context" for personal-IdP sessions of users without a matching corporate binding)
+4. Verifies user membership in the resolved tenant before granting access
+
+**Migration scenarios this enables correctly.**
+
+- **acme.corp migrates Microsoft → Google Workspace:** admin adds a Google binding alongside the existing Microsoft binding. Both work during a transition window. Eventually the Microsoft binding is deactivated. Employees experience zero re-onboarding friction.
+- **Employee leaves acme.corp:** acme.corp's IT disables their Microsoft account. The session-scoped resolution means even if the ex-employee's GitHub account still asserts `foo@acme.corp` as an email, GitHub sessions match no acme.corp binding → no acme.corp access. Offboarding works without per-app revocation if the directory is properly de-provisioned upstream.
+- **Personal-IdP cross-contamination prevented:** a user who is both a personal Gmail user AND an acme.corp employee signs in via personal Gmail; that session matches no enterprise binding (no `hd` claim, or `hd` ≠ acme.corp) → personal access only, no leak into acme.corp's data.
+
+**Implementation prerequisites.**
+
+1. **Token claims contract** (already in place per §8.3 and §11.3b): `idp`, `microsoftTenantId`, `googleHd` claims emitted from Keycloak with correct user-fact-vs-session-fact discipline documented in trust rules.
+2. **Auth migration from Auth0 to Keycloak completed** in yourapp.com codebase. This rewrite assumes Keycloak is the live IdP broker, not Auth0.
+3. **Schema design session** to define `yourapp_org_directory_binding` (polymorphic columns vs. per-type tables, indexes for fast lookup by `(idp_type, identifier)`, audit columns).
+4. **Backfill from existing per-IdP-family rows** if any production data exists in `org_microsoft_connection` / `org_google_connection` shape by the time of cutover.
+
+**Out-of-scope for this rewrite (track separately):**
+
+- **Directory sync** (Microsoft Graph subscriptions / Google Workspace audit feeds → automatic membership de-provisioning). Pre-PMF, reactive de-provisioning (sessions silently lose tenant context as upstream directories revoke users) is acceptable.
+- **Cross-binding identity reconciliation** (e.g., proving that a Google-authenticated `foo@acme.corp` is the same person as a previously-Microsoft-authenticated `foo@acme.corp`). For the initial rewrite, the existing Keycloak-level email-match auto-linking (§11.4) carries this forward; explicit user-controlled identity merging is a later concern.
+
+**Estimated scope:** one focused design session for the schema and resolution algorithm; one or two implementation sessions for the persistence layer and middleware; one for backfill and cutover. Auth migration must land first.
+
+---
+
+### Other tracked follow-ups
+
+- **OpenTofu IaC implementation** (per §13 — next major session after auth migration).
 - **Microsoft Publisher Verification application** (multi-day lead time).
 - **Step-up authentication** via `acr` claim enforcement.
 - **Token Exchange** for AI agent delegation.
-- **Custom Keycloak event listener SPI** for the platform event bus.
+- **Custom Keycloak Event Listener SPI** for the platform event bus. **Note:** this is a *different* SPI from the Authenticator + Realm Resource Provider SPI specified in §16.8, which is **in scope for v1 MCP launch**. The two SPIs share build infrastructure (both deploy as JARs in the Keycloak Docker image) but solve different problems and ship independently. The Event Listener bridges Keycloak events (login success/failure, IdP federation, user CRUD, session termination, admin API ops) into yourapp.com's platform event bus for audit/notification purposes; it has no dependency on MCP and is not on the critical path for MCP v1.
 - **Themed account management UI** inside yourapp.com.
 - **Customer self-service onboarding UI** for all IdP families.
 - **Microsoft tenant domain background job** for email-domain home discovery.
@@ -1469,7 +1539,653 @@ Section commits to OpenTofu and reflects v1.6's drop of Organizations. Actual `.
 
 ---
 
-## 16. References
+## 16. MCP Support — OAuth 2.1 & Dynamic Client Registration
+
+### 16.1 Strategic Context
+
+The fundamental rationale for migrating from Auth0 to self-hosted Keycloak was the cost cliff: Auth0's OAuth 2.1 + Dynamic Client Registration tier (required for Model Context Protocol endpoint support) is approximately $2,500/month. That tier is necessary because MCP clients — Claude Desktop, Cursor, third-party agents, internal CLI tools — aren't knowable in advance and must self-register at runtime. Without DCR, every MCP integration requires manual client provisioning, which doesn't scale. Self-hosted Keycloak provides DCR as a built-in capability at no marginal cost beyond the operating costs already budgeted (§10).
+
+This section specifies how yourapp.com's Keycloak realm exposes MCP-compatible authorization. The corresponding MCP server endpoint on yourapp.com (resource server, protected resource metadata) is application work covered separately.
+
+### 16.2 MCP Authorization Architecture (the RFC stack)
+
+MCP clients perform authorization via four IETF specifications, all of which Keycloak implements:
+
+| RFC | Title | Role | Keycloak endpoint |
+|---|---|---|---|
+| 6749 / OAuth 2.1 draft | OAuth 2.0 Authorization Framework (with 2.1 tightening) | Authorization code flow with PKCE | `/realms/{realm}/protocol/openid-connect/auth`, `/token` |
+| 7591 | Dynamic Client Registration Protocol | MCP client self-registers and receives a `client_id` | `/realms/{realm}/clients-registrations/openid-connect` |
+| 8414 | OAuth 2.0 Authorization Server Metadata | Discovery — MCP client finds the auth server's endpoints | `/realms/{realm}/.well-known/oauth-authorization-server` |
+| 8707 | Resource Indicators for OAuth 2.0 | Tokens are bound to a specific MCP resource server URI | `resource` parameter on auth + token requests |
+| 9728 | OAuth 2.0 Protected Resource Metadata | MCP server (yourapp.com) advertises which auth server protects it | **yourapp.com app**, not Keycloak: `/.well-known/oauth-protected-resource` |
+
+The end-to-end flow when a user adds yourapp.com as an MCP server to Claude Desktop:
+
+```
+1. Claude Desktop fetches  https://prod.yourapp.com/.well-known/oauth-protected-resource
+   (yourapp.com app responds with authorization_servers=[https://auth.yourapp.com/realms/yourapp-prod])
+
+2. Claude Desktop fetches  https://auth.yourapp.com/realms/yourapp-prod/.well-known/oauth-authorization-server
+   (Keycloak responds with the full metadata document including the DCR endpoint URL)
+
+3. Claude Desktop POSTs to https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect
+   Body: { client_name, redirect_uris, grant_types: ["authorization_code"], 
+           token_endpoint_auth_method: "none", ... }
+   Keycloak runs the DCR policies (§16.4), and on success returns a client_id +
+   registration_access_token + registration_client_uri for future management.
+
+4. Claude Desktop initiates the auth code flow with PKCE, supplying:
+     resource=https://prod.yourapp.com/mcp
+     scope=<the MCP scopes the client wants — see §16.3>
+
+5. User authenticates via yourapp.com's IdPs (Google/Microsoft/etc.) and sees a 
+   consent screen ("Claude Desktop wants to <human-readable scope text>").
+
+6. Keycloak issues an access token with:
+     aud = https://prod.yourapp.com/mcp
+     scope = <granted scopes>
+     azp = <Claude Desktop's dynamically-assigned client_id>
+     sub, idp, microsoftTenantId, googleHd as per §8.3
+   Refresh token is also issued, with rotation enabled (§16.5).
+
+7. Claude Desktop calls yourapp.com's MCP server at /mcp with Authorization: Bearer <token>.
+   yourapp.com validates the JWT (signature against Keycloak's JWKS, aud, exp, scope claims).
+```
+
+### 16.3 Scope Vocabulary
+
+yourapp.com exposes a **6-atom semantic scope vocabulary** in the `yourapp:` namespace, surfaced to users and tenant admins through a **5-bundle consent ladder** that strictly nests. Raw scopes are available behind an "expand" affordance for advanced configuration; the default presentation is the bundle.
+
+The vocabulary is in the `yourapp:` namespace (not `mcp:`) because the scopes describe **YourApp authority verbs**, not MCP protocol primitives. The MCP-protocol-axis cut (`mcp:tools:read`, `mcp:tools:execute`, etc.) collapses into roughly `read + write` when pressure-tested against the §16.3b design rule below — and that coarse cut doesn't capture meaningful consent decisions like `comment` vs `curate` or `share` vs `admin`.
+
+#### 16.3.1 The six atomic scopes
+
+| Scope | Verb semantics |
+|---|---|
+| `yourapp:read` | View resources the user has read access to. |
+| `yourapp:comment` | Post comments and suggestions on resources the user has comment access to. |
+| `yourapp:curate` | Tag, classify, organize, link (cross-app ontology relationships), archive/restore, move, rename. *Acts on existing resources; strictly reversible; no creation, no destruction.* This is the agent-safe long-lived role (canonical Library `Curate` pattern). |
+| `yourapp:write` | Create new resources, edit content, delete. *Generative and destructive on the resource itself.* |
+| `yourapp:share` | Grant or revoke access to others (RBAC-adjacent permission mutations). |
+| `yourapp:admin` | Tenant-level administration: user management, role configuration, tenant settings, MCP enable/disable per role, audit-log configuration. Elevation tier — blast radius is tenant-wide, not resource-scoped. |
+
+App-level subsets are also available when a client explicitly requests them: `yourapp:thinker:read`, `yourapp:thinker:curate`, etc. The default consent surface uses the platform-level scopes.
+
+#### 16.3.2 The five consent bundles (strictly nested)
+
+| Bundle | Scope set | RBAC mirror | Default? | Elevation? |
+|---|---|---|---|---|
+| **Viewer** | `read` | viewer | — | — |
+| **Reviewer** | `read comment` | commenter / editor-light | — | — |
+| **Curator** | `read comment curate` | (n/a as a single role; corresponds to Library `Curate` role) | — | — |
+| **Author** | `read comment curate write share` | editor / owner | **Default** | — |
+| **Admin** | `read comment curate write share admin` | tenant admin | — | **Required; prominent consent UI** |
+
+Default consent is **Author** when a DCR-registered client doesn't explicitly specify scopes. Rationale: the expected install pattern is "AI assistant that works on the user's behalf" (drafting PRDs, filing work items, sharing diagrams), not "AI assistant that only researches." A Reviewer default would force every user through a re-consent loop on first useful action — exactly the friction that trains people to grant Admin preemptively on the next install. Author draws the right qualitative line ("act as me" vs. "administer the tenant").
+
+Strict nesting means tenant admins configuring role limits pick a single "maximum bundle" rather than a set of toggles. The wire format is raw scopes; bundles are a presentation/admin-mental-model layer.
+
+A custom bundle composition (e.g., Author minus `share`) renders as **"Custom — based on Author"**, never silently as "Author." Otherwise the bundle name lies about the grant.
+
+Bundle definitions are **locked at grant time.** When a new scope is added later (e.g., a future `yourapp:export`), existing `Author` grants keep their original scope set; new consent flows show `Author@v2` with the added scope highlighted as new. Matches OAuth's standard "re-consent on widening" behavior. Avoids both silent authority widening and disruptive forced re-consent for harmless additions.
+
+#### 16.3.3 Mapping the vocabulary onto MCP primitives
+
+| MCP capability | Scope mapping | Notes |
+|---|---|---|
+| **Tools** | Per-tool `requiredScope` annotation drawn from the 6 atoms. `thinker.get_session` → `read`; `thinker.tag_session` → `curate`; `thinker.create_session` → `write`; `thinker.add_comment` → `comment`; `thinker.share_session` → `share`; `tenant_admin.set_role` → `admin`. | Tool schemas generated from existing API contracts; `requiredScope` added at schema-generation time. |
+| **Resources** (URI-addressable content) | All gated by `yourapp:read`. | Resources are read-only by MCP spec. No per-resource-type scope split in v1. |
+| **Prompts** (parameterized templates) | Inherited from the tools the prompt invokes. No dedicated scope. | A prompt is a guided tool invocation; the tools it calls are themselves scope-gated. |
+| **Sampling** (server-initiated LLM completion) | Future. Will add `yourapp:mcp:sampling` when MCP sampling ships. | Sampling is the one MCP capability that introduces a consent question RBAC cannot express ("this server can spend your AI tokens on your behalf") — so it gets its own protocol-axis scope when it lands. |
+| **Roots** | No scope. | Client-side anchors; no server-side authority surface. |
+
+#### 16.3.4 RBAC dovetail
+
+Effective authority at any MCP call site is:
+
+```
+RBAC.allows(user, resource, action)  AND  token.scopes.includes(action)
+```
+
+Scopes are a **cap**, never a grant. RBAC is the authoritative gate. A user who grants Author to Claude Code but whose RBAC role is `viewer` on a particular resource cannot write that resource through Claude Code — RBAC denies. A user who grants Viewer to Claude Code but whose RBAC role is `editor` everywhere cannot write anything through Claude Code — scope caps.
+
+This dovetail means OAuth scopes target what RBAC can't catch (tenant-wide admin abuse, agent-initiated authority over otherwise-permitted actions) rather than duplicating what RBAC already gates.
+
+#### 16.3.5 Design rule for adding new scopes
+
+> A scope is the unit of consent. Add a new scope only if a meaningful consent decision exists — i.e., if a user might reasonably grant one capability but not the other. If splitting two capabilities into separate scopes would never produce a meaningful consent decision (no one would grant one without the other), they should share a scope.
+
+This rule gates future scope additions. Applied to the 6-atom vocabulary, every adjacent pair (`read` vs `comment`, `comment` vs `curate`, `curate` vs `write`, `write` vs `share`, `share` vs `admin`) passes the test: each split corresponds to real use cases where one is granted without the other. Future additions must pass the same test.
+
+#### 16.3.6 Realization in Keycloak
+
+Each of the 6 atoms becomes a Keycloak **Client Scope**:
+
+| Client Scope Name | Default? | Consent screen text (placeholder — final copy in §16.11) |
+|---|---|---|
+| `yourapp:read` | Yes (Author bundle) | "View your yourapp.com content" |
+| `yourapp:comment` | Yes (Author bundle) | "Comment on yourapp.com content" |
+| `yourapp:curate` | Yes (Author bundle) | "Tag, organize, and link your yourapp.com content" |
+| `yourapp:write` | Yes (Author bundle) | "Create, edit, and delete yourapp.com content" |
+| `yourapp:share` | Yes (Author bundle) | "Share yourapp.com content with others" |
+| `yourapp:admin` | **No** (must be explicitly requested) | "Administer the entire tenant — users, roles, settings" |
+
+All 6 are configured with `Display On Consent Screen: On`, `Include In Token Scope: On`. The first 5 are assigned as **default scopes** to clients registered through `mcp-dcr-policy` (§16.4); `yourapp:admin` is an **optional** scope that must be explicitly requested. The user's actual choice in the consent wizard (§16.7) overrides the requested scope set via the SPI's session-note → protocol-mapper mechanism (§16.8).
+
+### 16.4 DCR Access Model — Anonymous Registration With Strict Policies (`mcp-dcr-policy`)
+
+DCR is enabled in **anonymous** mode (any client can register without proving identity first), constrained by a realm-level **Client Registration Policy** named `mcp-dcr-policy`. This is the standard MCP-spec posture: developer-friendly enough that anyone can wire up their own MCP client without manual onboarding, but defended against trivial attacks.
+
+There is **no static `yourapp-{env}-mcp-server` OIDC client.** Every MCP client install gets its own auto-generated `client_id` via DCR. Claude Code on your laptop is one client; Claude Code on a colleague's laptop is a separate one. The yourapp.com MCP server itself is a *resource server*, identified by the audience string `yourapp-mcp-api` — not a Keycloak client. The MCP server validates `aud == "yourapp-mcp-api"` on every incoming token; this audience is set on DCR'd tokens via the default Client Scope `mcp-default` (§16.6).
+
+**Policies on `mcp-dcr-policy`:**
+
+| Policy | Configuration | Why |
+|---|---|---|
+| Allowed Client Scopes | `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share`, `yourapp:admin`, `mcp-default`, `openid`, `offline_access` | Prevents registration with privileged scopes like `realm-admin` or other yourapp clients' scopes |
+| Allowed Protocol Mappers | Built-in defaults only | Prevents injection of malicious claim mappers (e.g., forging `sub`, `email`, or `tenant`) |
+| Consent Required | Force `consentRequired = true` | All DCR-registered clients require user consent on first authorization; can't silently obtain tokens. The wizard in §16.7 is the consent UI. |
+| Trusted Hosts | `*` initially, with rate limiting via Cloudflare WAF | Limits which IPs can hit the DCR endpoint |
+| Client Registration Maximum | 1 per registration token | Prevents one bad actor from creating thousands of clients with a single token |
+| PKCE Required | Enforce S256 on every DCR-registered client | Aligns with §8.2 PKCE policy for the static `yourapp-{env}-web` client |
+| Allowed Grant Types | `authorization_code`, `refresh_token` only | No `password`, `implicit`, or `client_credentials` for dynamically-registered clients |
+| Allowed Redirect URIs | HTTPS-only; no wildcards; no `localhost` in prod (localhost permitted in dev) | Prevents tokens being delivered to attacker-controlled URIs |
+| Token Endpoint Auth Method | `none` (public client) or `client_secret_basic` | Both supported per MCP spec; `none` is standard for desktop/CLI clients |
+| Authentication Flow Override | `browser-mcp-tenant-pick` | Auto-binds every DCR'd MCP client to the MCP-specific browser flow (§16.8.1). Web users' `browser-federated-only` flow stays untouched. |
+| Default Client Scopes | `mcp-default`, `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share` | Pre-assigns the Author bundle (§16.3.2) and the audience-binding `mcp-default` scope. `yourapp:admin` is an **optional** scope, not default — clients must explicitly request it. |
+
+**Tightening lever:** if abuse becomes a problem, the model can be flipped to authenticated DCR — clients must present an initial access token issued by yourapp.com's UI on behalf of an authenticated user. Admin-console toggle, no schema change. Anonymous mode is the right starting posture for MCP ecosystem compatibility.
+
+### 16.5 OAuth 2.1 Hardening
+
+OAuth 2.1 is OAuth 2.0 with security best practices made mandatory. The realm-level settings:
+
+- **PKCE required, S256 only** — already enforced for static `yourapp-{env}-web` client per §8.2; DCR policy (§16.4) enforces the same for dynamically-registered clients.
+- **Refresh token rotation** — Realm settings → Tokens → **Revoke Refresh Token: On**. Each refresh token use issues a new refresh token and invalidates the old one. Standard OAuth 2.1 requirement.
+- **No implicit flow, no password grant** — disabled at the realm level and prohibited via DCR policy.
+- **Authorization Code grant only for interactive clients** — DCR policy restricts this.
+- **Exact redirect URI matching** — Keycloak default; no wildcards permitted for dynamically-registered clients.
+- **No bearer tokens in URLs** — Keycloak's default; access tokens are returned only via POST body to the token endpoint.
+
+Realm settings to verify or set:
+
+1. Realm settings → Tokens → Revoke Refresh Token: **On**
+2. Realm settings → Tokens → Refresh Token Max Reuse: **0**
+3. Realm settings → Login → Require SSL: **All requests** (production realm)
+
+### 16.6 Resource Indicators & Audience Binding
+
+Per RFC 8707, tokens issued for MCP clients carry an `aud` claim matching the MCP resource server identifier. The audience for yourapp.com's MCP server is the constant **`yourapp-mcp-api`** (not a per-environment URL — the value identifies the *logical resource server*, and per-environment isolation is achieved through realm separation: `yourapp-prod` realm tokens have `iss=https://auth.yourapp.com/realms/yourapp-prod`, and the MCP server validates both `iss` and `aud`).
+
+The audience is set on DCR'd tokens via a built-in Audience protocol mapper attached to the `mcp-default` Client Scope. Because `mcp-default` is assigned as a default scope by `mcp-dcr-policy` (§16.4), every DCR-registered client inherits the audience without per-client configuration.
+
+```
+mcp-default Client Scope
+├── Audience mapper
+│   ├── Name: mcp-api-audience
+│   ├── Included Custom Audience: yourapp-mcp-api
+│   ├── Add to access token: On
+│   └── Add to ID token: Off
+└── (No other mappers — this scope's sole job is audience binding)
+```
+
+MCP clients may include `resource=https://prod.yourapp.com/mcp` in their authorization and token requests per RFC 8707. Keycloak validates the parameter against the DCR policy's allowed-resource list (or against the client's configured resources) and stamps it as additional context in audit logs. The token's `aud` claim, however, remains `yourapp-mcp-api` regardless — that's the canonical resource server identifier.
+
+yourapp.com's MCP server validates on every incoming token:
+
+- `iss == "https://auth.yourapp.com/realms/yourapp-{env}"` (matches the deployment environment)
+- `aud` contains `"yourapp-mcp-api"` (or the value is the string `"yourapp-mcp-api"` if `aud` is a scalar)
+- `exp` is in the future
+- Token signature verified against Keycloak's JWKS at `iss + "/protocol/openid-connect/certs"`
+
+Tokens with any other `aud` are rejected. This is what prevents a token issued for the web client (`aud = yourapp-prod-web`) from being replayed against the MCP server, and vice versa.
+
+### 16.7 Consent Flow — Path (iii) Architecture
+
+The consent UX for DCR-registered MCP clients is **hosted by YourApp web**, not by Keycloak's stock consent screen. Keycloak remains the OAuth authorization server (from the MCP client's perspective, nothing changes about who issues tokens), but the tenant picker and the bundle/consent screen are regular YourApp web pages, served from `prod.yourapp.com/mcp/consent`. A small custom Keycloak Authenticator SPI (§16.8) orchestrates the cross-system handoff via HMAC-signed JWTs.
+
+#### 16.7.1 Why path (iii) and not the alternatives
+
+Three implementation paths were considered:
+
+- **(i) Keycloakify-themed picker** — render the picker inside Keycloak via a custom theme. **Rejected**: the consent surface is iteration-heavy (bundle UX, RBAC mapping grid, Connected Agents extension), and Keycloakify iteration requires JAR rebuild + Docker rebuild + Keycloak restart rather than YourApp web's normal deploy cadence. Also fragments the design system across two codebases.
+- **(ii) YourApp-hosted OAuth server** — yourapp.com implements its own OAuth 2.1 + DCR server in .NET; Keycloak demoted to upstream IdP. **Rejected**: makes yourapp.com a token issuer with its own JWKS, refresh rotation, PKCE, DCR per RFC 7591, MCP-spec error format — exactly the security-critical code that mature SaaS providers use IdP brokers to avoid building. Fragments the identity surface (two issuers, two key rotations).
+- **(iii) Keycloak owns OAuth; YourApp web hosts picker + consent.** **Locked.** Keeps Keycloak as the single token issuer, puts the iteration-heavy UX where the design system lives, requires only a small (~150–250 line) Authenticator SPI to bridge the two systems.
+
+Path (i) remains a clean fallback design if (iii)'s cross-redirect flow ever has to be abandoned (e.g., if some enterprise SSO setups break the browser redirect chain in ways (i) wouldn't). Accepted risk for v1.
+
+#### 16.7.2 End-to-end flow
+
+```
+1. MCP client (Claude Code) discovers yourapp.com MCP server via
+   https://prod.yourapp.com/.well-known/oauth-protected-resource (yourapp.com app side).
+
+2. Client → OAuth /authorize at Keycloak (auth.yourapp.com/realms/yourapp-prod/...).
+
+3. Keycloak runs browser-mcp-tenant-pick flow:
+   a. Standard browser-federated-only steps (federated IdP, post-broker login).
+   b. Custom Authenticator SPI step (§16.8.2) at end of flow:
+      - Reads user's `sub` from the authenticator session
+      - HMAC-signs a "picker-request" JWT containing:
+          { yourapp_sub, mcp_client_id, mcp_requested_scopes, redirect_state,
+            nonce, jti, exp(now+5min) }
+      - 302s browser to https://prod.yourapp.com/mcp/consent?token=<picker-request-token>
+      - Marks the SPI step as "awaiting external completion"
+
+4. Browser lands on https://prod.yourapp.com/mcp/consent. YourApp web's standard
+   auth middleware runs on this route:
+   a. No YourApp web session cookie → middleware initiates silent OIDC sign-in
+      against yourapp-prod-web client with `prompt=none` (picker-request token
+      preserved through the OIDC state parameter).
+   b. Because the user just authenticated through the same Keycloak SSO session
+      (step 3a), Keycloak immediately returns an authorization code without any
+      user interaction (~100ms invisible round-trip).
+   c. YourApp web exchanges code for token, sets YourApp web session cookie,
+      redirects to /mcp/consent?token=<picker-request-token>.
+
+5. /mcp/consent renders with full YourApp app shell (top bar, user menu, workspace
+   switcher visible). Validates picker-request token (HMAC, expiry, nonce
+   uniqueness against a recent-jti cache).
+
+6. YourApp web runs the 3-step wizard (§16.7.3):
+   tenant confirmation → bundle selection → review & authorize.
+
+7. On [Authorize] in Step 3:
+   a. YourApp backend re-validates picker-request token.
+   b. Validates user's membership in the chosen tenant (RBAC).
+   c. HMAC-signs a "picker-result" JWT containing:
+        { picker_request_jti, chosen_tenant_id, granted_scopes[],
+          user_sub_echo, nonce, jti, exp(now+1min) }
+   d. 302s browser back to Keycloak's Realm Resource Provider callback URL:
+        https://auth.yourapp.com/realms/yourapp-prod/mcp-picker-callback
+          ?picker_result=<picker-result-token>
+
+8. Keycloak's Realm Resource Provider (§16.8.3) receives the callback:
+   a. Validates HMAC, expiry, nonce, jti-matches-request, user-sub-matches-session.
+   b. Writes `yourapp_tenant_id` and `yourapp_scopes` to the User Session Notes.
+   c. Marks the SPI Authenticator step as complete.
+   d. Resumes the OAuth flow from where it paused.
+
+9. Keycloak finishes the auth flow normally:
+   a. Protocol mappers (§16.8.4) expose session notes as token claims:
+      - `tenant` claim from `yourapp_tenant_id`
+      - `scope` claim derived from `yourapp_scopes` (the user's actual choice
+        overrides whatever the client requested)
+      - `aud` claim of `yourapp-mcp-api` from the mcp-default scope
+   b. Mints OAuth access + refresh tokens.
+   c. 302s to the MCP client's redirect URI with the authorization code.
+
+10. MCP client exchanges code at Keycloak's /token endpoint, receives tokens.
+
+11. Subsequent MCP requests to https://prod.yourapp.com/mcp carry the token;
+    the yourapp.com MCP server validates against Keycloak JWKS, reads `tenant`,
+    enforces `scope`, performs RBAC checks (RBAC ∧ scope per §16.3.4).
+```
+
+The full round-trip in step 4 (silent prompt=none OIDC) is invisible to the user — they see one page transition from Keycloak's IdP back to YourApp's consent wizard, not two. The technical machinery exists to give `/mcp/consent` a regular YourApp web session cookie rather than building a bespoke auth path for that route alone.
+
+#### 16.7.3 The 3-step consent wizard
+
+Hosted at `prod.yourapp.com/mcp/consent`. Renders inside YourApp's standard authenticated app shell — top bar, workspace switcher, user menu, app launcher visible. Built on the existing CDN Stepper component. Three steps; cannot skip forward; back navigation always available.
+
+**Step 1 — Who & Where (client identity + tenant confirmation)**
+
+Two cards:
+- **Client identity card** (top, prominent): MCP client display name (from DCR metadata), client URI/domain, redirect URI domain prominently shown, "Self-registered" badge with hover surface explaining what self-registration means.
+- **Tenant card**: tenant logo, name, user's role in this tenant, last activity timestamp, member count. **Always shown for explicit confirmation**, even for single-tenant users. Multi-tenant users see a radio list.
+
+Explicit confirmation over auto-skip is deliberate — avoids the "I didn't know I did that" failure mode. Empty-membership users hit a halt state (§16.7.4) instead of seeing a tenant picker.
+
+Actions: [Continue] / [Cancel — Don't Connect].
+
+**Step 2 — What (bundle selection)**
+
+Heading: *"What should {client name} be able to do for you in {tenant name}?"*
+
+Five bundle cards stacked vertically: Viewer / Reviewer / Curator / Author / Admin. Each card shows: bundle name + one-line description, 2–3 example actions ("Can read your work items," "Can comment on diagrams," "Cannot administer your tenant"), RBAC mirror in small text ("Like the Editor role").
+
+**Default selection: Author** (per §16.3.2).
+
+**Expand affordance:** "Show advanced (individual scopes)" reveals the 6 raw atoms as checkboxes, with the active selection labelled "this is currently the Author bundle." Editing any checkbox flips the bundle label to "Custom — based on Author" (or whichever bundle was last selected).
+
+**Admin elevation banner:** if the client's DCR registration explicitly requested `yourapp:admin`, a prominent warning banner appears above the cards before the user gets to select: *"This app is requesting tenant administration access. Choose carefully — this allows changes to user roles, tenant settings, and audit configuration."*
+
+Actions: [Continue] / [Back].
+
+**Step 3 — Review & Authorize**
+
+Heading: *"Confirm: {client name} will be able to..."*
+
+**Affirmative list** — what they CAN do under the chosen bundle. Generated from the Bundle ↔ RBAC mapping registry. Examples for Author:
+- ✓ Read any resource you have access to
+- ✓ Comment on resources you can comment on
+- ✓ Create, edit, and delete resources you have edit access to
+- ✓ Share resources you own with other users in this tenant
+- ✓ Create cross-app links between resources
+
+**Negative list** — what they CANNOT do. Generated from the same registry. Crucial for trust; turns "I clicked through a consent screen" into "I knowingly granted Author, not Admin." Examples for Author:
+- ✗ Administer this tenant (cannot manage users or roles)
+- ✗ Change tenant-wide settings
+- ✗ Access audit logs
+- ✗ Act in any tenant other than {tenant name}
+
+**Summary line:** *"Connecting {client name} to {tenant name} · Author bundle · until you disconnect."*
+
+Actions: [Authorize] (visually extra-prominent — larger size, distinct accent — when the chosen bundle is Admin) / [Back] (preserves selection) / [Cancel — Don't Connect].
+
+#### 16.7.4 Empty-membership state
+
+When `/mcp/consent` validates the picker-request token and discovers the user has no YourApp Organization membership, the wizard halts at Step 1 with no [Continue] action. Two branches based on context detected by the YourApp backend:
+
+- **Case A — user's email domain matches a connected tenant** (Microsoft Entra / Google Workspace / SAML directory binding exists for `acme.corp`) **but no membership granted yet**: "Your domain ({acme.corp}) is connected to yourapp.com, but you haven't been added as a member yet. Please ask your administrator to invite you, then return here to connect {client name}."
+- **Case B — no domain match, no pending invite**: "You need a yourapp.com workspace to use {client name} with yourapp.com. [Create a workspace] or [Cancel]." First CTA opens normal sign-up in a new tab; user returns to the consent flow after.
+
+In both cases, no picker-result token is ever emitted, the SPI Authenticator step times out (5 min, matching picker-request token expiry), and the OAuth flow fails with `access_denied`. The MCP client sees a normal OAuth denial.
+
+#### 16.7.5 Connected Agents (post-grant management)
+
+Post-consent, the granted client appears in YourApp web's user menu → **Connected Agents** page (entry point locked per design notes §2.6). Per-row:
+
+- Client name + logo, tenant scope ("in {tenant name}"), bundle granted, last activity, [Disconnect].
+- Disconnect → revokes the user's grant via Keycloak's Admin REST API (session-level revocation per §8.7) and emits an `AgentConnectionRevoked` activity for audit.
+
+Per-tenant: a tenant-admin Connected Agents view audits all connected agents across the tenant and supports admin-initiated disconnection for offboarding scenarios.
+
+#### 16.7.6 Trust signals (anti-phishing)
+
+The consent wizard depends on the user being able to verify they're on a legitimate YourApp surface and that the client requesting access is the one they think it is.
+
+- **Surface-level:** Consent page renders inside YourApp's authenticated app shell with top bar, workspace switcher, user menu visible. *"I am signed in to yourapp.com as me, viewing a consent page within yourapp.com"* must be verifiable at a glance, before the user reads the consent text. URL is on `prod.yourapp.com`, not a separate auth-only domain.
+- **Client-identity:** Client name in a clearly bounded card, separated from the consent prompt. "Self-registered" badge for DCR clients until/unless a publisher-verification process is added (future hardening track). Redirect URI domain displayed prominently — a redirect URI on a suspicious domain is the strongest signal of a phishing client.
+- **Cross-system handoff:** HMAC-signed tokens (§16.8.5) prevent tampering with chosen tenant or granted scopes. The `user_sub` cross-check at the picker-result side prevents a different signed-in user from completing consent for the original authenticated user (session-fixation defense in depth).
+
+Future hardening: tenant admin policy to require client verification for any DCR client requesting Author or higher (Reviewer/Viewer granted to unverified DCR clients; Author+ requires the verification badge).
+
+### 16.8 Custom Authenticator SPI Architecture
+
+This is the new in-scope Keycloak extension that implements the path (iii) handoff. It graduates from the §15 Future Work bucket ("Custom Keycloak event listener SPI") — but note that this is a **different SPI** from the parked event-listener SPI; see §16.8.7 for the disambiguation.
+
+#### 16.8.1 The `browser-mcp-tenant-pick` authentication flow
+
+A new realm-level browser flow, structurally a duplicate of `browser-federated-only` (§11.5) with the SPI Authenticator appended at the end:
+
+```
+browser-mcp-tenant-pick
+├── Cookie                                [Alternative]
+├── Kerberos                              [Disabled]
+├── Identity Provider Redirector          [Alternative]
+├── Browser - Conditional Organization    [Disabled]
+├── Forms                                 [Alternative, sub-flow]
+│   ├── Username Password Form            [Required]
+│   └── Browser - Conditional OTP / 2FA   [Disabled]
+└── YourApp MCP Tenant Picker              [Required]   ← new SPI Authenticator
+```
+
+The first four sections behave identically to `browser-federated-only`. The new final step is the SPI Authenticator. Web users (authenticating against `yourapp-{env}-web`) continue to use `browser-federated-only` and never run the SPI Authenticator. MCP clients (DCR-registered) are auto-bound to `browser-mcp-tenant-pick` by `mcp-dcr-policy` (§16.4).
+
+This separation is deliberate: the web auth path stays zero-coupled to MCP, and future MCP-specific flow changes (sampling consent, elevation flows, step-up auth for Admin) extend `browser-mcp-tenant-pick` without touching the web flow.
+
+#### 16.8.2 The SPI Authenticator class
+
+Java/Kotlin implementation of `org.keycloak.authentication.Authenticator`. Responsibilities:
+
+- Read `KeycloakSession.getContext().getAuthenticationSession().getAuthenticatedUser().getId()` to get the user's `sub`.
+- Read the requesting client's `client_id`, requested scopes, and the OAuth `state` parameter.
+- Construct the picker-request token (§16.8.5) and HMAC-sign it.
+- Issue HTTP 302 to `https://{yourapp-web-host}/mcp/consent?token=<picker-request-token>`.
+- Mark the auth step as `CHALLENGE` (awaiting external completion); Keycloak suspends the flow.
+
+The Authenticator is a single class, ~80 lines. Its `requiresUser()` returns `true` (must run after federated auth completes); `configuredFor(...)` returns `true` for all clients bound to this flow.
+
+#### 16.8.3 The Realm Resource Provider (callback handler)
+
+Java/Kotlin implementation of `org.keycloak.services.resource.RealmResourceProvider`. Mounts a new endpoint at `https://auth.yourapp.com/realms/{realm}/mcp-picker-callback`. Responsibilities:
+
+- Receive the picker-result token via query parameter.
+- Validate: HMAC signature (using the same shared secret as the Authenticator); expiry; nonce uniqueness; `jti` matches the picker-request token's `jti`; `user_sub_echo` matches the current authentication session's user.
+- On valid: write `yourapp_tenant_id` and `yourapp_scopes` to `AuthenticationSessionModel.setUserSessionNote(...)`. Resume the Authenticator's pending flow by marking the step `SUCCESS`.
+- On invalid: log structured audit event, return HTTP 400 with `error=invalid_handoff`. The user is shown a generic error page; the OAuth flow ultimately fails with `access_denied`.
+
+This is another single class, ~100 lines.
+
+#### 16.8.4 Protocol mappers
+
+Three mappers attached to the `mcp-default` Client Scope (so they apply automatically to every DCR-registered MCP client):
+
+| Mapper | Type | Source | Target Token Claim | Notes |
+|---|---|---|---|---|
+| MCP Tenant | User Session Note | `yourapp_tenant_id` (set by SPI in §16.8.3) | `tenant` | The chosen tenant's UUID (transitional; aligns with the directory-binding ID per §15 once that lands) |
+| MCP Granted Scopes | Custom (replaces standard scope mapper) | `yourapp_scopes` (set by SPI) | `scope` | **Overrides** the requested-scope-set; the user's actual consent choice wins |
+| MCP Audience | Audience | (static) | `aud = yourapp-mcp-api` | Per §16.6 |
+
+The MCP Granted Scopes mapper is the non-trivial one: Keycloak's default scope-claim behavior is to emit the intersection of (client's allowed scopes) ∩ (requested scopes) ∩ (granted scopes). We need it to emit *exactly* the session note's value, ignoring whatever was requested. This requires either a Script Mapper (set the `scope` claim from session note `yourapp_scopes`) or a small custom protocol mapper class. Either way, it's a few dozen lines of code; the choice between script and custom-class is an implementation detail.
+
+#### 16.8.5 Handoff token construction & key management
+
+Both tokens (picker-request and picker-result) are short-lived JWTs signed with a symmetric key (HS256) held by both the SPI (in Keycloak) and the YourApp backend.
+
+**Picker-request token claims** (issued by SPI Authenticator → consumed by YourApp web `/mcp/consent`):
+```
+{
+  "iss": "keycloak-mcp-spi",
+  "aud": "yourapp-web-mcp-consent",
+  "sub": "<user's Keycloak sub>",
+  "yourapp_sub": "<duplicate of sub for clarity>",
+  "mcp_client_id": "<DCR-registered client_id>",
+  "mcp_requested_scopes": ["yourapp:read", "yourapp:write", ...],
+  "oauth_state": "<the OAuth state parameter from the originating /authorize call>",
+  "nonce": "<128-bit random>",
+  "jti": "<UUID>",
+  "iat": <now>,
+  "exp": <now + 5 minutes>
+}
+```
+
+**Picker-result token claims** (issued by YourApp web → consumed by SPI Realm Resource Provider):
+```
+{
+  "iss": "yourapp-web-mcp-consent",
+  "aud": "keycloak-mcp-spi",
+  "picker_request_jti": "<jti from the request token, for correlation>",
+  "user_sub_echo": "<must match the picker-request's sub>",
+  "chosen_tenant_id": "<UUID of the tenant the user picked>",
+  "granted_scopes": ["yourapp:read", "yourapp:comment", "yourapp:curate",
+                     "yourapp:write", "yourapp:share"],
+  "oauth_state": "<echoed back to be re-forwarded to the MCP client>",
+  "nonce": "<128-bit random>",
+  "jti": "<UUID>",
+  "iat": <now>,
+  "exp": <now + 1 minute>
+}
+```
+
+**Why HMAC and not asymmetric:** both ends are first-party services owned by yourapp.com; symmetric is simpler, faster, and the operational story (one secret, rotated together) is cleaner than managing a key pair across systems.
+
+**Replay protection:** the SPI Realm Resource Provider records consumed `jti`s for the picker-result side (1-minute retention — matches token TTL). The YourApp backend records consumed `jti`s for the picker-request side (5-minute retention). Replay attempts fail validation.
+
+**Tampering protection:** if the user (or a malicious browser extension) modifies the chosen tenant or scopes in the picker-result token, the HMAC fails. If the `user_sub_echo` is mismatched against the session user, the SPI rejects.
+
+**State-vs-claims separation:** the picker-request token carries the OAuth `state` value as one of its claims, so YourApp web never has to read `state` from the URL bar (avoids accidentally treating it as user-visible state). YourApp returns `state` to Keycloak inside the picker-result token; Keycloak then forwards it to the MCP client in the normal OAuth `state` callback parameter.
+
+**Key rotation:** the shared HMAC key (`yourapp-mcp-handoff-hmac-key-{env}` in GCP Secret Manager) is rotated quarterly. To avoid downtime during rotation, both SPI and YourApp backend support a two-key overlap pattern: each side accepts tokens signed by either the current or the previous key, while only signing with the current one. Cutover sequence:
+1. Generate new key version, add to Secret Manager (versions older than 2 are deleted after cutover).
+2. Deploy SPI + YourApp backend with two-key support reading both versions.
+3. Update both to sign with the new key while still accepting the previous.
+4. After all in-flight tokens have expired (5 min for picker-request, 1 min for picker-result, so 10 min safety margin), the previous key can be retired.
+
+#### 16.8.6 JAR build & deployment
+
+The SPI is built as a single JAR (`yourapp-keycloak-mcp-spi-{version}.jar`) and placed in `/opt/keycloak/providers/` of the custom Keycloak Docker image (see Dockerfile comment block). The `kc.sh build` step picks up new providers and incorporates them into the optimized startup.
+
+When a new SPI version is built:
+1. CI builds and tests the JAR.
+2. Docker image build includes the JAR via `COPY` before the `kc.sh build` step.
+3. Cloud Run revision is deployed; new revision starts with the SPI loaded.
+4. Manual realm config (one-time per realm): bind the `YourApp MCP Tenant Picker` Authenticator into the `browser-mcp-tenant-pick` flow (admin console step in §16.11).
+
+Versioning: the JAR uses semver (`yourapp-keycloak-mcp-spi-1.0.0.jar`). Backwards compatibility is required between the SPI and YourApp web's consent flow — a SPI version mismatch with the YourApp web side would silently break handoff. The two are deployed together, tracked by the same `IMAGE_VERSION` label in the Dockerfile.
+
+#### 16.8.7 Two SPIs, do not conflate
+
+yourapp.com's Keycloak roadmap involves two distinct SPIs. They share infrastructure (both deploy as JARs in the custom image; both built and versioned together) but solve different problems and ship independently:
+
+| SPI | Status | Purpose | Required by |
+|---|---|---|---|
+| **Authenticator + Realm Resource Provider** (this §16.8) | **In scope for v1 MCP launch** | Post-federation 302 to YourApp web for tenant + consent; HMAC handoff token validation; write session notes for protocol mappers | MCP v1 |
+| **Event Listener** | Parked (§15 Future Work) | Bridge Keycloak events (login success/failure, IdP federation, user CRUD, session termination, admin API ops) into the platform event bus | Audit trail / event-bus track; not MCP v1 |
+
+§15 Future Work still lists the event-listener SPI as parked. When that work eventually lands, both SPIs coexist in the same JAR (or as two JARs in the same providers/ directory — implementation choice).
+
+### 16.9 Client Lifecycle
+
+**Registration Access Tokens.** Each DCR response includes a `registration_access_token` and `registration_client_uri`. The client uses these to update its own registration (rotate secrets, change redirect URIs, deregister) without going through an admin. RATs are bearer tokens — clients must store them as securely as they'd store an OAuth client secret.
+
+**Cleanup of inactive registrations.** Dynamically-registered clients accumulate. A periodic cleanup job (initially manual; eventually scheduled) deletes registrations meeting all of:
+- Last token issuance > 90 days ago
+- Zero active sessions
+- Not marked as `do_not_purge` (an annotation yourapp.com admins can apply)
+
+Until automated, the operator runs the cleanup quarterly via Admin REST API.
+
+**Revocation.** Three mechanisms:
+- User-initiated: yourapp.com Connected Agents UI (§16.7.5) → [Disconnect] revokes the user's grant via Keycloak's Admin REST API.
+- Admin-initiated: tenant admin's Connected Agents view can disconnect on a user's behalf for security/offboarding scenarios; calls the same Admin REST endpoint.
+- Refresh token rotation (§16.5): a leaked refresh token is detected on next use (because the previous token has been invalidated by rotation), at which point yourapp.com can heuristically revoke the entire session.
+
+### 16.10 Threat Model
+
+The DCR endpoint is internet-exposed and anonymously accessible by design. The path (iii) handoff also introduces cross-system trust requirements. Combined threats and defenses:
+
+| Threat | Defense |
+|---|---|
+| Registration flood (resource exhaustion) | Cloudflare WAF rate limit on `/realms/*/clients-registrations/*`; Keycloak-side `Client Registration Maximum` policy |
+| Privilege escalation via scope injection | `Allowed Client Scopes` policy whitelists only `yourapp:*` + `mcp-default` + `openid` + `offline_access` |
+| Privilege escalation via protocol mapper injection | `Allowed Protocol Mappers` policy restricts to built-in defaults |
+| Token delivery to attacker URI | `Allowed Redirect URIs` policy: HTTPS-only, no wildcards, no `localhost` in prod |
+| Phishing via spoofed `client_name` ("Microsoft Account") | Consent screen displays the redirect URI host alongside the client name; user can audit (§16.7.6) |
+| Refresh token theft | Refresh token rotation (§16.5) — a stolen RT becomes invalid on next legitimate use |
+| Client_id enumeration | Client IDs are opaque UUIDs; no enumeration value |
+| Resource indicator bypass | yourapp.com MCP server validates `aud == "yourapp-mcp-api"` strictly on every request |
+| Abandoned/forgotten clients | Quarterly cleanup of inactive registrations (§16.9) |
+| **Handoff token tampering** (modify chosen tenant or scopes in picker-result) | HMAC signature on picker-result token (§16.8.5); fails validation |
+| **Handoff token replay** (re-submit a previously-consumed token) | `jti` tracking in both directions with TTL-bounded retention (§16.8.5) |
+| **Session fixation** (different signed-in user completes consent for original) | `user_sub_echo` cross-check in picker-result token against authentication session user |
+| **Cross-tenant grant injection** (user fakes membership in a tenant they don't belong to) | YourApp backend validates RBAC membership before issuing picker-result token; SPI can only trust HMAC, but the data being signed is already authoritative-validated |
+| **HMAC key compromise** | Quarterly rotation with two-key overlap pattern (§16.8.5); key stored in GCP Secret Manager with audit logging on access |
+| **Picker URL phishing** (attacker mimics `/mcp/consent`) | YourApp app shell visible (top bar, user identity) at the consent surface; URL is on `prod.yourapp.com` (canonical app domain); HMAC handoff means token cannot be forged client-side |
+
+Defense in depth: Cloudflare in front, Keycloak policies enforced, yourapp.com MCP server validates `aud`, yourapp.com backend validates RBAC at handoff. No single layer is sufficient on its own.
+
+### 16.11 Manual Realm Configuration (until OpenTofu)
+
+Applied via admin console once per realm (prod, dev, test). OpenTofu codifies these per §13 once realm config IaC lands.
+
+1. **Deploy the SPI JAR to Keycloak:**
+   - Build `yourapp-keycloak-mcp-spi-{version}.jar` per §16.8.6.
+   - Update Dockerfile to `COPY` the JAR to `/opt/keycloak/providers/` *before* the `kc.sh build` line.
+   - Build new image, push, deploy to Cloud Run (will become Hetzner-hosted per the planned migration).
+   - On startup, Keycloak logs should show the new provider loaded; verify in the admin console under Server Info → Providers.
+
+2. **Create the `browser-mcp-tenant-pick` authentication flow:**
+   - Authentication → Flows → "browser-federated-only" → Action → Duplicate. Name: `browser-mcp-tenant-pick`.
+   - Add execution → "YourApp MCP Tenant Picker" (the SPI Authenticator).
+   - Set the new step's requirement to **Required**.
+   - Save.
+
+3. **Configure the `mcp-default` Client Scope:**
+   - Client Scopes → Create. Name: `mcp-default`. Type: Default. Protocol: openid-connect.
+   - In the new scope → Mappers → Add → Audience.
+     - Name: `mcp-api-audience`
+     - Included Custom Audience: `yourapp-mcp-api`
+     - Add to access token: On
+     - Add to ID token: Off
+   - In the new scope → Mappers → Add → User Session Note (the `tenant` claim mapper).
+     - Name: `mcp-tenant`
+     - User Session Note: `yourapp_tenant_id`
+     - Token Claim Name: `tenant`
+     - Claim JSON Type: String
+     - Add to ID token: On; Add to access token: On; Add to userinfo: On
+   - In the new scope → Mappers → Add → Script Mapper (or custom mapper) for the scope override (`scope` claim from session note `yourapp_scopes`).
+     - This is the non-trivial mapper. Implementation detail per §16.8.4.
+
+4. **Create the 6 atomic Client Scopes** per §16.3.6 table. For each:
+   - Type: None (assigned to clients per request or per DCR policy default; not assigned to other realm clients)
+   - Include In Token Scope: On
+   - Display On Consent Screen: On
+   - Consent Screen Text: per §16.3.6 (placeholder copy; finalize before launch)
+
+5. **Configure the realm-level Client Registration Policy `mcp-dcr-policy`:**
+   - Client Registration → Policies → Anonymous Access Policies → Create.
+   - For each policy row in §16.4, add the corresponding policy entry.
+   - For the auto-binding entries (Authentication Flow Override and Default Client Scopes), use the realm's Default Client Scopes settings; DCR-registered clients inherit these.
+
+6. **Configure HMAC handoff key:**
+   - Generate 256-bit random key: `openssl rand -base64 32`
+   - Store in GCP Secret Manager: `yourapp-mcp-handoff-hmac-key-{env}`
+   - Mount the secret into Keycloak Cloud Run revision as env var `YOURAPP_MCP_HANDOFF_HMAC_KEY` (SPI reads from this env).
+   - Mount into yourapp.com app's Cloud Run / Hetzner deployment as env var (YourApp backend reads from this env).
+
+7. **Configure realm-level OAuth 2.1 settings** (if not already done):
+   - Realm settings → Tokens → Revoke Refresh Token: On
+   - Realm settings → Tokens → Refresh Token Max Reuse: 0
+   - Realm settings → Login → Require SSL: All requests
+
+8. **Test DCR manually:**
+   ```bash
+   curl -X POST "https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "client_name": "DCR smoke-test client",
+       "redirect_uris": ["https://example.com/callback"],
+       "grant_types": ["authorization_code", "refresh_token"],
+       "token_endpoint_auth_method": "none",
+       "scope": "openid yourapp:read yourapp:write"
+     }'
+   ```
+   Expected: 201 Created with `client_id`, `registration_access_token`, `registration_client_uri`. Verify in admin console that the new client has `mcp-default` and the 5 default `yourapp:*` scopes assigned and the flow binding set to `browser-mcp-tenant-pick`.
+
+9. **Test the path (iii) handoff** (after YourApp web `/mcp/consent` is implemented):
+   - Initiate an OAuth flow with the DCR-registered client.
+   - Verify the browser redirects through: federated IdP → `prod.yourapp.com/mcp/consent` (silent OIDC) → wizard → `auth.yourapp.com/.../mcp-picker-callback` → MCP client redirect URI.
+   - Decode the resulting access token; verify `aud == "yourapp-mcp-api"`, `tenant` claim is set, `scope` claim reflects the user's choice (not the originally requested scopes).
+
+10. **Clean up smoke-test client:** delete via the registration_client_uri returned in step 8.
+
+### 16.12 Verification Checklist
+
+**Realm-level:**
+- [ ] SPI JAR loaded; "YourApp MCP Tenant Picker" Authenticator visible in admin console
+- [ ] `browser-mcp-tenant-pick` flow exists with SPI Authenticator as final step
+- [ ] All 6 `yourapp:*` Client Scopes exist with consent text set; `yourapp:admin` is **not** in default scope list
+- [ ] `mcp-default` Client Scope exists with audience mapper for `yourapp-mcp-api` + tenant claim mapper + scope override mapper
+- [ ] `mcp-dcr-policy` configured with all entries from §16.4 including auto-binding to `browser-mcp-tenant-pick`
+- [ ] Refresh Token Rotation enabled at realm level
+
+**DCR endpoint:**
+- [ ] DCR endpoint returns 201 for a well-formed request that complies with all policies
+- [ ] DCR endpoint returns 4xx for requests violating any single policy (test each)
+- [ ] DCR-registered client has `mcp-default` + Author-bundle scopes as defaults
+- [ ] DCR-registered client has flow binding `browser-mcp-tenant-pick`
+
+**End-to-end:**
+- [ ] A DCR-registered client can complete an authorization code + PKCE flow through the full path (iii) handoff
+- [ ] The resulting access token has `aud = "yourapp-mcp-api"`, the user-chosen scopes, and the §8.3 user claims
+- [ ] The `tenant` claim is set correctly to the user's chosen tenant
+- [ ] The `scope` claim reflects the consent wizard choice, not the originally requested scopes
+- [ ] HMAC handoff tokens cannot be replayed
+- [ ] Tampered HMAC tokens are rejected with `error=invalid_handoff`
+- [ ] Empty-membership users see the §16.7.4 halt state instead of the wizard
+- [ ] Connected Agents UI lists the new grant; [Disconnect] revokes successfully
+
+**Infrastructure:**
+- [ ] Cloudflare WAF rule for `/realms/*/clients-registrations/*` rate limit is active
+- [ ] HMAC handoff key present in GCP Secret Manager for the env
+- [ ] Both Keycloak and YourApp backend can read the key on startup (no boot failures)
+- [ ] yourapp.com MCP server endpoint at `/mcp` validates `aud` strictly (app-side; tracked separately from Keycloak realm config)
+
+---
+
+## 17. References
 
 - Keycloak Server Administration Guide (v26): https://www.keycloak.org/docs/latest/server_admin/
 - Keycloakify: https://keycloakify.dev (see `KEYCLOAK_THEMING_GUIDE.md`)
@@ -1480,6 +2196,12 @@ Section commits to OpenTofu and reflects v1.6's drop of Organizations. Actual `.
 - OpenTofu: https://opentofu.org
 - Terraform Keycloak provider: https://registry.terraform.io/providers/keycloak/keycloak
 - OIDC Back-Channel Logout 1.0: https://openid.net/specs/openid-connect-backchannel-1_0.html
+- OAuth 2.1 (draft): https://datatracker.ietf.org/doc/draft-ietf-oauth-v2-1/
+- RFC 7591 — Dynamic Client Registration Protocol: https://datatracker.ietf.org/doc/html/rfc7591
+- RFC 8414 — OAuth 2.0 Authorization Server Metadata: https://datatracker.ietf.org/doc/html/rfc8414
+- RFC 8707 — Resource Indicators for OAuth 2.0: https://datatracker.ietf.org/doc/html/rfc8707
+- RFC 9728 — OAuth 2.0 Protected Resource Metadata: https://datatracker.ietf.org/doc/html/rfc9728
+- Model Context Protocol authorization spec: https://modelcontextprotocol.io/specification/draft/basic/authorization
 - yourapp.com Access Control PRD.
 - yourapp.com Audit Trail ADRs 001/002/003.
 - yourapp.com Approval System Requirements.
