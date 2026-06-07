@@ -1,17 +1,21 @@
 # Authentication & Identity Brokering PRD
 
-**Status:** Draft v1.5
+**Status:** Draft v1.6
 **Owner:** PVSS
 **Last Updated:** 2026-06-02
 **Related Specs:** Access Control PRD (Zanzibar RBAC), Audit Trail ADR-001/002/003, Approval System Requirements, Pathfinder PRD (agent session management), **Keycloak Theming Guide** (companion document)
 
 **Changelog:**
-- v1.0 (2026-05-28): Initial draft.
-- v1.1 (2026-06-02): Microsoft Entra strategy and admin-consent flow.
-- v1.2 (2026-06-02): Six Keycloak 26.x runbook corrections.
-- v1.3 (2026-06-02): Locked naming conventions; one shared Keycloak instance for prod+dev, local for test.
-- v1.4 (2026-06-02): Expanded §8 into comprehensive app integration reference; expanded GitHub; added Apple Sign In; OpenTofu IaC commitment.
-- v1.5 (2026-06-02): Apple Sign In deferred to Future Work (§15) per current priorities — removed from §6, §10.5, §10.8, §11, §13 main flow. Apple-related secrets removed from naming convention. §9 expanded to reference the new `KEYCLOAK_THEMING_GUIDE.md` companion document which carries all detailed theming setup, customization, build, and deployment instructions.
+- v1.0–v1.4: see prior changelogs (Microsoft Entra strategy, runbook corrections, naming conventions, integration reference expansions, Apple Sign In addition).
+- v1.5 (2026-06-02): Apple Sign In deferred to Future Work; theming detail moved to companion guide.
+- v1.6 (2026-06-02): Significant cleanup driven by manual-setup learnings and a return to the "thin IdP broker" architectural charter. Seven themes:
+  1. **Keycloak Organizations dropped entirely.** §5 rewritten — tenancy is owned by the knobby.io application layer; Keycloak is purely a federation broker. §11 sections for "Enable Organizations Feature" and "Configure Organizations" removed. The `org` token claim removed from §8.3. All Organizations operations removed from §8.7. §13 OpenTofu structure no longer includes an organizations module.
+  2. **Application persistence reframed as requirements, not schema.** §8.4 and §12 stop prescribing table names, columns, or SQL DDL. Instead each persistent-state requirement is described as logical fields with lifecycle and trust properties, with an explicit implementation note directing implementers to align with knobby.io's existing data conventions.
+  3. **Microsoft alias convention corrected to `microsoft-oidc`** across §6.3, §8.1, §10.8, §11.9 — reflects the fact that the alias is immutable in Keycloak and disambiguates from the (unused) built-in `microsoft` provider.
+  4. **Entra app registration conventions clarified.** §6.3 and §11.9 note correct capitalization (`Keycloak`, not `KeyCloak`), no env suffix on prod displayName, publisherDomain set to `knobby.io` (not a per-env subdomain), and the publisher domain hosting requirement (`.well-known/microsoft-identity-association.json` at the apex).
+  5. **Admin API role list corrected.** §11.13 (was §11.15) drops the non-existent `view-organizations`/`manage-organizations` role names. `manage-realm` not required (no longer needed without Organizations). Note added that the role list has evolved across PRD revisions.
+  6. **§11 sections renumbered** to close gaps from removed sections. §11.18 (verification checklist) is now §11.16; smoke test references updated accordingly.
+  7. **Deployment topology clarified.** Apex `knobby.io` and `www.knobby.io` are marketing/publisher surfaces only. The prod application is deployed at `prod.knobby.io`; dev at `dev.knobby.io`. §8.1 redirect URI table and §10.8 naming convention updated. §12.2 Microsoft admin consent example URL updated. This was confirmed during manual federation testing — Keycloak's authorization endpoint rejection of PKCE-deficient test URLs surfaced the URL bar bouncing through `prod.knobby.io`, revealing the topology disconnect from earlier PRD assumptions about the apex hosting the app.
 
 ---
 
@@ -21,10 +25,9 @@ This PRD addresses several audiences:
 
 - **Architects / decision review** → §§1–10.
 - **Operators setting up a Keycloak realm by hand** → §11 (runbook).
-- **knobby.io app implementers (including Claude Code)** → §8 (integration reference) and §12.5 (tenant onboarding data model). §10.8 is the authoritative naming-convention table.
+- **knobby.io app implementers (including Claude Code)** → §8 (integration reference) and §12 (tenant onboarding requirements). §10.8 is the authoritative naming-convention table. **Do not assume specific database tables exist** — the PRD describes *persistence requirements*; map to actual knobby.io schema by consulting the codebase.
 - **Infra engineers building Keycloak IaC** → §13 (OpenTofu plan) and §10.8.
 - **Frontend engineers building the Keycloak theme** → `KEYCLOAK_THEMING_GUIDE.md` (companion document).
-- **Customer-onboarding flow implementers** → §12.
 
 §10.8 is the single source of truth for all naming. Any code, IaC, runbook step, or documentation that disagrees with §10.8 should be considered out of date.
 
@@ -32,11 +35,13 @@ This PRD addresses several audiences:
 
 ## 1. Executive Summary
 
-knobby.io will use Keycloak as a centralized identity broker that federates to all upstream identity providers (Google Workspace, Microsoft Entra, GitHub, enterprise SAML 2.0). Users will never directly interact with Keycloak. All login, profile management, and account operations occur within knobby.io's UI. Keycloak operates as invisible infrastructure: it terminates federation, mints tokens, and exposes an Admin REST API that knobby.io consumes server-side.
+knobby.io will use Keycloak as a centralized identity broker that federates to all upstream identity providers (Google Workspace, Microsoft Entra, GitHub, enterprise SAML 2.0). Users will never directly interact with Keycloak. All login, profile management, account operations, and tenancy management occur within knobby.io. Keycloak operates as invisible infrastructure: it terminates federation, mints tokens, and exposes an Admin REST API that knobby.io consumes server-side.
 
-Enterprise customer onboarding is a first-class concern. Each enterprise customer tenant must be explicitly *connected* to knobby.io before its users can sign in. For Microsoft Entra, this means a tenant admin grants OAuth admin consent via a dedicated knobby.io onboarding flow. For Google Workspace, this means Workspace admin allowlisting. For SAML customers, this means the customer configures their IdP against knobby.io's SP metadata.
+Tenancy is a knobby.io application-layer concept. knobby.io's data model owns the Organization concept; Keycloak does not. Per-customer SAML IdPs are registered at the realm level with a stable naming convention and mapped to knobby.io organizations in the application layer.
 
-This PRD establishes the durable invariants, the target architecture, the tenant model, the per-IdP configuration, the per-customer onboarding pattern, naming conventions, application integration reference, and a step-by-step setup runbook for fresh realm configuration in any of the three environments. It also commits to OpenTofu as the IaC tool for automated realm setup, with the module structure described in §13. The Keycloak theme (consumed by the rare user-facing Keycloak pages that survive Invariant 3) is documented in the companion `KEYCLOAK_THEMING_GUIDE.md`.
+Enterprise customer onboarding is a first-class concern. Each enterprise customer tenant must be explicitly *connected* to knobby.io before its users can sign in. For Microsoft Entra, this means a tenant admin grants OAuth admin consent via a dedicated knobby.io onboarding flow. For Google Workspace, this means Workspace admin allowlisting. For SAML customers, this means the customer configures their IdP against knobby.io's SP metadata and knobby.io provisions a corresponding IdP entry via Keycloak Admin REST API.
+
+This PRD establishes the durable invariants, the target architecture, the application-layer tenant model, the per-IdP configuration, the per-customer onboarding pattern, naming conventions, application integration reference, and a step-by-step setup runbook for fresh realm configuration in any of the three environments. It also commits to OpenTofu as the IaC tool for automated realm setup. The Keycloak theme is documented in the companion `KEYCLOAK_THEMING_GUIDE.md`.
 
 ---
 
@@ -49,28 +54,26 @@ knobby.io is a B2B enterprise SaaS platform targeting software/IT organizations.
 - SSO integration with their existing IdP (Google Workspace, Microsoft Entra, custom SAML 2.0).
 - No additional credentials for knobby.io itself.
 - A consistent, branded experience that never breaks the "knobby.io product" illusion.
-- Compliance with their internal identity governance (MFA, session policies, deprovisioning) — knobby.io must not undermine these.
+- Compliance with their internal identity governance (MFA, session policies, deprovisioning).
 - IT-controlled onboarding: an enterprise admin explicitly approves knobby.io for the organization before users can sign in.
-- Optional social sign-in (GitHub) for individual contributors and consumer-adjacent flows.
+- Optional social sign-in (GitHub) for individual contributors.
 
 ### 2.2 knobby.io Platform Needs
 
 - One integration surface (Keycloak as OIDC IdP) regardless of how many upstream IdPs are configured.
-- Consistent JWT claims across users from any source, so the Zanzibar-style RBAC + FGAC layer has uniform inputs.
+- Consistent JWT claims across users from any source.
 - Centralized session management, logout coordination, and revocation.
 - A path to support local users (B2C, contractors, service accounts) without re-architecting.
-- First-class AI agent principals (per Access Control PRD) — distinct authentication paths from human users.
-- A clean tenant-onboarding model that ties Microsoft tenant consent, Google Workspace allowlist, or SAML federation to a knobby.io Organization record.
+- First-class AI agent principals (per Access Control PRD).
+- A clean tenant-onboarding model where the application layer owns tenancy semantics.
 
 ### 2.3 Why Keycloak
 
-Keycloak is the established open-source identity broker with mature support for OIDC, SAML 2.0, social IdPs, multi-realm and (as of v26) multi-organization tenancy.
+Keycloak is the established open-source identity broker with mature support for OIDC and SAML 2.0. Its built-in support for upstream IdP federation is the value we want; its tenancy features (Organizations) are not.
 
 ---
 
 ## 3. Invariants
-
-These constraints are durable design commitments. Changes require an ADR.
 
 ### Invariant 1 — No local username/password authentication in production flows
 
@@ -78,7 +81,7 @@ The realm does not expose a username/password form. All human users authenticate
 
 ### Invariant 2 — Upstream IdP policies are authoritative for authentication assurance
 
-Keycloak does not enforce additional MFA, password policies, or session policies on top of what the upstream IdP requires. Whatever Google Workspace, Microsoft Entra, GitHub, or a customer's SAML IdP demands is what the user does. Keycloak brokers the result.
+Keycloak does not enforce additional MFA, password policies, or session policies on top of what the upstream IdP requires.
 
 ### Invariant 3 — Users never see Keycloak
 
@@ -94,11 +97,15 @@ Every upstream IdP integration (Google OAuth client, Microsoft Entra app registr
 
 ### Invariant 6 — Convention-based naming
 
-All Keycloak resources and associated secrets follow a deterministic naming convention so that automation, scripts, runbooks, and human operators can derive any name from the environment alone. See §10.8 for the full naming table.
+All Keycloak resources and associated secrets follow a deterministic naming convention so that automation, scripts, runbooks, and human operators can derive any name from the environment alone. See §10.8.
 
 ### Invariant 7 — Realm configuration as code
 
-Once the OpenTofu IaC for realm setup is in place (per §13), manual changes to realm configuration through the Keycloak admin console are not permitted in `prod` or `dev`. All realm configuration changes flow through the IaC repository with code review.
+Once the OpenTofu IaC for realm setup is in place (per §13), manual changes to realm configuration through the Keycloak admin console are not permitted in `prod` or `dev`.
+
+### Invariant 8 — Tenancy lives in knobby.io, not Keycloak
+
+knobby.io's application data model is the single source of truth for organizations, organization membership, customer↔IdP mapping, tenant connection state, and consent state. Keycloak does not use its Organizations feature. The realm is purely an IdP broker.
 
 ---
 
@@ -127,6 +134,7 @@ Once the OpenTofu IaC for realm setup is in place (per §13), manual changes to 
                │                                │
    ┌───────────▼────────────┐         ┌─────────▼────────────┐
    │  knobby.io (prod)      │         │  knobby.io (dev)     │
+   │  • Tenancy owner       │         │  • Tenancy owner     │
    └────────────────────────┘         └──────────────────────┘
 
    ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
@@ -142,32 +150,35 @@ Once the OpenTofu IaC for realm setup is in place (per §13), manual changes to 
                        └────────────────────────────┘
 ```
 
-**Production-facing topology:** one Keycloak instance hosted at `https://auth.knobby.io` serves both the `knobby-prod` and `knobby-dev` realms. Trade-off: lower infra cost, shared upgrade cycle.
+**Production-facing topology:** one Keycloak instance hosted at `https://auth.knobby.io` serves both the `knobby-prod` and `knobby-dev` realms.
 
-**Test environment:** developer-local Keycloak via Docker Compose. See §11.17.
+**Test environment:** the `knobby-test` realm runs on each developer's local machine.
 
 ### 4.2 Component Responsibilities
 
 **Keycloak**
 - Terminates federation to upstream IdPs.
-- Maintains the canonical federated user record.
-- Issues OIDC tokens.
-- Exposes Admin REST API.
+- Maintains the canonical federated user record (one per (subject, IdP) pair, linked via email).
+- Issues OIDC tokens to knobby.io's web client.
+- Exposes Admin REST API for user lookup and IdP CRUD.
 - Hosts SAML SP metadata endpoint.
+- Does **not** manage organizations or tenancy.
 
 **knobby.io frontend**
 - Renders the login screen with IdP buttons (Google, Microsoft, GitHub, "Enterprise SSO").
 - Initiates OIDC Authorization Code + PKCE flow against Keycloak with `kc_idp_hint=<alias>`.
-- Renders all account, profile, and tenant management UI.
+- Renders all account, profile, organization, and tenant management UI.
 - Renders the enterprise admin onboarding flow.
 - Handles logout via RP-initiated logout.
 
-**knobby.io backend (ASP.NET Core)**
+**knobby.io backend**
 - Validates OIDC tokens.
-- Calls Keycloak Admin REST API.
-- Maps Keycloak `sub` to knobby.io user identity.
+- Calls Keycloak Admin REST API for user CRUD and IdP CRUD operations.
+- Maps Keycloak `sub` to knobby.io user identity (application persistence).
+- Owns the organization data model and organization↔user membership.
+- Owns the customer↔IdP-alias mapping (which Keycloak SAML IdP alias corresponds to which knobby.io Organization).
+- Owns tenant-connection state (Microsoft consent records, Google Workspace connections, SAML IdP connections).
 - Enforces RBAC/FGAC per the Access Control PRD.
-- Owns tenant-connection state.
 
 **Agent runtime (future)**
 - Authenticates via OAuth 2.0 Client Credentials with a per-agent client.
@@ -175,18 +186,18 @@ Once the OpenTofu IaC for realm setup is in place (per §13), manual changes to 
 ### 4.3 Data Flow — Human Login (happy path)
 
 1. User opens `knobby.io`. App renders login screen.
-2. User clicks "Sign in with Google" (or Microsoft / GitHub / Enterprise SSO). Frontend navigates to Keycloak's authorize endpoint with `kc_idp_hint=google`.
-3. Keycloak 302s to Google. No Keycloak HTML rendered.
+2. User clicks "Sign in with Google" (or Microsoft / GitHub / Enterprise SSO). Frontend navigates to Keycloak's authorize endpoint with `kc_idp_hint=google` (or `microsoft-oidc`, `github`, `saml-<slug>`).
+3. Keycloak 302s to the IdP. No Keycloak HTML rendered.
 4. User authenticates at the IdP.
 5. IdP 302s back to Keycloak's broker endpoint with authorization code.
 6. Keycloak exchanges the code, reads identity claims.
 7. Keycloak runs First Broker Login flow: looks up federated user; creates if needed.
-8. Keycloak 302s back to `https://knobby.io/auth/callback?code=...&state=...`.
-9. knobby.io backend exchanges Keycloak's code for tokens, validates, establishes session.
+8. Keycloak 302s back to `https://prod.knobby.io/auth/callback?code=...&state=...`.
+9. knobby.io backend exchanges Keycloak's code for tokens, validates them, looks up the application user by `sub`, determines org context from its own data, establishes session.
 
 ### 4.4 Data Flow — Logout
 
-RP-initiated logout from knobby.io frontend, hits Keycloak end-session endpoint with `id_token_hint` and `post_logout_redirect_uri`. Keycloak terminates session, 302s back. Upstream IdP session is not terminated.
+RP-initiated logout from knobby.io frontend; hits Keycloak end-session endpoint; Keycloak terminates session and 302s back. Upstream IdP session is not terminated.
 
 ### 4.5 Data Flow — Enterprise Tenant Onboarding
 
@@ -196,13 +207,22 @@ See §12.
 
 ## 5. Tenant Model
 
-### 5.1 Recommendation: Keycloak Organizations (GA in 26)
+### 5.1 Decision: Application-layer tenancy
 
-One realm contains multiple Organizations. Each Organization has its own brokered IdPs, its own membership, and (optionally) its own theme. Users can belong to one or more Organizations.
+Tenancy lives in knobby.io's application data model. Keycloak does not use its Organizations feature.
 
-**Rationale:** knobby.io's customer-organization model maps directly to Keycloak Organizations.
+**Rationale:**
+- knobby.io already has a first-class Organization concept in its data model (existed before this PRD).
+- Duplicating that concept in Keycloak would require ongoing synchronization between two data stores.
+- Keycloak's Organizations feature is relatively new (GA in 26.0) with known gaps (fine-grained admin permissions for Organizations not yet broken out in 26.x; known bugs interacting with the existing realm-management role surface).
+- Invariant 3 says users never see Keycloak — there's no UX value in Keycloak Organizations for our use case.
+- The only Keycloak feature where Organizations seemed to add value (domain-based home discovery) is handled in the knobby.io frontend anyway (§12.9 Strategy B).
 
-**Constraint:** lock in before onboarding the first enterprise SAML customer.
+**Mechanics:**
+- Per-customer SAML IdPs registered at the realm level with naming pattern `saml-<customer-slug>` (per §6.5 and §10.8). No link to a Keycloak Organization.
+- knobby.io's data model maintains the mapping from Keycloak IdP alias to knobby.io Organization (see §12 persistence requirements).
+- Organization membership for users is determined by knobby.io on token validation (look up user by `sub`, determine org from application data).
+- Tokens issued by Keycloak do not include an `org` claim; org context is derived in knobby.io after token validation.
 
 ---
 
@@ -211,7 +231,7 @@ One realm contains multiple Organizations. Each Organization has its own brokere
 ### 6.1 Common Configuration (all IdPs)
 
 For every IdP added to a realm:
-- **Alias** is stable and lowercase (used in `kc_idp_hint`).
+- **Alias** is stable, lowercase, follows the per-IdP convention in §10.8. Once set, the alias is immutable (Keycloak constraint) — choose carefully.
 - **Sync Mode** = `force`.
 - **Trust Email** = `On` (with per-IdP override for low-trust sources).
 - **First Login Flow** = `first-broker-login-no-prompt` (custom; see §7). **Applies to every IdP — Google, Microsoft, GitHub, and every SAML entry.**
@@ -234,12 +254,18 @@ For every IdP added to a realm:
 
 **Account types:** work/school accounts from any Entra tenant (enterprise) + personal Microsoft accounts (social). One Keycloak IdP entry handles both via Microsoft's `common` endpoint.
 
-**Implementation:** generic **OpenID Connect v1.0** provider type — not the built-in "Microsoft" provider.
+**Implementation:** generic **OpenID Connect v1.0** provider type — not the built-in "Microsoft" provider (which is hardcoded for single-tenant).
 
-**Per-environment Entra app registrations** (multi-tenant + personal account support enabled):
-- Prod: `knobby.io Keycloak Broker`
+**Alias convention:** `microsoft-oidc` (the `-oidc` suffix disambiguates from the unused built-in `microsoft` provider and makes it explicit that this is the generic OIDC connector). Aliases are immutable in Keycloak, so this name persists.
+
+**Per-environment Entra app registrations:**
+- Prod: `knobby.io Keycloak Broker` (no env suffix; this name appears on customer admin consent screens)
 - Dev: `knobby.io Keycloak Broker (dev)`
 - Test: `knobby.io Keycloak Broker (test - {developer-name})`
+
+**Capitalization:** the official spelling is `Keycloak` (capital K, lowercase c). `KeyCloak` is a common but incorrect rendering — customer admins reading the consent screen notice these things. Get it right at registration time; it cannot be changed without re-registering.
+
+**Supported account types** in each Entra app: "Accounts in any organizational directory and personal Microsoft accounts."
 
 **Discovery endpoint:** `https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration`.
 
@@ -249,26 +275,27 @@ For every IdP added to a realm:
 
 **Personal-account differentiation:** `tid` claim. Personal MSAs have `tid=9188040d-6c67-4c5b-b112-36a304b66dad`.
 
-**Client secrets:** `knobby-entra-broker-client-secret-{env}`.
+**Client secrets:** `knobby-entra-broker-client-secret-{env}`. Secret description in Entra: `keycloak-broker-{env}`.
 
-**Publisher verification:** see §10.7. Mitigated by the admin consent flow (§12).
+**Publisher domain:** `knobby.io` (the company's primary domain — same value for all environments because the publisher is the company, not the deployment). Requires Microsoft Publisher Verification — see §10.7. Requires hosting `https://knobby.io/.well-known/microsoft-identity-association.json` at the apex.
 
 **Trust posture:**
 - Work/school accounts: equivalent trust tier to Google Workspace.
-- Personal MSAs: lower trust tier. Rejected from enterprise-tier Organizations at the application authorization layer.
+- Personal MSAs: lower trust tier. Rejected from enterprise-tier organizations at the application authorization layer.
 
 ### 6.4 GitHub
 
-GitHub is a **lower-trust** IdP than Google or Microsoft work accounts. Used for individual contributors, developer-focused signups, and consumer-adjacent flows. Not the default for enterprise customer users.
+GitHub is a **lower-trust** IdP than Google or Microsoft work accounts.
 
 **Implementation:** built-in provider, alias `github`.
 
 **Per-environment GitHub OAuth Apps:**
 - Prod: `knobby.io`
 - Dev: `knobby.io (dev)`
-- Test: `knobby.io (test - {developer-name})` — per-developer apps
+- Test: `knobby.io (test - {developer-name})`
 
 **Configuration on GitHub** (Developer Settings → OAuth Apps → New OAuth App):
+
 | Field | Prod | Dev | Test |
 |-------|------|-----|------|
 | Application name | `knobby.io` | `knobby.io (dev)` | `knobby.io (test - {dev-name})` |
@@ -278,23 +305,24 @@ GitHub is a **lower-trust** IdP than Google or Microsoft work accounts. Used for
 
 **Scopes:** `user:email read:user`.
 
-**Email handling caveat:** GitHub users can hide their email. Configure an attribute mapper that pulls the primary verified email from `/user/emails`. If still null after all mappers, the user can't federate via GitHub — treated as a profile data error, acceptable for an optional social IdP.
+**Email handling caveat:** GitHub users can hide their email. Configure an attribute mapper that pulls the primary verified email from `/user/emails`. If still null after all mappers, the user can't federate via GitHub.
 
-**Trust Email:** On (GitHub verifies primary email).
+**Trust Email:** On.
 
 **Client secrets:** `knobby-github-oauth-client-secret-{env}`.
 
 ### 6.5 Enterprise SAML 2.0 (per customer organization)
 
-- One SAML IdP entry per Organization. Alias pattern `saml-<org-slug>`.
+- One SAML IdP entry per customer. Alias pattern `saml-<customer-slug>`.
 - Configuration imported from customer-supplied SAML metadata XML.
+- Registered at the realm level (no Keycloak Organization linkage per Invariant 8).
 - knobby.io's SP entity ID per env:
   - Prod: `https://auth.knobby.io/realms/knobby-prod`
   - Dev: `https://auth.knobby.io/realms/knobby-dev`
-- ACS URL: `<SP-entity-id>/broker/saml-<org-slug>/endpoint`.
+- ACS URL: `<SP-entity-id>/broker/saml-<customer-slug>/endpoint`.
 - NameID format: `emailAddress` preferred.
 - Signed AuthnRequests and signed assertions required.
-- Linked to a Keycloak Organization to scope membership.
+- knobby.io's application data maintains the mapping from IdP alias to knobby.io Organization (§12).
 
 ---
 
@@ -325,11 +353,13 @@ All Required Actions set to **Default = Off**.
 
 ## 8. knobby.io ↔ Keycloak Integration (Application Implementation Reference)
 
-This section is the authoritative reference for the knobby.io application's integration with Keycloak. An implementer (including Claude Code) should be able to build the knobby.io auth layer from this section alone, consulting §10.8 for naming.
+This section is the authoritative reference for the knobby.io application's integration with Keycloak.
+
+**Implementation note throughout:** this section describes the *integration contract* — what Keycloak provides and what knobby.io must do with it. It does not prescribe knobby.io's internal data model. References to "knobby.io persists X" or "knobby.io's user record" are about *requirements*; the actual schema, table names, and column types are at the implementer's discretion and should align with the existing knobby.io codebase. Consult the codebase before assuming new persistence layers are needed.
 
 ### 8.1 Per-Environment URL & ID Reference
 
-All URLs and identifiers needed for app configuration, parameterized by `{env}` ∈ `{prod, dev, test}`. Examples shown for prod.
+All URLs and identifiers needed for app configuration, parameterized by `{env}` ∈ `{prod, dev, test}`.
 
 **Base URLs:**
 
@@ -338,7 +368,7 @@ All URLs and identifiers needed for app configuration, parameterized by `{env}` 
 | Keycloak base URL | `https://auth.knobby.io` | `http://localhost:8080` |
 | Realm name | `knobby-{env}` | `knobby-test` |
 | OIDC issuer | `https://auth.knobby.io/realms/knobby-{env}` | `http://localhost:8080/realms/knobby-test` |
-| OIDC discovery (well-known) | `<issuer>/.well-known/openid-configuration` | (same pattern) |
+| OIDC discovery | `<issuer>/.well-known/openid-configuration` | (same pattern) |
 | Authorization endpoint | `<issuer>/protocol/openid-connect/auth` | (same) |
 | Token endpoint | `<issuer>/protocol/openid-connect/token` | (same) |
 | Userinfo endpoint | `<issuer>/protocol/openid-connect/userinfo` | (same) |
@@ -346,19 +376,21 @@ All URLs and identifiers needed for app configuration, parameterized by `{env}` 
 | End-session endpoint | `<issuer>/protocol/openid-connect/logout` | (same) |
 | Admin REST API base | `<keycloak-base>/admin/realms/knobby-{env}` | (same pattern) |
 
-**knobby.io application URLs** (registered as Valid Redirect URIs / Valid Post-Logout URIs on the `knobby-{env}-web` client):
+**knobby.io application URLs** (registered as Valid Redirect URIs / Valid Post-Logout URIs on `knobby-{env}-web`):
+
+**Deployment topology note:** apex `knobby.io` and `www.knobby.io` are marketing/publisher surfaces only — the actual prod application is deployed at `prod.knobby.io`. Dev application is at `dev.knobby.io`. This split keeps the marketing brand at the apex (where it's expected for SEO, customer trust, and Microsoft publisher domain verification) and the app at a subdomain.
 
 | Purpose | Prod | Dev | Test |
 |---------|------|-----|------|
-| Sign-in callback | `https://knobby.io/auth/callback` | `https://dev.knobby.io/auth/callback` | `http://localhost:3000/auth/callback` |
-| Post-logout landing | `https://knobby.io/` | `https://dev.knobby.io/` | `http://localhost:3000/` |
-| Front-channel logout | `https://knobby.io/auth/frontchannel-logout` | `https://dev.knobby.io/auth/frontchannel-logout` | `http://localhost:3000/auth/frontchannel-logout` |
-| Back-channel logout | `https://knobby.io/auth/backchannel-logout` | `https://dev.knobby.io/auth/backchannel-logout` | `http://localhost:3000/auth/backchannel-logout` |
-| Microsoft admin consent callback | `https://knobby.io/auth/microsoft/admin-consent-callback` | `https://dev.knobby.io/auth/microsoft/admin-consent-callback` | `http://localhost:3000/auth/microsoft/admin-consent-callback` |
+| Sign-in callback | `https://prod.knobby.io/auth/callback` | `https://dev.knobby.io/auth/callback` | `http://localhost:3000/auth/callback` |
+| Post-logout landing | `https://prod.knobby.io/` | `https://dev.knobby.io/` | `http://localhost:3000/` |
+| Front-channel logout | `https://prod.knobby.io/auth/frontchannel-logout` | `https://dev.knobby.io/auth/frontchannel-logout` | `http://localhost:3000/auth/frontchannel-logout` |
+| Back-channel logout | `https://prod.knobby.io/auth/backchannel-logout` | `https://dev.knobby.io/auth/backchannel-logout` | `http://localhost:3000/auth/backchannel-logout` |
+| Microsoft admin consent callback | `https://prod.knobby.io/auth/microsoft/admin-consent-callback` | `https://dev.knobby.io/auth/microsoft/admin-consent-callback` | `http://localhost:3000/auth/microsoft/admin-consent-callback` |
 
 ### 8.2 OIDC Client Configuration
 
-The `knobby-{env}-web` client in Keycloak has these settings (configured per §11.4):
+The `knobby-{env}-web` client in Keycloak has these settings:
 
 | Setting | Value |
 |---------|-------|
@@ -369,10 +401,10 @@ The `knobby-{env}-web` client in Keycloak has these settings (configured per §1
 | Direct access grants | Disabled |
 | Implicit / hybrid flows | Disabled |
 | PKCE | `S256`, required |
-| Front-channel logout | Enabled |
-| Back-channel logout | Enabled, session required |
+| Front-channel logout | Disabled (browser iframes unreliable under modern third-party cookie policy; back-channel is authoritative) |
+| Back-channel logout | Enabled, session required, URL set per §8.1 |
 
-The client secret is in `knobby-keycloak-web-client-secret-{env}` (GCP Secrets Manager for prod/dev, `.env` for test).
+The client secret is in `knobby-keycloak-web-client-secret-{env}`.
 
 ### 8.3 Token Claims Contract
 
@@ -384,23 +416,44 @@ The ID token and access token issued by Keycloak to the `knobby-{env}-web` clien
 | `aud` | string | Keycloak | Equals `knobby-{env}-web`. Validate. |
 | `exp` | int (unix) | Keycloak | Validate. |
 | `iat` | int (unix) | Keycloak | Issuance time. |
-| `sub` | string (UUID) | Keycloak | Stable knobby.io user identifier. Primary key for user records. |
-| `email` | string | IdP (via Keycloak) | Verified email. |
+| `sub` | string (UUID) | Keycloak | Stable knobby.io user identifier. The primary handle for user records. |
+| `email` | string | IdP via Keycloak | Verified email. |
 | `email_verified` | bool | IdP | Always `true` in normal flow (per Invariant 2). |
 | `name` | string | IdP | Display name. |
 | `given_name` | string | IdP | First name. May be missing for some IdPs. |
 | `family_name` | string | IdP | Last name. Same caveat. |
 | `preferred_username` | string | Keycloak | Usually equals `email`. |
-| `org` | string or array | Keycloak | Organization ID(s) the user belongs to. Source claim for tenant scoping. |
-| `idp` | string | Keycloak | Alias of the IdP that authenticated this session: `google`, `microsoft`, `github`, or `saml-<slug>`. |
-| `microsoftTenantId` | string (UUID) | Microsoft via Keycloak | Only present when `idp=microsoft`. Equals `9188040d-6c67-4c5b-b112-36a304b66dad` for personal MSAs. |
-| `microsoftObjectId` | string (UUID) | Microsoft via Keycloak | Only when `idp=microsoft`. |
+| `idp` | string | Keycloak (session note) | Alias of the IdP that authenticated **this specific session**: `google`, `microsoft-oidc`, `github`, or `saml-<slug>`. **Session fact** — always reflects the current session. |
+| `microsoftTenantId` | string (UUID) | Microsoft via Keycloak (user attribute) | Microsoft tenant association persisted on the user record from the most recent Microsoft federation. **User fact, not session fact.** Equals `9188040d-6c67-4c5b-b112-36a304b66dad` for personal MSAs. Present in tokens for any session of a user who has ever federated via Microsoft — including sessions authenticated by a different IdP (e.g., Google), when the user has linked accounts by email. See trust rules below. |
+| `microsoftObjectId` | string (UUID) | Microsoft via Keycloak (user attribute) | Same persistence semantics as `microsoftTenantId`. |
+| `googleHd` | string (domain) | Google via Keycloak (user attribute) | Google Workspace hosted-domain association persisted on the user record from the most recent Google Workspace federation. **User fact, not session fact** (same semantics as `microsoftTenantId`). Absent for personal Gmail accounts (Google does not emit `hd` for non-Workspace users). |
+
+**Session facts vs. user facts.** The first-broker-login-no-prompt flow (§11.4) auto-links federated identities by email — one Keycloak user record can have Google, Microsoft, and GitHub federated identities all attached. Claims sourced from Keycloak session notes (`idp`) always tell the truth about the **current** session. Claims sourced from user attributes (`microsoftTenantId`, `microsoftObjectId`, and any future per-IdP attributes) reflect the **user's persistent associations**, which may have been set by a different IdP federation than the one driving the current session.
+
+**No `org` claim.** Organization context is determined by knobby.io after token validation, by looking up the user (by `sub`) against application data.
 
 **Trust rules for knobby.io backend:**
 - `sub` is the stable user identifier. Never trust `email` alone for user lookup.
-- Use `idp` + application policy to gate joining enterprise Organizations (e.g., reject `idp=github` from joining an enterprise tier).
-- Use `microsoftTenantId` to differentiate enterprise vs. personal Microsoft accounts.
-- `org` is for routing within knobby.io; the Zanzibar layer enforces authorization.
+- `idp` is authoritative for the current session's authentication source. Use it for any session-scoped authorization decision.
+- **`microsoftTenantId` must be combined with `idp == "microsoft-oidc"` for any session-scoped tenant authorization.** Trusting it without first checking `idp` would grant a user signed in via Google the privileges associated with their Microsoft tenant association — an authorization bug. Concretely:
+
+```csharp
+// CORRECT: trust microsoftTenantId only when the current session is Microsoft
+if (claims["idp"] == "microsoft-oidc"
+    && claims.TryGetValue("microsoftTenantId", out var tenantId))
+{
+    // Apply tenant-scoped logic
+}
+
+// WRONG: microsoftTenantId might be a stale association from a prior session
+if (claims.TryGetValue("microsoftTenantId", out var tenantId))
+{
+    // This branch can run for a Google session of a user with a Microsoft history
+}
+```
+
+- Use `idp` + application policy to gate joining enterprise-tier organizations (e.g., reject `idp=github` from joining an enterprise tier).
+- Operations that are inherently Microsoft-scoped by their entry point (e.g., the admin consent callback flow — §12.4) can safely use `microsoftTenantId` without the `idp` check, since the entry point guarantees the session is Microsoft. Document this assumption at every such call site.
 
 ### 8.4 ASP.NET Core 10 Integration Pattern
 
@@ -411,7 +464,7 @@ knobby.io's backend integrates with Keycloak via the standard OpenID Connect mid
 - `Microsoft.AspNetCore.Authentication.JwtBearer`
 - `Microsoft.IdentityModel.Tokens`
 
-**Configuration model** (`KeycloakOptions.cs`):
+**Configuration model** (e.g., `KeycloakOptions.cs`):
 
 ```csharp
 public class KeycloakOptions
@@ -466,7 +519,6 @@ builder.Services.AddAuthentication(options =>
     options.Scope.Add("openid");
     options.Scope.Add("profile");
     options.Scope.Add("email");
-    options.Scope.Add("organization");
 
     options.TokenValidationParameters = new TokenValidationParameters
     {
@@ -484,13 +536,26 @@ builder.Services.AddAuthentication(options =>
     {
         OnTokenValidated = async context =>
         {
+            // Required behavior:
+            //   1. Read sub, email, idp claims from the validated principal.
+            //   2. Look up or create the application-layer user record keyed by sub.
+            //   3. Determine the user's organization context from application data
+            //      (NOT from a Keycloak claim — see §5.1 and §8.3).
+            //   4. Apply application policy (e.g., reject idp=github from
+            //      joining enterprise-tier orgs).
+            //
+            // Implementation note: the user-lookup and org-context-derivation
+            // mechanics are application-specific. Use knobby.io's existing user
+            // persistence and organization-membership conventions; consult the
+            // codebase before introducing new tables or service interfaces.
             var sub = context.Principal.FindFirst("sub")?.Value;
             var idp = context.Principal.FindFirst("idp")?.Value;
-            var orgClaim = context.Principal.FindFirst("org")?.Value;
-            // synchronize with knobby.io user table; populate org context
+            // ... lookup/create application user, attach org context to claims principal
         },
         OnRedirectToIdentityProvider = context =>
         {
+            // Forward kc_idp_hint from query string (e.g., set by the "Sign in
+            // with Microsoft" button on the knobby.io login page).
             if (context.HttpContext.Request.Query.TryGetValue("idp", out var idp))
             {
                 context.ProtocolMessage.SetParameter("kc_idp_hint", idp);
@@ -527,11 +592,11 @@ knobby.io's backend must expose:
 
 **`GET /auth/callback`** — OIDC sign-in callback. Receives `code`, `state`. ASP.NET OIDC middleware handles automatically.
 
-**`GET /auth/logout-callback`** — post-logout callback. ASP.NET OIDC middleware handles.
+**`GET /auth/logout-callback`** — post-logout callback.
 
 **`POST /auth/backchannel-logout`** — Keycloak-initiated back-channel logout. Receives a `logout_token` JWT. knobby.io validates the signature against the JWKS and the `sid` claim, then invalidates the local session. Implement explicitly. Reference: OIDC Back-Channel Logout 1.0 spec.
 
-**`GET /auth/frontchannel-logout`** — Keycloak-initiated front-channel logout. Rendered in a hidden iframe by Keycloak's logout page. Should invalidate the user's session and return 200 OK.
+**`GET /auth/frontchannel-logout`** — Keycloak-initiated front-channel logout (hidden iframe).
 
 **`GET /auth/microsoft/admin-consent-callback`** — Microsoft admin consent return. See §12.4.
 
@@ -561,7 +626,7 @@ grant_type=client_credentials
 &client_secret=<from knobby-keycloak-admin-api-client-secret-{env}>
 ```
 
-**Common operations** (`<base>` = `https://auth.knobby.io/admin/realms/knobby-{env}`):
+**Operations** (`<base>` = `https://auth.knobby.io/admin/realms/knobby-{env}`):
 
 | Operation | Method | URL |
 |-----------|--------|-----|
@@ -569,20 +634,17 @@ grant_type=client_credentials
 | Find user by email | GET | `<base>/users?email={email}&exact=true` |
 | Update user attributes | PUT | `<base>/users/{sub}` |
 | Delete user | DELETE | `<base>/users/{sub}` |
-| List organizations | GET | `<base>/organizations` |
-| Get organization | GET | `<base>/organizations/{org-id}` |
-| Create organization | POST | `<base>/organizations` |
-| Add user to organization | POST | `<base>/organizations/{org-id}/members` |
-| List org members | GET | `<base>/organizations/{org-id}/members` |
-| Remove user from org | DELETE | `<base>/organizations/{org-id}/members/{sub}` |
 | List user sessions | GET | `<base>/users/{sub}/sessions` |
 | Revoke specific session | DELETE | `<base>/sessions/{session-id}` |
 | Revoke all user sessions | POST | `<base>/users/{sub}/logout` |
 | List identity providers | GET | `<base>/identity-provider/instances` |
 | Provision per-customer SAML IdP | POST | `<base>/identity-provider/instances` |
-| Link IdP to organization | POST | `<base>/organizations/{org-id}/identity-providers` |
+| Get specific IdP | GET | `<base>/identity-provider/instances/{alias}` |
+| Delete an IdP | DELETE | `<base>/identity-provider/instances/{alias}` |
 
-Full API: https://www.keycloak.org/docs-api/latest/rest-api/.
+**No Organizations operations** — Keycloak Organizations is not used (per §5.1 / Invariant 8). Customer↔IdP mapping is persisted in knobby.io's application data, not via Keycloak Organization membership.
+
+Full Keycloak Admin REST API documentation: https://www.keycloak.org/docs-api/latest/rest-api/.
 
 ### 8.8 Account Console Disablement
 
@@ -590,35 +652,19 @@ Both built-in account clients disabled per realm:
 - `account` — Enabled = Off
 - `account-console` — Enabled = Off
 
-URLs return 404 / unauthorized.
-
 ### 8.9 AI Agent Authentication (future, parked)
 
-Per the Access Control PRD. Realm must remain compatible.
+Per the Access Control PRD.
 
 ---
 
 ## 9. Theming
 
-Keycloak's user-facing fallback pages (rendered when `kc_idp_hint` is missing, on errors, on logout confirmation, on session expiry, on account linking) are themed to match knobby.io's design system using **Keycloakify** — a React + TypeScript toolchain that transpiles to Keycloak's expected FreeMarker theme format.
+Per Invariant 3, Keycloak's rare user-facing fallback pages (no `kc_idp_hint`, errors, logout confirmation, session expiry, account linking) are themed to match knobby.io using **Keycloakify**.
 
-**All detailed setup, customization, build, and deployment instructions for the theme are in the companion document `KEYCLOAK_THEMING_GUIDE.md`.** This includes:
+**All detailed setup, customization, build, and deployment instructions are in the companion document `KEYCLOAK_THEMING_GUIDE.md`.**
 
-- Keycloakify project setup and dependencies.
-- Project structure within the knobby.io frontend repository.
-- Design system integration (sharing tokens and components with the main knobby.io frontend).
-- Page-by-page customization (login fallback, error pages, logout, session expired, account linking).
-- Internationalization.
-- Building the theme JAR.
-- Deploying to Keycloak via Docker image baking or providers-directory drop.
-- Local development workflow against the `knobby-test` realm.
-- CI/CD pipeline integration.
-- Common gotchas (FreeMarker fallback, theme caching, resource paths).
-
-Pages explicitly **not** themed:
-- Account console — disabled per §8.8.
-- Admin console — internal-only, default `keycloak.v2` theme acceptable.
-- Registration / forgot password — disabled per Invariant 1.
+Pages **not** themed: Account Console (disabled), Admin Console (internal-only), Registration/Forgot Password (disabled per Invariant 1).
 
 ---
 
@@ -626,7 +672,7 @@ Pages explicitly **not** themed:
 
 ### 10.1 Availability
 
-Keycloak is tier-zero. Run on Cloud Run with `min-instances=2`. Postgres backend on Supabase with HA. Since prod and dev share one instance, all realm configuration changes flow through the OpenTofu IaC (§13); Keycloak version upgrades are tested in the dev realm in the same instance before effects reach prod.
+Keycloak is tier-zero. Run on Cloud Run with `min-instances=2`. Postgres backend on Supabase with HA. Shared prod+dev instance means realm configuration changes flow through OpenTofu IaC (§13) and Keycloak version upgrades are tested in the dev realm in the same instance before reaching prod.
 
 ### 10.2 Token Lifetimes
 
@@ -634,11 +680,11 @@ Per §8.6.
 
 ### 10.3 Logout Coordination
 
-RP-initiated logout from knobby.io frontend. Back-channel logout from Keycloak to knobby.io backend. Upstream IdP logout is not initiated by Keycloak by default.
+RP-initiated logout from knobby.io frontend. Back-channel logout from Keycloak to knobby.io backend. Upstream IdP logout is not initiated by Keycloak.
 
 ### 10.4 Break-Glass Admin
 
-Break-glass admin lives in the master realm with YubiKey-backed TOTP. Username/password authentication remains enabled for the master realm only.
+Break-glass admin lives in the master realm with YubiKey-backed TOTP.
 
 ### 10.5 Secrets Management
 
@@ -648,7 +694,7 @@ All secrets follow the convention `knobby-<system>-<purpose>-<credential-type>-{
 |-------------|---------|--------|
 | `knobby-keycloak-admin-api-client-secret-{env}` | knobby.io backend → Keycloak Admin REST API | Keycloak: `knobby-{env}-admin-api` client credentials |
 | `knobby-keycloak-web-client-secret-{env}` | knobby.io backend → Keycloak token endpoint | Keycloak: `knobby-{env}-web` client credentials |
-| `knobby-entra-broker-client-secret-{env}` | Keycloak → Microsoft Entra (broker auth) | Entra app registration: client secret |
+| `knobby-entra-broker-client-secret-{env}` | Keycloak → Microsoft Entra (broker auth) | Entra app registration: client secret (description: `keycloak-broker-{env}`) |
 | `knobby-google-oauth-client-secret-{env}` | Keycloak → Google (broker auth) | Google Cloud OAuth client |
 | `knobby-github-oauth-client-secret-{env}` | Keycloak → GitHub (broker auth) | GitHub OAuth App |
 | `knobby-keycloak-db-password-{env}` | Keycloak → Postgres | Postgres user |
@@ -659,7 +705,26 @@ Keycloak emits events that feed the platform event bus: login success/failure, I
 
 ### 10.7 Microsoft Entra Publisher Verification
 
-Microsoft's risk-based step-up consent policy (effective November 2020) means newly registered multitenant apps without verified-publisher status face cross-tenant consent friction. Mitigated by the admin consent flow (§12). Start Microsoft AI Cloud Partner Program enrollment for prod; skip for dev/test.
+Microsoft's risk-based step-up consent policy (effective November 2020) means newly registered multitenant apps without verified-publisher status face cross-tenant consent friction. Mitigated by the admin consent flow (§12).
+
+**Prerequisite — host the publisher domain verification file:**
+
+Microsoft's verification process requires hosting a small JSON file at:
+
+```
+https://knobby.io/.well-known/microsoft-identity-association.json
+```
+
+with content provided by Microsoft during the verify step (an `associatedApplications` array with the Entra app's `applicationId`). This file proves ownership of `knobby.io` and authorizes the Entra app to claim it as publisher.
+
+Same publisherDomain (`knobby.io`) for both prod and dev Entra apps — the publisher is the company, not the deployment. The file only needs to exist once at the apex; both apps verify against the same file.
+
+**Hosting recommendation:** since the apex of `knobby.io` may not yet have a marketing site, the simplest path is a minimal Cloudflare Pages site (or Worker) serving at least `.well-known/microsoft-identity-association.json`. Same hosting later supports other `.well-known` files (Apple, security.txt, etc.).
+
+**Verification steps:**
+- Start Microsoft AI Cloud Partner Program enrollment (multi-day lead time).
+- Once Partner One ID is issued, submit publisher verification on the prod Entra app registration.
+- Skip for dev/test.
 
 ### 10.8 Naming Convention Reference
 
@@ -674,8 +739,12 @@ Authoritative table. The OpenTofu IaC (§13) reads from this table.
 | Keycloak hostname (test) | `localhost:8080` (HTTP) | `localhost:8080` |
 | Realm OIDC issuer (prod, dev) | `https://auth.knobby.io/realms/knobby-{env}` | `https://auth.knobby.io/realms/knobby-prod` |
 | Realm OIDC issuer (test) | `http://localhost:8080/realms/knobby-test` | `http://localhost:8080/realms/knobby-test` |
+| Google IdP alias | `google` | `google` |
+| Microsoft IdP alias | `microsoft-oidc` | `microsoft-oidc` |
+| GitHub IdP alias | `github` | `github` |
+| SAML IdP alias pattern | `saml-<customer-slug>` | `saml-acme-corp` |
 | Google broker redirect URI | `<issuer>/broker/google/endpoint` | `https://auth.knobby.io/realms/knobby-prod/broker/google/endpoint` |
-| Microsoft broker redirect URI | `<issuer>/broker/microsoft/endpoint` | `https://auth.knobby.io/realms/knobby-prod/broker/microsoft/endpoint` |
+| Microsoft broker redirect URI | `<issuer>/broker/microsoft-oidc/endpoint` | `https://auth.knobby.io/realms/knobby-prod/broker/microsoft-oidc/endpoint` |
 | GitHub broker redirect URI | `<issuer>/broker/github/endpoint` | `https://auth.knobby.io/realms/knobby-prod/broker/github/endpoint` |
 | Keycloak admin API secret | `knobby-keycloak-admin-api-client-secret-{env}` | `knobby-keycloak-admin-api-client-secret-prod` |
 | Keycloak web client secret | `knobby-keycloak-web-client-secret-{env}` | `knobby-keycloak-web-client-secret-prod` |
@@ -683,10 +752,18 @@ Authoritative table. The OpenTofu IaC (§13) reads from this table.
 | Google OAuth secret | `knobby-google-oauth-client-secret-{env}` | `knobby-google-oauth-client-secret-prod` |
 | GitHub OAuth secret | `knobby-github-oauth-client-secret-{env}` | `knobby-github-oauth-client-secret-prod` |
 | Keycloak DB password | `knobby-keycloak-db-password-{env}` | `knobby-keycloak-db-password-prod` |
-| knobby.io OIDC callback path | `/auth/callback` | (same per env) |
-| knobby.io backchannel logout path | `/auth/backchannel-logout` | (same per env) |
-| knobby.io MS admin consent callback | `/auth/microsoft/admin-consent-callback` | (same per env) |
-| Keycloak theme name (per §9) | `knobby` | `knobby` |
+| Entra app displayName (prod) | `knobby.io Keycloak Broker` (no env suffix; capital K, lowercase c in Keycloak) | `knobby.io Keycloak Broker` |
+| Entra app displayName (dev/test) | `knobby.io Keycloak Broker ({env}[ - {dev}])` | `knobby.io Keycloak Broker (dev)` |
+| Entra publisherDomain | `knobby.io` (same for all envs) | `knobby.io` |
+| Entra secret description | `keycloak-broker-{env}` | `keycloak-broker-prod` |
+| knobby.io app hostname (prod) | `prod.knobby.io` | `prod.knobby.io` |
+| knobby.io app hostname (dev) | `dev.knobby.io` | `dev.knobby.io` |
+| knobby.io app hostname (test) | `localhost:3000` | `localhost:3000` |
+| knobby.io marketing hostname | `knobby.io` (apex; also `www.knobby.io`) — used only as publisher domain identity, not for OAuth callbacks | `knobby.io` |
+| knobby.io OIDC callback URL | `https://{app-hostname}/auth/callback` | `https://prod.knobby.io/auth/callback` |
+| knobby.io backchannel logout URL | `https://{app-hostname}/auth/backchannel-logout` | `https://prod.knobby.io/auth/backchannel-logout` |
+| knobby.io MS admin consent callback | `https://{app-hostname}/auth/microsoft/admin-consent-callback` | `https://prod.knobby.io/auth/microsoft/admin-consent-callback` |
+| Keycloak theme name | `knobby` | `knobby` |
 
 ---
 
@@ -696,9 +773,9 @@ Currently manual; will be superseded by the OpenTofu IaC per §13 once available
 
 Prerequisites: Keycloak 26.x deployed; per-environment IdP credentials created per §10.8; for the theme, the `knobby` theme JAR baked into the Keycloak image per `KEYCLOAK_THEMING_GUIDE.md`.
 
-Execute in **dev first**, then **prod**. Test setup per §11.17 on each developer's machine.
+Execute in **dev first**, then **prod**. Test setup per §11.15 on each developer's machine.
 
-**Ordering note:** flows (§11.6–11.8) and Required Actions (§11.9) before IdPs (§11.10–11.13).
+**Ordering note:** flows (§11.4–11.6) and Required Actions (§11.7) before IdPs (§11.8–11.11).
 
 ### 11.1 Create the Realm
 
@@ -713,95 +790,245 @@ Execute in **dev first**, then **prod**. Test setup per §11.17 on each develope
 
 **Realm settings → Email tab:** Leave unconfigured.
 
-**Realm settings → Themes tab:** Login `keycloak` for now (will switch to `knobby` after theme is built per `KEYCLOAK_THEMING_GUIDE.md` and §11.16). Admin `keycloak.v2`.
+**Realm settings → Themes tab:** Login `keycloak` for now (will switch to `knobby` after theme is built per §11.14). Admin `keycloak.v2`.
 
 **Realm settings → Tokens tab:** Access Token 5 min; SSO Idle 30 min; SSO Max 10 hrs; Revoke Refresh Token On; Refresh Token Max Reuse 0.
 
 **Realm settings → Security defenses:** Brute Force Detection On; X-Frame-Options DENY; HSTS Max Age 31536000 (skip HSTS for test).
 
-### 11.3 Enable Organizations Feature
+**Organizations:** leave **Off** (per Invariant 8). The realm does not use Keycloak Organizations.
 
-1. Confirm Keycloak started with `--features=organization`.
-2. **Realm settings → General → Organizations**: On. Save.
-
-### 11.4 Create OIDC Web Client
+### 11.3 Create OIDC Web Client
 
 1. **Clients → Create client**. Client type: OIDC. Client ID: `knobby-{env}-web`.
 2. Client authentication: On. Authorization: Off. Standard flow only.
 3. Root URL, redirect URIs, post-logout URIs per §8.1.
 4. **Credentials tab:** copy secret to `knobby-keycloak-web-client-secret-{env}`.
-5. **Advanced tab:** PKCE S256. Front-channel logout On. Back-channel logout URL set. Back-channel logout session required On.
+5. **Settings tab → Logout settings (near bottom of Settings tab in Keycloak 26.x):**
+   - **Front channel logout: Off** (intentionally — browser third-party cookie policies make front-channel iframe logout unreliable; back-channel is the authoritative mechanism)
+   - Toggling Front channel logout to Off causes the panel to switch to back-channel fields. If they don't appear, that's a UI bug in your Keycloak version; fall back to the Admin REST API.
+   - Backchannel logout URL: per §8.1 (e.g., `https://prod.knobby.io/auth/backchannel-logout`)
+   - Backchannel logout session required: On (so the `logout_token` carries the `sid` claim, enabling precise session targeting)
+   - Backchannel logout revoke offline sessions: Off (this realm doesn't issue offline tokens to interactive users)
+6. **Advanced tab → Proof Key for Code Exchange Code Challenge Method:** `S256`.
 
-### 11.5 Configure Organizations & Token Claim
+### 11.3b Configure Protocol Mappers on `knobby-{env}-web`
 
-1. **Organizations → Create organization** (initial internal `knobby`).
-2. **Client scopes → Create client scope** named `organization`, type Default. Add Organization Membership mapper with token claim name `org` in ID/access/userinfo tokens.
-3. Assign the scope to `knobby-{env}-web`.
+Keycloak's default token output doesn't include the claims §8.3 specifies. Three mappers must be added to the client's dedicated client scope (`knobby-{env}-web-dedicated`) to produce the expected token shape.
 
-### 11.6 Create `first-broker-login-no-prompt` Authentication Flow
+**Navigation:** Clients → `knobby-{env}-web` → Client scopes tab → click `knobby-{env}-web-dedicated` → Mappers tab → Add mapper → By configuration.
 
-Duplicate `first broker login` flow. Disable Review Profile, Confirm Link, Verify Existing Account by Email, Verify Existing Account by Re-auth. Add Automatically Set Existing User → Required.
+**Mapper 1 — Audience** (fixes `aud=account` quirk; without this, the access_token's audience won't include the client and ASP.NET Core JWT validation will reject it):
 
-### 11.7 Create `browser-federated-only` Authentication Flow
+| Field | Value |
+|---|---|
+| Mapper Type | Audience |
+| Name | `knobby-{env}-web-audience` |
+| Included Client Audience | `knobby-{env}-web` |
+| Included Custom Audience | *(blank)* |
+| Add to ID token | Off (id_token's `aud` is set by OIDC protocol) |
+| Add to access token | **On** |
+| Add to lightweight access token | Off |
+| Add to token introspection | On |
 
-Duplicate `browser` flow. Identity Provider Redirector: Required, no default IdP. Forms subflow: Disabled.
+**Mapper 2 — `idp` claim** (User Session Note mapper that exposes which IdP brokered the user):
 
-### 11.8 Bind the Custom Browser Flow
+| Field | Value |
+|---|---|
+| Mapper Type | User Session Note |
+| Name | `idp-claim` |
+| User Session Note | `identity_provider` |
+| Token Claim Name | `idp` |
+| Claim JSON Type | String |
+| Add to ID token | **On** |
+| Add to access token | **On** |
+| Add to token introspection | On |
 
-Open `browser-federated-only` → Action menu → Bind flow → Browser flow → Save. (Bindings tab is gone in 26.x.)
+**Mapper 3 — `microsoftTenantId` claim** (User Attribute mapper; pairs with the `tid` Attribute Importer on the Microsoft IdP from §11.9):
 
-### 11.9 Configure Required Actions
+| Field | Value |
+|---|---|
+| Mapper Type | User Attribute |
+| Name | `microsoft-tenant-id-claim` |
+| User Attribute | `microsoftTenantId` |
+| Token Claim Name | `microsoftTenantId` |
+| Claim JSON Type | String |
+| Add to ID token | **On** |
+| Add to access token | **On** |
+| Add to userinfo | On |
+| Add to token introspection | On |
+| Multivalued | Off |
+| Aggregate attribute values | Off |
+
+This claim is present in tokens for any user who has **ever** federated via Microsoft (because the `microsoftTenantId` user attribute is persisted on their Keycloak user record). It is **not** a session-level claim — if the same user later signs in via Google with the same email, the auto-linking flow (§11.4) attaches the Google identity to the existing user, and tokens from that Google session will still carry `microsoftTenantId` from the prior Microsoft federation. See §8.3 trust rules for the application-level interpretation discipline this requires.
+
+**Mapper 4 — `googleHd` claim** (User Attribute mapper; pairs with the `hd` Attribute Importer on the Google IdP from §11.8):
+
+| Field | Value |
+|---|---|
+| Mapper Type | User Attribute |
+| Name | `google-hd-claim` |
+| User Attribute | `googleHd` |
+| Token Claim Name | `googleHd` |
+| Claim JSON Type | String |
+| Add to ID token | **On** |
+| Add to access token | **On** |
+| Add to userinfo | On |
+| Add to token introspection | On |
+| Multivalued | Off |
+| Aggregate attribute values | Off |
+
+Same user-fact-not-session-fact semantics as Mapper 3 — `googleHd` is persisted on the user record from any prior Google Workspace federation, so it can appear in tokens from non-Google sessions of cross-IdP-linked users. The §8.3 trust rules require combining `idp == "google"` AND `googleHd` for session-scoped tenant authorization.
+
+### 11.4 Create `first-broker-login-no-prompt` Authentication Flow
+
+Duplicate the built-in `first broker login` flow. The default flow's structure (with the sub-flows expanded) is roughly:
+
+```
+first broker login
+├── Review Profile                          [Required]
+└── User Creation Or Linking                [Required, sub-flow]
+    ├── Create User If Unique               [Alternative]
+    └── Handle Existing Account             [Alternative, sub-flow]
+        ├── Confirm Link Existing Account   [Required]
+        └── Account Verification Options    [Required, sub-flow]
+            ├── Verify Existing Account By Email           [Alternative]
+            └── Verify Existing Account By Re-auth         [Alternative]
+```
+
+Modify the duplicate so the final structure is:
+
+```
+first-broker-login-no-prompt
+├── Review Profile                          [Disabled]    ← change from Required
+├── Conditional 2FA                         [Disabled]    ← change from Conditional (Invariant 2: upstream IdP authoritative for MFA)
+├── Conditional Organization                [Disabled]    ← change from Conditional (Invariant 8: Keycloak Organizations not used)
+└── User Creation Or Linking                [Required, sub-flow]
+    ├── Create User If Unique               [Alternative]
+    └── Handle Existing Account             [Alternative, sub-flow]
+        ├── Automatically Set Existing User [Required]    ← ADD this step inside Handle Existing Account
+        ├── Confirm Link Existing Account   [Disabled]    ← change from Required
+        └── Account Verification Options    [Disabled, sub-flow]
+            ├── Verify Existing Account By Email           [Disabled]
+            └── Verify Existing Account By Re-auth         [Disabled]
+```
+
+**Notes on the Conditional sub-flows:**
+
+In Keycloak 26.x, the default `first broker login` flow includes two `Conditional` sub-flows that didn't exist in older versions: `Conditional 2FA` and `Conditional Organization`. "Conditional" means the sub-flow runs only if its inner `Condition - User Configured` step evaluates true. In our setup, both conditions would naturally evaluate false (we don't manage OTP at Keycloak; we don't use Organizations), so leaving them as Conditional would be functionally fine. **We still set them to Disabled** to make the architectural intent explicit — a future operator (or `tofu plan`) should not have to reason about whether some condition might fire; they should see "this is off" and move on.
+
+**Critical: `Automatically Set Existing User` must be added INSIDE the `Handle Existing Account` sub-flow, not at the top level.** This authenticator runs after a previous step has identified that an existing user matches the federated identity by email — it then auto-links without prompting. Placed at the top level for a brand-new federated login (no existing match yet), it has nothing to do and will fail the flow because it's Required.
+
+Resulting behavior:
+- **New user (no email match)**: `Create User If Unique` runs (Alternative), succeeds by creating a new user, the parent sub-flow completes. `Handle Existing Account` is skipped (Alternative-after-success).
+- **Existing user (email match)**: `Create User If Unique` runs, fails (user already exists), Keycloak tries the next Alternative which is `Handle Existing Account`. Inside that, `Automatically Set Existing User` auto-links the federated identity to the existing local user without prompting.
+
+Either path completes silently — that's the "no prompt" promise of the flow name.
+
+### 11.5 Create `browser-federated-only` Authentication Flow
+
+Duplicate the built-in `browser` flow. The picker UI (the IdP buttons) lives in the `login.ftl` template, which is rendered by the **Forms** authenticator. If Forms is Disabled, the template never renders and there is no picker — the flow fails with "Invalid username or password" when no IdP hint is supplied. So we keep Forms enabled but rely on the fact that no user in this realm has a password (every user is federated) to make username/password authentication impossible in practice.
+
+Final structure:
+
+```
+browser-federated-only
+├── Cookie                                [Alternative]
+├── Kerberos                              [Disabled]
+├── Identity Provider Redirector          [Alternative]   (was Required in default; Alternative lets Forms be the fallback)
+├── Browser - Conditional Organization    [Disabled]      (Invariant 8: Keycloak Organizations not used)
+└── Forms                                 [Alternative, sub-flow]
+    ├── Username Password Form            [Required]      (leave as-is; no user has a password, so this can never succeed)
+    └── Browser - Conditional OTP / 2FA   [Disabled]      (Invariant 2: upstream IdP authoritative for MFA)
+```
+
+Like in §11.4, the Conditional sub-flows in Keycloak 26.x's default browser flow would skip naturally at runtime (their inner Condition checks evaluate false in our setup). We disable them explicitly for the same reason: easier to audit, no implicit behavior to reason about.
+
+**How this routes:**
+- With `kc_idp_hint=<provider>` in the URL: Identity Provider Redirector succeeds by redirecting to that IdP. Flow ends. (This is the normal knobby.io-initiated path.)
+- Without any hint (fallback): Identity Provider Redirector returns ATTEMPTED (neutral — no hint, no default). Flow tries the next Alternative — Forms — which renders the standard Keycloak login template. That template includes the IdP buttons in the social section. User clicks one → goes through Identity Provider Login → federation proceeds. The username/password fields visible on the page are cosmetic dead weight; no user has a password to submit.
+- Until the Keycloakify theme is installed, the fallback page will show those visible-but-useless username/password fields alongside the IdP buttons. That's acceptable — clicking an IdP button works.
+
+### 11.5b Make `firstName` and `lastName` Optional in User Profile
+
+Keycloak 26.x's User Profile feature requires `firstName` and `lastName` on every user by default. Federated identities from upstream IdPs (especially Microsoft personal accounts) often omit these claims, which triggers a `UPDATE_PROFILE` required action that prompts the user with an "Update Account Information" form — a violation of Invariant 3 (users never see Keycloak).
+
+knobby.io stores user names in its own database (Invariant 8), so Keycloak doesn't need these fields. Make them optional:
+
+1. Realm settings → User Profile tab → Attributes
+2. Edit `firstName` → Permission → uncheck **Required** for both User and Admin contexts → Save
+3. Edit `lastName` → same change → Save
+
+After this, federated users with no name claims are created silently with empty `firstName`/`lastName`, and Keycloak does not prompt them.
+
+### 11.6 Bind the Custom Browser Flow
+
+Open `browser-federated-only` → Action menu → Bind flow → Browser flow → Save.
+
+### 11.7 Configure Required Actions
 
 All actions → Default Action Off (Configure OTP, Update Password, Update Profile, Verify Email, Verify Profile, Terms and Conditions, Delete Account, etc.).
 
-### 11.10 Add Google as IdP
+### 11.8 Add Google as IdP
 
 1. **Identity Providers → Add → Google.** Alias `google`.
 2. Client ID, Client Secret from `knobby-google-oauth-client-secret-{env}`.
 3. **Settings → Advanced:** Trust Email On, **First Login Flow `first-broker-login-no-prompt`**, Sync Mode `force`, Store Tokens Off, Hide on Login Page Off.
+4. **Mappers tab → Add mapper:**
 
-### 11.11 Add Microsoft Entra as IdP
+| Field | Value |
+|---|---|
+| Name | `google-hd` |
+| Sync Mode Override | `inherit` |
+| Mapper Type | Attribute Importer |
+| Claim | `hd` |
+| User Attribute Name | `googleHd` |
 
-Per §6.3 (full Entra app registration + Keycloak OIDC config + attribute mappers).
+This captures Google's `hd` (hosted domain) claim and stores it as user attribute `googleHd` on the Keycloak user record. Google emits `hd` only for Google Workspace accounts; personal Gmail logins don't set this attribute. The §11.3b client-side User Attribute mapper (Mapper 4) exposes this attribute as the `googleHd` token claim.
+
+### 11.9 Add Microsoft Entra as IdP
+
+Per §6.3. Configured via generic OpenID Connect v1.0 provider (not built-in Microsoft). **Alias: `microsoft-oidc`** (immutable once set — choose carefully).
 
 **Entra app registration:**
 1. Entra admin center → App registrations → New registration.
-2. Name per §6.3. Multitenant + personal MSAs.
-3. Redirect URI per §10.8.
-4. Client secret in Certificates & secrets → store as `knobby-entra-broker-client-secret-{env}`.
-5. API permissions: Graph delegated `openid`, `profile`, `email`, `offline_access`, `User.Read`. Grant admin consent.
-6. Branding: logo, publisher domain `knobby.io`, TOS, Privacy.
+2. Name per §6.3 / §10.8 — confirm spelling `Keycloak` (not `KeyCloak`); no env suffix on prod.
+3. Multitenant + personal MSAs ("Accounts in any organizational directory and personal Microsoft accounts").
+4. Redirect URI per §10.8 (`<issuer>/broker/microsoft-oidc/endpoint`).
+5. **Branding & properties:** add logo, **publisherDomain `knobby.io`** (NOT a per-env subdomain), TOS URL, Privacy URL.
+6. **Certificates & secrets → New client secret.** Description: `keycloak-broker-{env}`. Expiry 24 months. Store value as `knobby-entra-broker-client-secret-{env}`.
+7. **API permissions:** Microsoft Graph delegated → `openid`, `profile`, `email`, `offline_access`, `User.Read`. Grant admin consent.
+8. **Publisher domain verification:** before Microsoft can verify `knobby.io` as the publisher, the file `https://knobby.io/.well-known/microsoft-identity-association.json` must be hosted at the apex with the JSON contents Microsoft provides during verify. See §10.7.
 
 **Keycloak config:**
-7. Identity Providers → Add → OpenID Connect v1.0. Alias `microsoft`.
-8. Discovery endpoint: `https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration`.
-9. Client ID, secret from Entra. Default Scopes `openid profile email`.
-10. **Issuer field: empty** (multi-tenant `{tenantid}` placeholder workaround).
-11. Validate Signatures On. Use JWKS URL On. Allowed clock skew 0.
-12. Accepts prompt=none forward On.
-13. **Forwarded Query Parameters: `login_hint,domain_hint,prompt`**.
-14. Trust Email On. **First Login Flow `first-broker-login-no-prompt`**. Sync Mode `force`.
+9. Identity Providers → Add → OpenID Connect v1.0. **Alias `microsoft-oidc`**.
+10. Discovery endpoint: `https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration`.
+11. Client ID, secret from Entra (from steps 1 and 6).
+12. Default Scopes: `openid profile email`.
+13. **Issuer field: empty** (multi-tenant `{tenantid}` placeholder workaround).
+14. Validate Signatures On. Use JWKS URL On. Allowed clock skew 0.
+15. Accepts prompt=none forward On.
+16. **Forwarded Query Parameters: `login_hint,domain_hint,prompt`**.
+17. Trust Email On. **First Login Flow `first-broker-login-no-prompt`**. Sync Mode `force`.
 
 **Mappers:**
-15. Attribute Importer: claim `tid` → user attribute `microsoftTenantId`.
-16. Attribute Importer: claim `oid` → user attribute `microsoftObjectId`.
-17. Username Template Importer: template `${CLAIM.email}` (avoids `#EXT#` suffix for guest users).
+18. Attribute Importer: claim `tid` → user attribute `microsoftTenantId`.
+19. Attribute Importer: claim `oid` → user attribute `microsoftObjectId`.
+20. Username Template Importer: template `${CLAIM.email}` (avoids `#EXT#` suffix for guest users).
 
-### 11.12 Add GitHub as IdP
+### 11.10 Add GitHub as IdP
 
 **Prerequisite — GitHub OAuth App (per environment):**
 
 1. GitHub → Settings → Developer settings → OAuth Apps → New OAuth App.
-2. Configure per §6.4 (application name, homepage URL, authorization callback URL, Device Flow Off).
-3. Register application.
-4. On the app page, click **Generate a new client secret** → copy the value (shown once).
-5. Store as `knobby-github-oauth-client-secret-{env}`.
+2. Configure per §6.4.
+3. Register, generate client secret, store as `knobby-github-oauth-client-secret-{env}`.
 
 **Keycloak config:**
 
-6. **Identity Providers → Add → GitHub.** Alias `github`.
-7. Client ID and Client Secret from steps 1 and 5.
-8. **Settings tab → Advanced:**
+4. **Identity Providers → Add → GitHub.** Alias `github`.
+5. Client ID and Client Secret from steps 1 and 3.
+6. **Settings tab → Advanced:**
    - Default Scopes: `user:email read:user`
    - Trust Email: On
    - **First Login Flow: `first-broker-login-no-prompt`**
@@ -811,9 +1038,7 @@ Per §6.3 (full Entra app registration + Keycloak OIDC config + attribute mapper
 
 **Mapper:** Attribute Importer: claim `email` → user attribute `email`.
 
-**Verify:** Sign in via GitHub in incognito. Confirm `email` populated on the new federated user.
-
-### 11.13 Add Customer SAML IdP (template, per customer)
+### 11.11 Add Customer SAML IdP (template, per customer)
 
 Performed once per enterprise customer, ideally via Admin API automation. Manual:
 
@@ -823,28 +1048,46 @@ Performed once per enterprise customer, ideally via Admin API automation. Manual
 4. NameID policy format: `emailAddress`.
 5. Want AuthnRequests Signed On, Want Assertions Signed On, Validate Signature On.
 6. **First Login Flow: `first-broker-login-no-prompt`**. Sync Mode `force`.
-7. Link IdP to customer's Organization under Organizations → \<org\> → Identity providers.
+7. **No link to a Keycloak Organization** (Invariant 8). The mapping from this IdP alias to a knobby.io Organization is recorded in knobby.io's application data (see §12.10).
 
-### 11.14 Disable Account Console
+### 11.12 Disable Account Console
 
 Clients → `account-console` Enabled Off; `account` Enabled Off. Verify URLs return 404.
 
-### 11.15 Create Admin API Service Account Client
+### 11.13 Create Admin API Service Account Client
 
 1. **Clients → Create client.** Client ID: `knobby-{env}-admin-api`. Client authentication On. Service accounts roles On. All flows Off.
-2. **Service accounts roles tab → Assign role** → modal **Filter by clients** → search `realm-management` → assign: `view-users`, `manage-users`, `view-realm`, `query-users`, `query-groups`, `manage-organizations`, `view-organizations`, `manage-identity-providers`, `view-identity-providers`.
+2. **Service accounts roles tab → Assign role** → modal **Filter by clients** → search `realm-management` → assign the following client roles:
+
+   ```
+   view-users
+   manage-users
+   view-realm
+   view-clients
+   query-users
+   query-groups
+   view-identity-providers
+   manage-identity-providers
+   ```
+
 3. **Credentials tab:** copy secret to `knobby-keycloak-admin-api-client-secret-{env}`.
 
-### 11.16 Apply the knobby Theme
+**Notes on the role list:**
+- This list has evolved across PRD revisions. If updating an existing service account from an earlier PRD version, re-check that all the above roles are assigned (in particular `view-identity-providers`, `manage-identity-providers`, and `view-clients` were added in later revisions).
+- `view-clients` is read-only and is needed for: (a) the smoke test's client configuration validation (Tests 11–12), (b) future OpenTofu drift detection (`tofu plan` needs to read current client state), (c) general realm administration via the Admin API. It does not grant write access; the corresponding write role `manage-clients` is intentionally not assigned because knobby.io's backend does not manage clients at runtime — clients are static IaC.
+- **Do not assign** `view-organizations` or `manage-organizations` — these role names do not exist as standalone client roles in current Keycloak 26.x. Earlier PRD revisions listed them in error.
+- **Do not assign** `manage-realm` — not needed without Keycloak Organizations (which we don't use per §5.1 / Invariant 8). If a 403 surfaces from any Admin API call knobby.io makes, the fix is to identify the specific missing role from the realm-management role list, not to escalate to `manage-realm`.
+- **Do not assign** `manage-clients`, `create-client`, or `realm-admin` — over-privileged for our use case; the smoke test Test 12 will warn if any of these are present.
 
-After the `knobby` theme JAR has been built and deployed to Keycloak per `KEYCLOAK_THEMING_GUIDE.md` (sections on building and deploying):
+### 11.14 Apply the knobby Theme
+
+After the theme JAR has been built and deployed per `KEYCLOAK_THEMING_GUIDE.md`:
 
 1. **Realm settings → Themes → Login Theme:** select `knobby`.
-2. **Realm settings → Themes → Email Theme:** select `knobby` (if a custom email theme has been built).
-3. Save.
-4. Verify by hitting a fallback Keycloak-rendered page (e.g., the bare authorization endpoint without `kc_idp_hint`) and confirming the themed login renders.
+2. Save.
+3. Verify by hitting a fallback Keycloak-rendered page.
 
-### 11.17 Test Environment Setup (Developer Local)
+### 11.15 Test Environment Setup (Developer Local)
 
 The `test` environment runs on each developer's machine.
 
@@ -868,7 +1111,7 @@ services:
     build:
       context: ./keycloak
       dockerfile: Dockerfile
-    command: start-dev --features=organization
+    command: start-dev
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://postgres-keycloak:5432/keycloak
@@ -888,15 +1131,17 @@ volumes:
   postgres-keycloak-data:
 ```
 
-**2. Dockerfile** at `keycloak/Dockerfile` (also used for prod/dev builds — same image, different deployments):
+(Note: no `--features=organization` flag — Organizations is not used.)
+
+**2. Dockerfile** at `keycloak/Dockerfile`:
 
 ```dockerfile
 FROM quay.io/keycloak/keycloak:26.0 AS builder
 
 # (Future) knobby Keycloakify theme JAR added here per KEYCLOAK_THEMING_GUIDE.md.
-# ADD --chown=keycloak:keycloak ./themes/knobby-theme.jar /opt/keycloak/providers/
+# COPY --chown=keycloak:keycloak ./themes/knobby-theme.jar /opt/keycloak/providers/
 
-RUN /opt/keycloak/bin/kc.sh build --features=organization
+RUN /opt/keycloak/bin/kc.sh build
 
 FROM quay.io/keycloak/keycloak:26.0
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
@@ -904,7 +1149,7 @@ EXPOSE 8080
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
 ```
 
-**3. Developer-local `.env` file** (gitignored, per developer):
+**3. Developer-local `.env` file** (gitignored):
 
 ```
 KEYCLOAK_DB_PASSWORD=<random>
@@ -922,10 +1167,9 @@ KNOBBY_GITHUB_OAUTH_CLIENT_SECRET_TEST=<from-github-oauth-app>
 
 ```bash
 docker-compose -f docker-compose.test.yml up -d --build
-# Wait ~30 seconds. Open http://localhost:8080 → log in as admin.
 ```
 
-Then follow §§11.1–11.16 substituting `knobby-test` and `localhost:8080` URLs.
+Then follow §§11.1–11.14 substituting `knobby-test` and `localhost:8080` URLs. Skip §11.9 step 8 (publisher domain verification) — Microsoft does not verify localhost.
 
 **6. Smoke test:**
 
@@ -935,40 +1179,46 @@ export ADMIN_CLIENT_SECRET="$KNOBBY_KEYCLOAK_ADMIN_API_CLIENT_SECRET_TEST"
 ./keycloak-smoke-test.sh
 ```
 
-**Caveats:** HTTP only; HSTS disabled; no publisher verification; customer SAML testing requires a test IdP (e.g., samltest.id).
+### 11.16 Verification Checklist
 
-### 11.18 Verification Checklist
+The smoke-test script `keycloak-smoke-test.sh` automates server-side tests (1–13) and prints URLs for browser-driven federation tests (14–19).
 
-The smoke-test script `keycloak-smoke-test.sh` automates server-side tests and prints the URLs for browser-driven federation tests.
+Automated coverage:
+- Test 1: realm liveness via `.well-known/openid-configuration`
+- Test 2–3: account console disabled (`/realms/knobby-{env}/account` returns 4xx)
+- Test 4: admin API client credentials grant works (functional)
+- Test 5: admin API list users (validates `view-users`/`query-users` roles)
+- Test 6: list IdPs (validates `view-identity-providers` role; classifies IdPs by `providerId` + URL pattern so the generic-OIDC Microsoft setup is recognized regardless of alias)
+- Test 7: browser flow binding is `browser-federated-only`
+- Test 8: no Required Actions set as Default
+- Test 9: GCP Secrets Manager — every expected secret name from §10.8 exists; warning on misnamed orphans
+- Test 10: Microsoft Entra app registration — displayName matches convention, signInAudience is multi-tenant + MSA, redirect URI registered, publisherDomain is `knobby.io`, Graph API permissions present, client secret not expired (warn within 30 days), secret description follows convention
+- Test 11: `knobby-{env}-web` client configuration — protocol/confidentiality/flow flags per §8.2, PKCE method = S256, front-channel + back-channel logout configured, expected redirect URI registered
+- Test 12: `knobby-{env}-admin-api` client configuration — flow flags (service accounts on; all interactive flows off), service-account user present, exact realm-management role list assigned per §11.13 (no missing roles, no over-privileged roles like `realm-admin`/`manage-realm`/`manage-clients`/`create-client`)
+- Test 13: PKCE enforcement (behavioral) — sends auth request without `code_challenge`, verifies Keycloak rejects it with the expected `error=invalid_request` referencing `code_challenge_method`; catches the case where the PKCE attribute is set in config but not actually enforced
 
-Coverage:
-- Realm liveness via `.well-known/openid-configuration`.
-- Account console disabled.
-- Fallback IdP picker (no `kc_idp_hint`) — themed login with all configured IdP buttons.
-- Direct-to-IdP routing per alias: `kc_idp_hint=google`, `kc_idp_hint=microsoft`, `kc_idp_hint=github`.
-- Token claim inspection.
-- Microsoft `tid` differentiation (work vs personal MSA).
-- GitHub email mapping.
-- Logout flow.
-- Admin API smoke test.
-- Themed error pages (verify the `knobby` theme is applied per §11.16).
+Manual coverage:
+- Test 14: fallback IdP picker (no `kc_idp_hint`) — themed login page with all configured IdP buttons
+- Tests 15–17: direct-to-IdP routing per alias for Google, Microsoft work account, Microsoft personal MSA
+- Test 18: GitHub federation
+- Test 19: token exchange — decode resulting id_token, verify claim contract per §8.3
 
 ---
 
 ## 12. Enterprise Tenant Onboarding
 
-For each enterprise customer, three things must happen: knobby.io Organization is created, the customer's IdP is connected (via Microsoft admin consent / Google Workspace allowlist / SAML metadata exchange), and users can then sign in.
+For each enterprise customer, three things must happen: a knobby.io Organization exists, the customer's IdP is connected (via Microsoft admin consent / Google Workspace allowlist / SAML metadata exchange), and users can then sign in.
+
+**Implementation note throughout this section:** sub-sections describe the *required behavior and persisted state* for tenant onboarding. They do not prescribe specific table names, column types, or storage choices. Map each requirement to knobby.io's existing data model. Consult the codebase before introducing new persistence — knobby.io may already have organization, user, or tenant-connection structures that should be extended rather than duplicated.
 
 ### 12.1 Pattern & Rationale
 
-1. **knobby.io Organization is created.**
+1. **A knobby.io Organization exists** (created during customer signup).
 2. **The customer's IdP is connected to that Organization.** Mechanics differ per IdP family:
    - Microsoft Entra: admin consent.
    - Google Workspace: customer Workspace admin allowlists OAuth client.
-   - SAML: customer configures knobby.io's SP metadata; knobby.io provisions a SAML IdP entry under the Organization.
+   - SAML: customer configures knobby.io's SP metadata; knobby.io provisions a SAML IdP entry in Keycloak via Admin REST API.
 3. **Users from the customer's IdP can sign in.**
-
-This pattern is the enterprise norm (Slack, Notion, Linear, Asana, GitHub Enterprise).
 
 ### 12.2 Microsoft Admin Consent Endpoint
 
@@ -976,62 +1226,80 @@ This pattern is the enterprise norm (Slack, Notion, Linear, Asana, GitHub Enterp
 https://login.microsoftonline.com/{tenant}/adminconsent
   ?client_id={knobby-prod-entra-app-id}
   &state={knobby-state-token}
-  &redirect_uri=https://knobby.io/auth/microsoft/admin-consent-callback
+  &redirect_uri=https://prod.knobby.io/auth/microsoft/admin-consent-callback
 ```
 
 `{tenant}` is typically `organizations` (unknown tenant) or the tenant GUID/domain. Not `common`.
 
-### 12.3 State Token Design
+### 12.3 State Token Persistence Requirement
 
-`microsoft_admin_consent_state` table:
+knobby.io's backend must persist short-lived state for each in-flight Microsoft admin consent attempt.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `state_token` | text PK | High-entropy random (32 bytes base64url) |
-| `knobby_org_id` | uuid | Org initiating consent |
-| `initiated_by_user_id` | uuid | User who clicked Connect |
-| `expected_tenant_id` | uuid NULL | If known in advance |
-| `created_at` / `expires_at` | timestamptz | 10-minute expiry |
-| `consumed_at` | timestamptz NULL | Prevents replay |
+**Required logical fields:**
 
-### 12.4 Callback Handling
+| Field | Purpose |
+|---|---|
+| state token | High-entropy random value (≥32 bytes base64url). Used as the OAuth `state` parameter for CSRF protection and callback correlation. Serves as the lookup key. |
+| initiating organization | Reference to the knobby.io Organization on whose behalf consent is being granted. |
+| initiating user | Reference to the knobby.io user who clicked Connect (for audit trail). |
+| expected tenant ID | Optional. If the customer has supplied their Microsoft tenant in advance, store it here to validate the callback's `tenant` parameter against it. |
+| created at | Timestamp. |
+| expires at | Timestamp. Records are short-lived (10 minutes from creation). |
+| consumed at | Timestamp, nullable. Set when the callback successfully completes consent. Prevents replay. |
 
-Success: `?admin_consent=True&tenant=<guid>&state=<token>`. Failure: `?error=...&state=...`.
+**Lifecycle:**
+- Created when an org admin clicks "Connect Microsoft 365" in knobby.io.
+- Read once on callback receipt; validated for non-expiry, non-consumption, and (if `expected tenant ID` set) tenant match.
+- On successful processing: `consumed at` set; the durable tenant connection (§12.4) is created.
+- Expired/unused records can be cleaned up periodically.
 
-Handler: validate state, persist `microsoft_tenant_connection`, mark state consumed, emit Activity, redirect to success page.
+*Implementation note: storage choice (relational, KV, cache) and naming are at the implementer's discretion. The records are short-lived and not historically interesting — relational storage with periodic cleanup is fine; a TTL-based KV is also fine.*
 
-### 12.5 knobby.io Data Model
+### 12.4 Tenant Connection Persistence Requirement
 
-```sql
-CREATE TABLE microsoft_admin_consent_state (
-    state_token text PRIMARY KEY,
-    knobby_org_id uuid NOT NULL REFERENCES organizations(id),
-    initiated_by_user_id uuid NOT NULL REFERENCES users(id),
-    expected_tenant_id uuid NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    expires_at timestamptz NOT NULL,
-    consumed_at timestamptz NULL
-);
+After a successful admin consent, knobby.io's backend must persist a durable record linking the knobby.io Organization to the Microsoft tenant.
 
-CREATE INDEX idx_consent_state_expiry ON microsoft_admin_consent_state(expires_at)
-    WHERE consumed_at IS NULL;
+**Required logical fields:**
 
-CREATE TABLE microsoft_tenant_connection (
-    knobby_org_id uuid NOT NULL REFERENCES organizations(id),
-    microsoft_tenant_id uuid NOT NULL,
-    consent_granted_at timestamptz NOT NULL,
-    consent_granted_by text NOT NULL,
-    consent_revoked_at timestamptz NULL,
-    PRIMARY KEY (knobby_org_id, microsoft_tenant_id)
-);
+| Field | Purpose |
+|---|---|
+| knobby organization | Reference to the knobby.io Organization. |
+| Microsoft tenant ID | The tenant GUID received from Microsoft's callback. |
+| consent granted at | Timestamp. |
+| consent granted by | Identifier (email or user reference) of the admin who consented. |
+| consent revoked at | Timestamp, nullable. Soft-delete marker when consent is withdrawn (either via Microsoft-side revocation detected reactively, or via knobby.io self-service disconnect). |
 
-CREATE INDEX idx_tenant_connection_tenant ON microsoft_tenant_connection(microsoft_tenant_id)
-    WHERE consent_revoked_at IS NULL;
-```
+**Identity:** the natural key is (knobby organization, Microsoft tenant ID). One knobby.io Organization may be associated with multiple Microsoft tenants (subsidiaries, M&A). The reverse lookup — given a Microsoft tenant ID, find the connected knobby.io Organization — is the hot path during sign-in routing (§12.9).
+
+**Lifecycle:**
+- Created on successful admin consent callback.
+- `consent revoked at` set when revocation is detected or initiated.
+- Records are not hard-deleted (audit history preservation).
+
+*Implementation note: storage choice and naming at implementer's discretion. Active-only queries should be indexed on Microsoft tenant ID with `consent revoked at IS NULL`.*
+
+### 12.5 Callback Handler Requirements
+
+The endpoint `GET /auth/microsoft/admin-consent-callback` receives two response shapes from Microsoft.
+
+**Success:** `?admin_consent=True&tenant=<guid>&state=<token>`.
+
+**Failure:** `?error=<code>&error_description=<text>&error_subcode=<sub>&state=<token>`.
+
+Handler behavior:
+
+1. Parse `state`. Look up the corresponding in-flight consent record (§12.3).
+2. Reject (400) if: record absent, already consumed, or expired.
+3. If `error` present: mark consumed, log with full context, render error page to the admin with a user-friendly message based on the error code (§12.7).
+4. If `admin_consent=True`:
+   - Validate `tenant` is a valid GUID. If the in-flight record had an `expected tenant ID`, confirm it matches.
+   - In a transaction: create or upsert the tenant connection record (§12.4); mark the in-flight record consumed.
+   - Emit `OrganizationMicrosoftTenantConnected` Activity to the platform event bus.
+5. Redirect admin to the Organization Settings → Identity page with a success confirmation.
 
 ### 12.6 End-to-End Flow
 
-Admin in Organization Settings → Identity → "Connect Microsoft 365" → Continue → redirect to Microsoft admin consent → admin signs in and accepts → redirect back to knobby.io → state validated → tenant connection persisted → success page shown.
+Admin in Organization Settings → Identity → "Connect Microsoft 365" → Continue → knobby.io creates in-flight consent record, redirects to Microsoft admin consent → admin signs in and accepts → redirect back to knobby.io callback → state validated → tenant connection persisted → success page shown. Subsequent sign-ins from any user in that Microsoft tenant work silently through the standard login flow.
 
 ### 12.7 Error Handling
 
@@ -1039,25 +1307,45 @@ Admin in Organization Settings → Identity → "Connect Microsoft 365" → Cont
 |----------|-----------|-----|
 | Admin not Global Admin | `error=access_denied&error_subcode=user_consent_required` | "Ask your Global Administrator to complete this step." |
 | Admin clicks Cancel | `error=access_denied` | "Connection canceled." |
-| State token expired (>10 min) | knobby.io detects | "Consent session expired. Try again." |
-| State already consumed | `consumed_at` set | "Link already used. Start over." Log warning. |
-| Tenant mismatch | `expected_tenant_id` set, doesn't match | "Sign in with an account from {expected-domain}." |
+| State token expired (>10 min) | knobby.io detects via §12.3 record `expires at` | "Consent session expired. Try again." |
+| State already consumed | knobby.io detects via §12.3 record `consumed at` set | "Link already used. Start over." Log warning. |
+| Tenant mismatch | knobby.io detects when §12.3 `expected tenant ID` set and doesn't match callback | "Sign in with an account from {expected-domain}." |
 | Customer tenant blocks consent | Various Microsoft errors | "Your tenant's policies prevent third-party consent. Contact IT." |
 | Microsoft endpoint timeout | knobby.io timeout | "Couldn't complete connection. Try again." |
 
 ### 12.8 Consent Revocation
 
-Microsoft does not notify on revocation. Detect reactively when federation fails for known-connected tenant; mark `consent_revoked_at`, emit Activity.
+Microsoft does not notify on revocation. Detect reactively when federation fails for a known-connected tenant (`microsoft_tenant_id` matches a §12.4 record with no `consent revoked at`); mark `consent revoked at`, emit `OrganizationMicrosoftTenantDisconnected` Activity.
+
+knobby.io should also provide self-service disconnect in Organization Settings → Identity, which calls Microsoft Graph to revoke the service principal in the customer tenant and marks the §12.4 record revoked.
 
 ### 12.9 Sign-in Routing
 
-Strategy B (email-first home discovery) is the production target. Requires the Microsoft IdP's Forwarded Query Parameters set to `login_hint,domain_hint,prompt` per §11.11.
+Strategy B (email-first home discovery) is the production target. Requires:
+- A background job that fetches verified domains for each connected Microsoft tenant via Graph API (`GET /organization` + `GET /domains`), persisted in knobby.io application data linked to the §12.4 tenant connection. Refresh cadence ~24 hours.
+- The login screen email-first flow.
+- The Microsoft IdP's Forwarded Query Parameters set to `login_hint,domain_hint,prompt` per §11.9 step 16.
+- Fallback to "Sign in with personal Microsoft account" button for users whose domain doesn't match any connected tenant.
 
-### 12.10 Analogous Patterns
+*Implementation note: the verified-domain cache is application-layer state. Storage choice (table, columns, indexing) is at the implementer's discretion. The hot-path query is "given an email domain, find the connected Microsoft tenant and the corresponding knobby.io Organization."*
 
-**Google Workspace:** Workspace admin allowlists in Google Admin Console. `google_workspace_connection` table.
+**Personal MSA handling.** Personal Microsoft accounts (`microsoftTenantId == 9188040d-6c67-4c5b-b112-36a304b66dad`) are not associated with any enterprise tenant. They sign in via the Microsoft IdP but are rejected at the application authorization layer when attempting to join an enterprise Organization.
 
-**SAML:** two-way metadata exchange. `saml_idp_connection` table. Provisioned via Admin REST API.
+### 12.10 Analogous Patterns for Other IdPs
+
+**Google Workspace.**
+
+Customer Workspace admin allowlists the per-env knobby.io Google OAuth client ID in their Google Admin Console (Security → API controls → App access control → Configure new app). No OAuth-protocol-level admin consent flow exists — it's a manual setup step in the customer's admin UI.
+
+*Persistence requirement:* knobby.io must record the connection between a knobby.io Organization and the customer's Google Workspace, with: knobby organization, Workspace domain, verified-at timestamp, verified-by reference. Lifecycle: created when an admin self-attests the allowlisting is done and knobby.io confirms via a successful test sign-in by the admin. Soft-delete on disconnect.
+
+**SAML enterprise customers.**
+
+Two-way metadata exchange. knobby.io provides the customer with its SP metadata (downloadable from Organization Settings → Identity → SAML, or via direct link to Keycloak's metadata endpoint). The customer configures their IdP, then provides knobby.io with their IdP metadata XML (uploaded via the settings UI). knobby.io backend then calls Keycloak Admin REST API (§8.7) to provision a SAML IdP entry with alias `saml-<customer-slug>` at the realm level (not linked to a Keycloak Organization per Invariant 8).
+
+*Persistence requirement:* knobby.io must record the connection between a knobby.io Organization and the provisioned Keycloak SAML IdP alias, with: knobby organization, Keycloak IdP alias (`saml-<slug>`), customer IdP entity ID, connected-at timestamp, lifecycle state (active/revoked). This mapping is the bridge between Keycloak's per-alias IdP entries and knobby.io's Organization model. The hot-path query is "given a knobby.io Organization, find the Keycloak IdP alias to use for sign-in routing."
+
+*Implementation note for all three (Microsoft, Google, SAML):* the connection records may map to a single unified "tenant connection" abstraction in knobby.io's data model, or to three separate per-provider records, or some hybrid. The choice is for the implementer to make based on the existing data model and the rest of the application's domain model. The PRD specifies only the required behavior and logical fields per provider.
 
 ---
 
@@ -1065,28 +1353,22 @@ Strategy B (email-first home discovery) is the production target. Requires the M
 
 ### 13.1 Decision
 
-**Tool: OpenTofu** (https://opentofu.org). Rationale:
-- OSS fork of Terraform after the BSL license change.
-- Compatible with the Terraform Keycloak provider (`keycloak/keycloak`).
-- Aligned with the OSS-forward stack.
-- Declarative HCL syntax matches the spec-first approach.
+**Tool: OpenTofu** (https://opentofu.org). Compatible with the Terraform Keycloak provider.
 
 **Out of scope:**
-- IdP credentials at the source (Google Cloud OAuth client, Entra app registration, GitHub OAuth App) — remain manual one-time setups.
-- GCP Secrets Manager entries — separate IaC module.
-- Per-customer SAML IdPs and Organizations — runtime, via Keycloak Admin REST API.
-- Keycloak deployment itself — separate infra IaC.
+- IdP credentials at the source (Google Cloud OAuth client, Entra app registration, GitHub OAuth App).
+- GCP Secrets Manager entries.
+- Per-customer SAML IdPs — runtime, via Keycloak Admin REST API by knobby.io.
+- Keycloak deployment itself.
 
 **In scope:**
-- Realm creation and settings.
+- Realm creation and settings (excluding Organizations, which we don't use).
 - Custom authentication flows and bindings.
 - Required Actions configuration.
-- Built-in IdPs (Google, Microsoft, GitHub).
+- Built-in IdPs (Google, Microsoft via generic OIDC with alias `microsoft-oidc`, GitHub).
 - The `knobby-{env}-web` and `knobby-{env}-admin-api` clients.
-- The `organization` client scope and mappers.
-- Default internal `knobby` Organization.
 - Account console disablement.
-- Theme selection (assuming the theme JAR is already deployed per §11.16).
+- Theme selection.
 
 ### 13.2 Repository Structure
 
@@ -1095,11 +1377,10 @@ knobby-infra-keycloak/
 ├── modules/
 │   ├── knobby-realm/
 │   ├── knobby-realm-google-idp/
-│   ├── knobby-realm-microsoft-idp/
+│   ├── knobby-realm-microsoft-idp/         # alias: microsoft-oidc
 │   ├── knobby-realm-github-idp/
 │   ├── knobby-realm-web-client/
-│   ├── knobby-realm-admin-api-client/
-│   └── knobby-realm-organizations/
+│   └── knobby-realm-admin-api-client/
 ├── environments/
 │   ├── prod/
 │   ├── dev/
@@ -1108,6 +1389,8 @@ knobby-infra-keycloak/
 │   └── keycloak-init.sh
 └── README.md
 ```
+
+(No `knobby-realm-organizations` module — Organizations is not used per Invariant 8.)
 
 ### 13.3 The `keycloak-init.sh` Wrapper
 
@@ -1124,21 +1407,19 @@ Responsibilities:
 6. Run `tofu apply`.
 7. Run `keycloak-smoke-test.sh` to validate.
 
-For `test`, reads secrets from local `.env` instead of GCP Secrets Manager.
-
 ### 13.4 Implementation Phases
 
-**Phase 1:** core realm + clients (validates with smoke tests 1-8, no IdPs).
-**Phase 2:** Google + Microsoft IdPs (validates federation tests 10-12).
-**Phase 3:** GitHub IdP (validates federation test 13).
-**Phase 4:** Organizations + initial internal org + theme binding (parity with §11).
-**Phase 5:** IaC drift detection in CI (scheduled `tofu plan`).
+**Phase 1:** core realm + clients.
+**Phase 2:** Google + Microsoft IdPs.
+**Phase 3:** GitHub IdP.
+**Phase 4:** theme binding (assumes JAR pre-deployed).
+**Phase 5:** IaC drift detection in CI.
 
 ### 13.5 Migration from Manual Setup
 
 The current `knobby-prod` realm will be `tofu import`-ed rather than recreated. Procedure:
 
-1. Write OpenTofu modules to match current state exactly.
+1. Write OpenTofu modules to match current state exactly (including alias `microsoft-oidc`, role list per §11.13, etc.).
 2. `tofu import` each existing resource.
 3. `tofu plan` should show zero changes.
 4. Going forward, all changes flow through OpenTofu (Invariant 7).
@@ -1150,15 +1431,15 @@ Per-environment OpenTofu state in GCS buckets with object versioning:
 - `gs://knobby-tofu-state-dev/keycloak/`
 - `gs://knobby-tofu-state-test/keycloak/` (or developer-local)
 
-### 13.7 What's Tracked in v1.5
+### 13.7 Tracked in v1.6
 
-This section commits to OpenTofu. Actual `.tf` files, module implementations, and `keycloak-init.sh` are the next deliverable.
+Section commits to OpenTofu and reflects v1.6's drop of Organizations. Actual `.tf` files and `keycloak-init.sh` are the next deliverable.
 
 ---
 
 ## 14. Open Questions
 
-1. **Single-org-per-user constraint** — does knobby.io enforce that a user belongs to exactly one Organization?
+1. **Single-org-per-user constraint** — does knobby.io enforce that a user belongs to exactly one Organization? Affects the tenant-connection data model.
 2. **Service account model for AI agents** — parked.
 3. **Step-up authentication for sensitive operations** — `acr` claim enforcement timing.
 4. **Customer SAML self-service** — via knobby.io admin UI or manual?
@@ -1167,11 +1448,11 @@ This section commits to OpenTofu. Actual `.tf` files, module implementations, an
 7. **Event bus integration timeline** — parked.
 8. **Personal MSA in enterprise orgs** — confirm policy.
 9. **GCS state bucket retention** — Object Versioning enabled? Standard practice yes; confirm.
-10. **Theme deployment cadence** — when the theme JAR changes, does it require a Keycloak restart and how is that orchestrated alongside the regular Keycloak version upgrade cycle? Detailed in `KEYCLOAK_THEMING_GUIDE.md` (deployment section); the operational answer affects §10.1.
+10. **Theme deployment cadence** — see `KEYCLOAK_THEMING_GUIDE.md`.
 
 ---
 
-## 15. Future Work (Tracked, Out of Scope for v1.5)
+## 15. Future Work (Tracked, Out of Scope for v1.6)
 
 - **OpenTofu IaC implementation** (per §13 — next major session).
 - **Microsoft Publisher Verification application** (multi-day lead time).
@@ -1184,15 +1465,14 @@ This section commits to OpenTofu. Actual `.tf` files, module implementations, an
 - **Email-first login routing** (Strategy B in §12.9).
 - **Consent revocation detection** for Microsoft tenants.
 - **Local username/password tier** (B2C / contractor) — feature flag.
-- **Apple Sign In** — deferred. When revived, configure via the `klausbetz/apple-identity-provider-keycloak` extension (Apple is not a Keycloak built-in IdP and uses JWT client assertion rather than client_secret). Requires Apple Developer account ($99/year), per-env Service IDs, .p8 key per env, and `klausbetz` JAR baked into the Keycloak Docker image. Application policy: Apple users admitted to consumer-tier Organizations only.
+- **Apple Sign In** — deferred. When revived, configure via the `klausbetz/apple-identity-provider-keycloak` extension.
 
 ---
 
 ## 16. References
 
 - Keycloak Server Administration Guide (v26): https://www.keycloak.org/docs/latest/server_admin/
-- Keycloak Organizations: https://www.keycloak.org/docs/latest/server_admin/#_managing_organizations
-- Keycloakify: https://keycloakify.dev (see also `KEYCLOAK_THEMING_GUIDE.md`)
+- Keycloakify: https://keycloakify.dev (see `KEYCLOAK_THEMING_GUIDE.md`)
 - Microsoft Entra publisher verification: https://learn.microsoft.com/en-us/entra/identity-platform/publisher-verification-overview
 - Microsoft admin consent endpoint: https://learn.microsoft.com/en-us/entra/identity-platform/v2-admin-consent
 - Microsoft Entra app registration (multitenant): https://learn.microsoft.com/en-us/entra/identity-platform/howto-convert-app-to-be-multi-tenant
