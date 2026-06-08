@@ -1547,6 +1547,53 @@ The fundamental rationale for migrating from Auth0 to self-hosted Keycloak was t
 
 This section specifies how knobby.io's Keycloak realm exposes MCP-compatible authorization. The corresponding MCP server endpoint on knobby.io (resource server, protected resource metadata) is application work covered separately.
 
+### 16.1.5 Phase 0 Prerequisites and Sequencing
+
+MCP support depends on work that is not in this PRD — partly because it's application work (Knobby web), partly because it deserves its own implementation spec (the SPI JAR). This sub-section makes the dependency chain explicit so the work can be scheduled correctly.
+
+#### Hard prerequisite: Auth0 → Keycloak migration of knobby.io app
+
+The path (iii) consent flow (§16.7.2) requires the user to be in a **Keycloak SSO session** when they arrive at `/mcp/consent`, so that the silent `prompt=none` OIDC bootstrap (step 4 of the flow) succeeds without user interaction. If knobby.io is still running on Auth0 as its primary IdP, the user has an Auth0 session, not a Keycloak one, and the silent bootstrap fails — breaking the entire consent flow.
+
+**Therefore: the auth migration described in §8 (knobby.io ↔ Keycloak Integration) must complete before MCP end-to-end testing is possible.** The realm-side MCP configuration can be done in parallel, but it cannot be validated end-to-end until the app migration is complete.
+
+#### Phase 0 work items, with where their specs live
+
+| Item | Status | Spec location | Blocks |
+|---|---|---|---|
+| **Auth0 → Keycloak migration of knobby.io app** | Not started | §8 of this PRD; ASP.NET Core 10 integration code | Knobby web `/mcp/consent` (silent SSO bootstrap), end-to-end MCP testing |
+| **Knobby web `/mcp/consent` sub-app** | Not started | Knobby web specs (brainstorm document §3.4 enumerates the required changes); Knobby web design-system docs for component reuse | End-to-end MCP testing |
+| **Custom Authenticator + Realm Resource Provider SPI** (Java/Kotlin) | Not started | §16.8 of this PRD has the architecture. Implementation-level decisions (Keycloak SPI version pinning, package layout, error handling, logging conventions, testing strategy) belong in a separate companion doc `KEYCLOAK_MCP_SPI_DESIGN.md`, to be authored when this track starts. | SPI Authenticator visible in admin console (smoke Test 14); MCP auth flow creation (Test 15); end-to-end MCP flow |
+| **Keycloakify theme JAR** | Parked | `KEYCLOAK_THEMING_GUIDE.md` companion doc | Nothing for MCP v1 — the consent UX is in Knobby web, so theme only affects IdP login screens, which users barely see in federated flow |
+
+#### Parallel vs. sequential
+
+The auth migration is a serial blocker for the **app-side** of MCP (the silent SSO bootstrap, the Knobby web sub-app). It is NOT a blocker for the **Keycloak-side** of MCP:
+
+- SPI implementation can start immediately. Each commit lights up another smoke test (Test 14 → Test 15 → ...).
+- Realm configuration (Phases 2-4 in §16.11) can be applied immediately once the SPI is deployed. Smoke Tests 14-26 give you red→green progress without touching the knobby.io app.
+- The auth migration, the SPI development, and the `/mcp/consent` sub-app development can all proceed in parallel after their individual prerequisites are met.
+
+**Recommended sequencing:**
+
+1. **Right now**: Complete auth migration per §8. This unblocks the app-side path for everything else and removes Auth0 as a cost / complexity center independent of MCP.
+2. **In parallel with (1)**: Author `KEYCLOAK_MCP_SPI_DESIGN.md` and start the SPI implementation. This is a different skill set (Java/Kotlin) and doesn't compete with (1) for the same engineer's attention.
+3. **After (1) is far enough along that the app works on Keycloak**: Start the Knobby web `/mcp/consent` sub-app per the brainstorm doc §3.4.
+4. **As SPI lands and realm config is applied**: Watch smoke Tests 14-26 progressively turn green.
+5. **When (1), (2), (3) all complete**: Run smoke Test 33 (manual end-to-end). At this point the MCP launch is realm-validated AND app-validated.
+
+#### What's NOT in scope for the Keycloak PRD
+
+For clarity, the following work is intentionally NOT specified in this PRD even though it's required for MCP launch:
+
+- Knobby web's `/mcp/consent` sub-app implementation (routes, components, state management, API endpoints). Tracked in Knobby web specs; brainstorm doc §3.4 enumerates required changes.
+- Knobby web's "Connected Agents" user-menu entry and tenant-admin view. Tracked in Knobby web specs.
+- knobby.io's MCP server resource-server endpoint (`/mcp`), token validation middleware, RBAC enforcement at MCP call sites. Tracked in the MCP PRD (separate spec).
+- The `PermissionMappingRegistry.AccessLevelInfo` extension for the Bundle ↔ RBAC mapping grid. Tracked in the knobby.io Access Control PRD.
+- SPI implementation specifics (Java/Kotlin code, Maven/Gradle setup, unit/integration tests). To be tracked in `KEYCLOAK_MCP_SPI_DESIGN.md` when that work starts.
+
+The Keycloak PRD's scope ends at: **realm configuration, protocol design, and the contract the SPI must satisfy.** Implementation tracks pick up from there.
+
 ### 16.2 MCP Authorization Architecture (the RFC stack)
 
 MCP clients perform authorization via four IETF specifications, all of which Keycloak implements:
@@ -1904,6 +1951,8 @@ Future hardening: tenant admin policy to require client verification for any DCR
 ### 16.8 Custom Authenticator SPI Architecture
 
 This is the new in-scope Keycloak extension that implements the path (iii) handoff. It graduates from the §15 Future Work bucket ("Custom Keycloak event listener SPI") — but note that this is a **different SPI** from the parked event-listener SPI; see §16.8.7 for the disambiguation.
+
+> **Scope of this sub-section.** §16.8 specifies the *architecture and contract*: what the SPI must do, what JWT claims flow in each direction, what protocol mappers it relies on. It is **not** a complete implementation specification. The Java/Kotlin code structure, package layout, Keycloak SDK version pinning, error handling specifics, logging conventions, testing strategy, and CI build pipeline should be authored in a separate companion document `KEYCLOAK_MCP_SPI_DESIGN.md` when the implementation track begins (per §16.1.5 Phase 0). The companion doc inherits the contract from this section.
 
 #### 16.8.1 The `browser-mcp-tenant-pick` authentication flow
 
