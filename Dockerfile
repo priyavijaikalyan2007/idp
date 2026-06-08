@@ -8,13 +8,16 @@ ENV KC_CACHE=local
 
 # Custom providers (SPI JARs) and themes get COPIED in BEFORE `kc.sh build`
 # so the build phase picks them up and incorporates them into the optimized
-# startup. The repository must contain `./providers/` and `./themes/` directories
-# next to this Dockerfile (with .gitkeep files when empty), so these COPYs
-# succeed even when no JARs have been built yet.
+# startup. The repository's /target/ directory is the unified deliverable
+# output location (Maven/Java convention, elevated to the repo root rather
+# than per-module). build.sh stages JARs from src/providers/target/ and any
+# theme builds to /target/providers/ and /target/themes/ respectively. The
+# directories must exist at Docker build time even if empty — build.sh's
+# mkdir -p ensures this.
 #
 # Expected contents:
 #
-#   ./providers/
+#   ./target/providers/
 #     yourapp-keycloak-mcp-spi-{version}.jar    # Authenticator + Realm Resource
 #                                              # Provider + protocol mappers
 #                                              # (PRD §16.8). In scope for v1
@@ -26,7 +29,7 @@ ENV KC_CACHE=local
 #                                              # see PRD §15 Future Work.
 #                                              # Not required for MCP v1.
 #
-#   ./themes/
+#   ./target/themes/
 #     yourapp-theme-{version}.jar               # Keycloakify-built branded theme
 #                                              # for IdP login screens. See
 #                                              # KEYCLOAK_THEMING_GUIDE.md.
@@ -35,8 +38,8 @@ ENV KC_CACHE=local
 #                                              # theme only affects the IdP login
 #                                              # screens, which users barely see
 #                                              # in the federated flow.
-COPY ./providers/ /opt/keycloak/providers/
-COPY ./themes/ /opt/keycloak/themes/
+COPY ./target/providers/ /opt/keycloak/providers/
+COPY ./target/themes/    /opt/keycloak/themes/
 
 RUN /opt/keycloak/bin/kc.sh build
 
