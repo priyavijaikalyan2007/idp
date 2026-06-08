@@ -1,25 +1,8 @@
 <!-- AGENT: Project overview, business context, and problem statement for the yourapp.com platform. -->
 
-# 1. Introduction
+This repository contains the basics for standing up a customized, themed instance of Keycloak as an identity broker for Outcrop Inc applications. Outcrop Inc. properties use a AI-native development model with a AI-friendly and AI-enabled product. This means that we we must support protocols such as A2A and MCP for agents and tools and offer MCP endpoints for LLM harnesses to invoke. This in turn requires support for DCR, OAuth 2.1, a MCP consent flow and other capabilities. 
 
-This repository contains the basics for standing up a customized, themed instance of Keycloak as an identity broker for Outcrop Inc applications. This repository includes:
+However, most hosted identity providers such as Auth0 and Amazon Cognito either offer these advanced capabilities only under high cost plan tiers or they don't support them outright. This is cost prohibitive for "run my own software" shops, pre-PMF web properoties and small niche startups. Outcrop Inc. web properties fall into these buckets. Hence, to keep cost down and own our own fate with regards to customization, we run our Keycloak instances. 
 
-- Specifications, operations guides, themeing guides, setup guides, PRD for Keycloak proper and MCP configuration in the folder ./specs.
-- Dockerfile for building the customized, themed Keycloak container image. 
-- keycloak-smoke-tests.sh file for testing the deployed Keycloak instance to make sure it is working well. 
-- Instructions files in the form of .md files at the root of the repository.
-- Shell scripts:
-  - build.sh to build and tag the container image locally.
-  - logs.sh to retrieve logs from the Cloud Run revision.
-  - monitor.sh to stream logs from Cloud Run revision.
-  - push.sh to push the tagged container image to the Artifact Repository in GCP.
-- cloudrun.yaml that replicates the Cloud Run configuration so it is not lost in the future.
-
-# 2. Background
-
-
-# 3. Business Opportunity
-
-
-# 4. Solution
+This repository contains all the necessary themes, providers, mappers, Dockerfiles, scripts etc. necessary to customize, build, deploy, run and monitor a full Keycloak identity broker for Outcrop Inc. web properties.
 

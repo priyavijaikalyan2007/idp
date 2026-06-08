@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 8a6b4f45-3762-41f8-b7af-18a8409ee8c0
-Created: 2026
--->
 
 <!-- AGENT: Language and communication standards for all agent-generated text including comments, docs, and messages. -->
 

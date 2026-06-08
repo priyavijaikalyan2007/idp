@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 21f7e69d-baa7-42e1-bb60-60a8d618d7dc
-Created: 2026
--->
 
 <!-- AGENT: Approved and recommended libraries for the TypeScript/Bootstrap 5 frontend stack. -->
 

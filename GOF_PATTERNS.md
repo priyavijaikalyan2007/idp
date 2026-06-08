@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 96556d56-4611-4e45-9c41-22ba6722244c
-Created: 2026
--->
 
 <!-- AGENT: Practical guidance on applying Gang of Four design patterns in the codebase. -->
 

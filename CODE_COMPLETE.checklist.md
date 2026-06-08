@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: d3a5a785-207a-4806-a6c3-5a6334854f4f
-Created: 2026
--->
+
 
 # Code Complete Checklist
 

@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 1c788a64-ad76-46c6-ab4c-5b316de4c36a
-Created: 2026
--->
 
 <!-- AGENT: Criteria and guidelines for selecting third-party backend libraries. -->
 

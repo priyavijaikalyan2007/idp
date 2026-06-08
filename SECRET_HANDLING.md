@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 1a28d4da-1388-469f-9dfc-d30a06166c89
-Created: 2026
--->
 
 # Secret Handling & Encryption Architecture
 

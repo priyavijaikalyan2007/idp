@@ -10,8 +10,11 @@ __pycache__/
 *.swp
 *.bak
 
+# Obsidian
+**/.obsidian/
+
 # Build Output Folders
-*/target/*
+**/target/*
 
 # Distribution / packaging
 .Python

@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 539e0ee5-b59c-409f-9e11-44779a31c570
-Created: 2026
--->
+
 
 <!-- AGENT: Logging standards for post-mortem debugging and structured log output for backends. -->
 

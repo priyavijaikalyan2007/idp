@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 08bc6ee5-e2cc-4de2-ab23-0802f26881d3
-Created: 2026
--->
 
 <!-- AGENT: Code commenting standards and best practices for maintainable code. -->
 

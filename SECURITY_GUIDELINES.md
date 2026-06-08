@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: ac1f4467-68fc-4137-a805-1f47b737a128
-Created: 2026
--->
 
 # Security Guidelines for Coding Agents
 

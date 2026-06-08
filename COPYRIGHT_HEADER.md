@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: c3e9f5a2-7b40-4d13-bf8c-4f6b0e2d9c37
-Created: 2026
--->
+
 
 <!-- AGENT: Defines the required SPDX copyright header format for all source files. -->
 

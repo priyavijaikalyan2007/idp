@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 03a890af-4a95-4f79-ab79-68f409e7e3be
-Created: 2026
--->
 
 <!-- AGENT: Testing guidelines and standards for AI coding agents on enterprise SaaS. -->
 # Testing Guidelines for AI Coding Agents

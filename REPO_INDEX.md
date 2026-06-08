@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: d8b9fbef-6576-4c6c-a6d4-f4028c23c630
-Created: 2026
--->
 
 <!-- AGENT: Repository indexing instructions for local per-user search. -->
 # Local Repository Index (Per User)

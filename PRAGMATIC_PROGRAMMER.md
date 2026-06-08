@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <operator@example.com>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 73b56f31-ea7f-4e62-a9b7-e0da9e52d562
-Created: 2026
--->
 
 # Pragmatic Programmer Instructions for Agents
 
