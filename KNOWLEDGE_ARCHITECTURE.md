@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 900dbe3a-84ae-4204-9eaa-b8b721ea6341
-Created: 2026
--->
 
 <!-- AGENT: Agent knowledge base architecture using YAML/JSONL with optional SQLite for complex queries. -->
 

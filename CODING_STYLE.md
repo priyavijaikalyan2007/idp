@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 82caf28f-8ab6-4b29-b187-cf536fdb6c3f
-Created: 2026
--->
+
 
 <!-- AGENT: Coding style conventions and formatting rules for the codebase. -->
 
@@ -243,10 +236,10 @@ var isHighPriority  = true;
 ```
 
 ```typescript
-// Short parameter list — single line
+// Short parameter list ï¿½ single line
 function save(name: string, id: number): void
 
-// Long parameter list — align on new lines
+// Long parameter list ï¿½ align on new lines
 function showErrorDialog(
     containerId: string,
     title: string,
@@ -431,10 +424,10 @@ public class ReactionSimulator
 Always override Bootstrap variables in `_variables.scss`, not in component files.
 
 ```scss
-// Good — in _variables.scss
+// Good ï¿½ in _variables.scss
 $border-radius: 0 !default;
 
-// Bad — in a component file
+// Bad ï¿½ in a component file
 .my-component {
     border-radius: 0; // Fights Bootstrap's default
 }
@@ -445,7 +438,7 @@ $border-radius: 0 !default;
 Limit SCSS nesting to 3 levels. Deep nesting produces overly specific selectors.
 
 ```scss
-// Bad — too deep
+// Bad ï¿½ too deep
 .sidebar {
     .nav {
         .nav-item {
@@ -458,7 +451,7 @@ Limit SCSS nesting to 3 levels. Deep nesting produces overly specific selectors.
     }
 }
 
-// Good — flattened
+// Good ï¿½ flattened
 .sidebar .nav-link {
     // styles
 
@@ -470,7 +463,7 @@ Limit SCSS nesting to 3 levels. Deep nesting produces overly specific selectors.
 
 ### Avoid `!important`
 
-Never use `!important` in component SCSS. If a style is not applying, the selector specificity is wrong — 
+Never use `!important` in component SCSS. If a style is not applying, the selector specificity is wrong ï¿½ 
 fix the selector, not the declaration.
 
 The only exception is utility classes in the theme itself (e.g., `.p-compact`), where `!important` follows 
@@ -570,7 +563,7 @@ private void ProcessItemIfEligible(OrderItem item)
 ```
 
 ```typescript
-// Bad — too deeply nested
+// Bad ï¿½ too deeply nested
 function processItems(items: Item[]): void
 {
     for (const item of items)
@@ -588,7 +581,7 @@ function processItems(items: Item[]): void
     }
 }
 
-// Good — early returns
+// Good ï¿½ early returns
 function processItems(items: Item[]): void
 {
     for (const item of items)
@@ -690,7 +683,7 @@ function showDialog(containerId: string, options: ErrorDialogOptions): void
         return;
     }
 
-    // Happy path — render the dialog
+    // Happy path ï¿½ render the dialog
     renderDialog(container, options);
 }
 ```
@@ -933,10 +926,10 @@ public static void AddVectors(float[] a, float[] b, float[] result)
 ```
 
 ```typescript
-// Bad — clever but obscure
+// Bad ï¿½ clever but obscure
 const result = (b << 4 & b << 8) | (b >> 2);
 
-// Good — explicit and clear
+// Good ï¿½ explicit and clear
 const shift4Bits = b << 4;
 const shift8Bits = b << 8;
 const divideBy4 = b >> 2;

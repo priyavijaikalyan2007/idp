@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 56e48bb8-298b-4f63-9543-dba7be79c7a4
-Created: 2026
--->
+
 
 # Code Complete Instructions for Agents
 

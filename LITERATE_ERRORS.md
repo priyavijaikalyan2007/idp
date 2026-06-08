@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 97dc43db-679b-4b46-b73e-14a02ce82b76
-Created: 2026
--->
 
 <!-- AGENT: Human-centric error handling guidelines for constructing literate error messages in components and applications. -->
 

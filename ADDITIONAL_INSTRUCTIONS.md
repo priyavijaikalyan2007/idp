@@ -1,17 +1,10 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: afef1ced-80d9-421b-9bbc-06e17b7b7fce
-Created: 2026
--->
 
 <!-- AGENT: Additional context-specific instructions and exceptions for coding agents. -->
 
 # Additional Instructions for Coding Agents
 
-These instructions supplement the primary guidelines in `AGENTS.md`, `CODING_STYLE.md`, and `FRONTEND.md`. They capture lessons learned and non-obvious rules specific to this Bootstrap 5 theme and component library.
+These instructions supplement the primary guidelines in `AGENTS.md` and the files it links to. 
+The following capture lessons learned and non-obvious rules based on continued development.
 
 ---
 
@@ -44,16 +37,11 @@ These instructions supplement the primary guidelines in `AGENTS.md`, `CODING_STY
 - **No Global Side Effects:** A component's SCSS must not modify global Bootstrap styles, override utility classes, or change the behaviour of elements outside its own scope.
 - **Namespace Classes:** Prefix all custom classes with the component name (e.g., `.errordialog-header`, `.combobox-dropdown`). Do not use generic class names like `.header` or `.dropdown-list` that could collide with Bootstrap or the host application.
 
-### C# Linting
-
-* StyleCop and compiler warnings are constantly emitted that says do not use String.Equals instead suggesting StringComparison. However, this is NOT correct advice for Dotnet Entity Framework (EF) and LINQ queries. When you need to make case insensitive comparisons, you will have to use String.Equals with appropriate case conversion first done on arguments. 
-* Please place `using` statements inside the namespace.
-
 ### Data Contract Mandate (The "Rosetta Stone" Rule)
 
 - **"Explicitly define the data contract between layers."**
 -  **Casing Check:** When writing API endpoints or Client wrappers, you **must** explicitly verify JSON property names.
-  - *C# Backend:* Use `[JsonPropertyName("camelCaseName")]` on DTOs to ensure frontend compatibility.
+  - *Java Backend:* Use the appropriate attributes on DTOs to ensure frontend compatibility.
   - *JS Client:* If the backend expects `snake_case`, use a `toBackendFormat()` mapper. **Never assume automapping works.**
 - **Payload Verification:** Before marking a task done, verify: "Does the frontend payload structure (nested objects, field names) match the backend DTO *exactly*?"
 
@@ -77,8 +65,8 @@ These instructions supplement the primary guidelines in `AGENTS.md`, `CODING_STY
 
 - **"Secure by Design, not by Patch."**
 - **No PII in URLs:** Never pass email, names, or IDs in Query Parameters. Use Session/Claims or POST bodies.
-- **Auth Decorators:** No API endpoint is created without an `[Authorize]` or `[RequirePermission]` attribute unless explicitly public (like login).
-- **Explicit Ignores:** In EF Core, use Fluent API `modelBuilder.Entity<T>().Ignore(x => x.Prop)` for all computed properties. Do not rely on `[NotMapped]`.
+- **Auth Decorators:** No API endpoint is created without an authorization or permission attribute unless explicitly public (like login).
+- **Explicit Ignores:** Explicity ignore any properties that are not needed or are computed. Do not assume the frameworks handle this well.
 
 ### Root Cause Refactoring (No Ad-Hoc Patches)
 
@@ -222,19 +210,6 @@ You must always update `CONVERSATION.md` with a brief description of changes mad
 ### `git commit`
 You must always commit all changes to `git` with a concise description of changes made after each set of changes. This ensures that work is not lost.
 
-## Access Control
-
-### RBAC & FGAC Compliance
-A full Role-Based Access Control (RBAC) and Fine-Grained Access Control (FGAC) system has been implemented. Refer to:
-- `specs/access_control.raw.md`
-- `specs/access_control.prd.md`
-- `ACCESS_CONTROL.md`
-
-For every new application, resource type, or feature, you must:
-- Identify what access control changes are needed
-- Implement proper permission checks
-- Update access control specifications if new resource types or permissions are introduced
-
 ## Database Migrations
 
 ### Plain SQL Over ORM Migration Tools
@@ -245,17 +220,18 @@ Always prefer writing plain SQL scripts for database migrations instead of using
 - Works reliably regardless of ORM tool versions
 
 ### Migration Guidelines
-- Place SQL migration scripts in `/sql/migrations/` with naming format: `YYYYMMDD_description.sql`
+- Place SQL migration scripts in `/sql/migrations/` with naming format: `YYYYMMDD_<ORDER>_description.sql`
+  - <ORDER> is the order in which to execute the scripts if multiple exist for the same day. Use a padded sequence number (000010, 000020, 000030 and so on).
 - Use `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` for idempotency
 - Include proper foreign key constraints with `ON DELETE CASCADE` or `ON DELETE SET NULL` as appropriate
 - Add timestamps (`created_at`, `updated_at`) to all tables
 - After running the SQL, record the migration in EF Core's history table:
   ```sql
   INSERT INTO "__EFMigrationsHistory" ("MigrationId", "ProductVersion")
-  VALUES ('YYYYMMDD_MigrationName', '10.0.2')
+  VALUES ('YYYYMMDD_<ORDER>_MigrationName', '10.0.2')
   ON CONFLICT ("MigrationId") DO NOTHING;
   ```
-- Update the model snapshot (`KnobbyDbContextModelSnapshot.cs`) manually to keep EF Core in sync
+- Update any ORM to keep it in sync.
 
 ### Running Migrations
 Use `psql` directly to run migrations:

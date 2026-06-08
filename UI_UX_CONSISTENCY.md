@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 145ce583-b7d1-4e68-8a0a-961886e1e100
-Created: 2026
--->
 
 # UI/UX Consistency Standards for Coding Agents
 

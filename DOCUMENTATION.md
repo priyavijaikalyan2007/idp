@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: f5bb83d2-d8a9-4f52-8dff-4ebd2f93456e
-Created: 2026
--->
 
 <!-- AGENT: Technical documentation standards and workflows for product documentation. -->
 
@@ -18,7 +10,7 @@ accurate, and accessible.
 
 ## Core Principles
 
-1.  **Audience-Centric:** Tailor content to the specific user persona (End User, Developer, Admin) — 
+1.  **Audience-Centric:** Tailor content to the specific user persona (End User, Developer, Admin) ï¿½ 
    whether they are an agent extending the library, a developer integrating it, or a beginner learning web development.
 2.  **Living Documentation:** Documentation must evolve synchronously with the codebase.
 3.  **Visual Consistency:** The documentation must mirror the application's styling, branding, and user interface
@@ -86,8 +78,7 @@ The documentation is hosted as part of the monolithic application. Coding agents
     *   All external-facing documentation source files must reside in `/docs/external/`.
 
 2.  **URL Structure:**
-    *   **Production:** `prod.<appdomain>.io/docs/` (Application: `prod.<appdomain>.io`)
-    *   **Staging (Development):** `dev.<appdomain>.io/docs/` (Application: `dev.<appdomain>.io`)
+    *   **Production:** `auth.<appdomain>.io/docs/` (Application: `auth.<appdomain>.io`)
 
 3.  **Build & Packaging:**
     *   The documentation is part of the single monolith Docker container.

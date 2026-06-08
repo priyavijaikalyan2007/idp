@@ -1,11 +1,4 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: e6b92026-a774-4b5d-9ffc-43db489aff13
-Created: 2026
--->
+
 
 <!-- AGENT: UX and UI design principles for frontend components or the frontend of applications. -->
 # UX/UI Design Guidelines

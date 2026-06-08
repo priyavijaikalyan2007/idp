@@ -1,4 +1,4 @@
-# Contributing to Enterprise Bootstrap Theme
+# Contributing to Keycloak Custom IdP
 
 Thank you for your interest in contributing to the coding agent instructions repository. We appreciate your time and effort in helping improve this project.
 

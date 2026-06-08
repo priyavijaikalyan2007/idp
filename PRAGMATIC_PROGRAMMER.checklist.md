@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: c5370fea-dbc9-47c2-bb1c-db957f7d01f3
-Created: 2026
--->
 
 # Pragmatic Programmer Checklist
 

@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 73503b77-47df-428c-a0bd-94cb17d79350
-Created: 2026
--->
 
 <!-- AGENT: Frontend development guidelines and architecture for the TypeScript/HTMX stack. -->
 
@@ -26,7 +18,7 @@ Created: 2026
 
 - Minimise DOM manipulations in component JavaScript.
 - Use efficient selector methods (`getElementById`, `querySelector`).
-- Leverage CSS for animations and transitions — avoid JavaScript animation where CSS suffices.
+- Leverage CSS for animations and transitions ï¿½ avoid JavaScript animation where CSS suffices.
 - Keep the compiled CSS output small; avoid generating redundant selectors.
 - Do not import the entirety of a library when only a small part is needed.
 - Implement lazy loading where appropriate

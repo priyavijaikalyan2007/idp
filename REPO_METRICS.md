@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 3c1f6c00-a906-4879-ae9f-facfd1efe022
-Created: 2026
--->
 
 # **Repository Metrics Analyzer — Technical Specification**
 

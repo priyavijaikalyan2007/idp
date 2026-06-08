@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: 65f0c083-038c-4fb4-8271-644cacaee806
-Created: 2026
--->
 
 <!-- AGENT: Marker guidance for fast navigation and shared conventions. -->
 # Agent Navigation Markers and Annotations
