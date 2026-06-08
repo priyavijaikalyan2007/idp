@@ -6,6 +6,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Editor Files
+*.swp
+*.bak
+
+# Build Output Folders
+*/target/*
+
 # Distribution / packaging
 .Python
 build/

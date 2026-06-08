@@ -40,7 +40,7 @@
 #   12. knobby-{env}-admin-api client configuration (§11.13)
 #   13. PKCE enforcement (behavioral) (§8.2)
 #
-#   MCP-readiness (Tests 14-26): designed to go from red→green progressively
+#   MCP-readiness (Tests 14-29): designed to go from red→green progressively
 #   as you complete the §16.11 setup phases:
 #   14. MCP Authenticator SPI loaded (§16.8)
 #   15. browser-mcp-tenant-pick auth flow exists (§16.8.1)
@@ -55,20 +55,23 @@
 #   24. DCR rejects disallowed scopes (§16.4)
 #   25. DCR-registered client has correct default scopes + flow binding (§16.4)
 #   26. Cleanup DCR-registered test client
+#   27. OAuth Authorization Server Metadata advertises DCR endpoint (§16.2)
+#   28. Realm SSL requirement (§16.5)
+#   29. Scope override mapper attached to mcp-default (§16.8.4)
 #
-#   Manual federation flows (Tests 27-32):
-#   27. Fallback picker (no kc_idp_hint)
-#   28. Google federation
-#   29. Microsoft federation, work account
-#   30. Microsoft federation, personal MSA
-#   31. GitHub federation
-#   32. Token exchange (optional)
-#   33. MCP end-to-end (path iii handoff) — requires Knobby web /mcp/consent
+#   Manual federation flows (Tests 30-35):
+#   30. Fallback picker (no kc_idp_hint)
+#   31. Google federation
+#   32. Microsoft federation, work account
+#   33. Microsoft federation, personal MSA
+#   34. GitHub federation
+#   35. Token exchange (optional)
+#   36. MCP end-to-end (path iii handoff) — requires Knobby web /mcp/consent
 #
-# v1.10 (this version): Added Tests 14-26 for MCP-readiness validation per
-# PRD §16. Designed for "red → green" progressive testing as each phase of
-# §16.11 setup completes. Each failure message points at the specific PRD
-# section / setup step that unblocks it.
+# v1.11 (this version): Added Tests 27-29 (OAuth metadata advertising,
+# realm SSL requirement, scope override mapper presence).
+#
+# v1.10: Added Tests 14-26 for MCP-readiness validation per PRD §16.
 #
 # v1.8 fix: Test 6 detects IdPs by both providerId and authorization URL
 # pattern, so the generic-OIDC Microsoft setup (PRD §6.3) is identified
@@ -1478,6 +1481,84 @@ else
         record_pass "DCR test cleanup" "deleted client ${DCR_CLIENT_ID}"
     else
         record_fail "DCR test cleanup" "delete returned HTTP ${DELETE_STATUS} - manual cleanup may be needed for client ${DCR_CLIENT_ID}"
+    fi
+fi
+
+# ----- test 27: OAuth Authorization Server Metadata advertises DCR endpoint -----
+section "Test 27: OAuth Authorization Server Metadata advertises DCR (§16.2)"
+
+# RFC 8414 — MCP clients use this to discover the DCR endpoint. If discovery
+# doesn't advertise registration_endpoint, MCP clients can't auto-register.
+AS_METADATA_URL="${REALM_BASE}/.well-known/oauth-authorization-server"
+AS_METADATA_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" "${AS_METADATA_URL}")
+AS_METADATA_STATUS=$(echo "$AS_METADATA_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+AS_METADATA_BODY=$(echo "$AS_METADATA_RESP" | sed '$d')
+
+if [[ "$AS_METADATA_STATUS" != "200" ]]; then
+    # OIDC discovery is at .well-known/openid-configuration; many Keycloak realms
+    # don't expose the separate oauth-authorization-server endpoint. Fall back
+    # to the OIDC discovery doc since it includes registration_endpoint too.
+    AS_METADATA_BODY="$DISCOVERY_BODY"
+    AS_METADATA_STATUS="200 (via openid-configuration fallback)"
+fi
+
+REGISTRATION_EP=$(echo "$AS_METADATA_BODY" | jq -r '.registration_endpoint // empty' 2>/dev/null)
+if [[ -n "$REGISTRATION_EP" ]]; then
+    record_pass "OAuth metadata advertises DCR" "registration_endpoint=${REGISTRATION_EP}"
+else
+    record_fail "OAuth metadata advertises DCR" "no registration_endpoint in authorization server metadata - MCP clients cannot auto-discover the DCR endpoint (§16.2)"
+fi
+
+# ----- test 28: realm requires HTTPS -----
+section "Test 28: Realm SSL requirement (§16.5)"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    record_fail "realm SSL requirement" "skipped - no admin access token"
+else
+    REALM_DATA=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" "${KC_URL}/admin/realms/${REALM}")
+    SSL_REQUIRED=$(echo "$REALM_DATA" | jq -r '.sslRequired // "external"')
+    if [[ "$KNOBBY_ENV" == "test" ]]; then
+        record_pass "realm SSL requirement" "skipped for test env (HTTP permitted for local dev; sslRequired=${SSL_REQUIRED})"
+    elif [[ "$SSL_REQUIRED" == "all" ]]; then
+        record_pass "realm SSL requirement" "sslRequired=all (per §16.11 step 13)"
+    elif [[ "$SSL_REQUIRED" == "external" ]]; then
+        record_fail "realm SSL requirement" "sslRequired='external' - HTTPS only enforced for non-loopback; for prod/dev should be 'all' (§16.11 step 13)"
+    else
+        record_fail "realm SSL requirement" "sslRequired='${SSL_REQUIRED}' - should be 'all' (§16.11 step 13)"
+    fi
+fi
+
+# ----- test 29: scope override mapper attached to mcp-default -----
+section "Test 29: Scope override mapper attached to mcp-default (§16.8.4)"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    record_fail "scope override mapper" "skipped - no admin access token"
+else
+    # Re-fetch the mcp-default scope to look for the scope-override mapper.
+    # The mapper can be either:
+    #   - A custom protocol mapper (providerId 'knobby-mcp-scope-override' or similar)
+    #   - A Script Mapper with a script that sets the scope claim
+    # Either implementation is acceptable per §16.8.4 (custom recommended).
+    MCP_DEFAULT_REFETCH=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "${KC_URL}/admin/realms/${REALM}/client-scopes" | \
+        jq -r --arg name "$MCP_DEFAULT_SCOPE" '.[] | select(.name == $name)' 2>/dev/null || true)
+
+    if [[ -z "$MCP_DEFAULT_REFETCH" ]]; then
+        record_fail "scope override mapper" "mcp-default Client Scope not found (depends on Test 17)"
+    else
+        # Look for any mapper that emits the 'scope' claim
+        # Custom mapper case: protocolMapper contains 'scope' or matches a known custom ID
+        # Script mapper case: protocolMapper == 'oidc-script-based-protocol-mapper'
+        CUSTOM_OVERRIDE=$(echo "$MCP_DEFAULT_REFETCH" | jq -r '.protocolMappers[]? | select(.protocolMapper | contains("scope-override") or contains("knobby-mcp-scope")) | .id' 2>/dev/null || true)
+        SCRIPT_OVERRIDE=$(echo "$MCP_DEFAULT_REFETCH" | jq -r '.protocolMappers[]? | select(.protocolMapper == "oidc-script-based-protocol-mapper") | .id' 2>/dev/null || true)
+
+        if [[ -n "$CUSTOM_OVERRIDE" ]]; then
+            record_pass "scope override mapper" "custom protocol mapper present (recommended approach per §16.8.4)"
+        elif [[ -n "$SCRIPT_OVERRIDE" ]]; then
+            record_pass "scope override mapper" "script-based protocol mapper present (acceptable per §16.8.4 Option B; requires 'scripts' feature in Keycloak)"
+        else
+            record_fail "scope override mapper" "no scope-override mapper found on mcp-default - SPI's session-note-driven scope override won't work (§16.8.4). Add either a custom protocol mapper (Option A, recommended) or Script Mapper (Option B)"
+        fi
     fi
 fi
 

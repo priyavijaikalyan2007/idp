@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: db94a357-73e9-4c29-8a8a-83d8b85f3eb6
-Created: 2026
--->
 
 <!-- AGENT: Master instructions file for coding agents; start here for all tasks. -->
 

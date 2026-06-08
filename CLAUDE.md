@@ -1,11 +1,3 @@
-<!--
-SPDX-FileCopyrightText: 2026 Priya Vijai Kalyan <priyavijai.kalyan2007@proton.me>
-SPDX-FileCopyrightText: 2026 Outcrop Inc
-SPDX-License-Identifier: MIT
-Repository: instructions
-File GUID: d1f4b16d-bb13-4244-8b02-1c8905cc2145
-Created: 2026
--->
 
 <!-- AGENT: Instructions for Claude Code agent; directs to AGENTS.md as the master instructions file. -->
 
