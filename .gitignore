@@ -14,7 +14,16 @@ __pycache__/
 **/.obsidian/
 
 # Build Output Folders
-**/target/*
+#  - **/target/   ignores any Maven module's target dir (e.g., src/providers/target/)
+#                 AND the repo-root /target/ staging dir produced by build.sh.
+#  - .mvn/timing/ and similar Maven scratch directories.
+**/target/
+.mvn/timing/
+
+# Java compiled output
+*.class
+*.jar
+!**/maven-wrapper.jar
 
 # Distribution / packaging
 .Python

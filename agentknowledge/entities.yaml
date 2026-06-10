@@ -1,0 +1,5 @@
+# Data models and entities mapped to code and (where applicable) database tables.
+# The MCP SPI introduces no persistent data models — all state lives in either
+# the Keycloak authentication session (transient, in-memory) or environment-variable
+# secrets (provisioned via GCP Secret Manager). Populate this file when a future
+# slice introduces an actual entity.

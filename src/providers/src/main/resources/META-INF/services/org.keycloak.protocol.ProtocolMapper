@@ -1,0 +1,3 @@
+# Keycloak OIDC ProtocolMapper providers provided by this JAR.
+# One fully-qualified class name per non-comment line.
+io.knobby.keycloak.mcp.mapper.McpScopeOverrideMapper

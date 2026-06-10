@@ -15,6 +15,7 @@ read_field() {
 }
 
 REMOTE_TAG=$(read_field remote_tag)
+LATEST_TAG=$(read_field latest_tag)
 REGION=$(read_field region)
 
 if ! docker image inspect "${REMOTE_TAG}" > /dev/null 2>&1; then
@@ -23,11 +24,18 @@ if ! docker image inspect "${REMOTE_TAG}" > /dev/null 2>&1; then
 fi
 
 echo "=== Pushing to Artifact Registry ==="
-echo "Image: ${REMOTE_TAG}"
+echo "Versioned: ${REMOTE_TAG}"
+echo "Latest:    ${LATEST_TAG}"
 
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+# Push the versioned tag first; this is the load-bearing artifact that Cloud Run
+# revisions pin to. The :latest tag follows — moving tag for convenience pulls.
 docker push "${REMOTE_TAG}"
+docker push "${LATEST_TAG}"
 
 echo ""
 echo "=== Push Complete ==="
-echo "Image available at: ${REMOTE_TAG}"
+echo "Images available at:"
+echo "  ${REMOTE_TAG}"
+echo "  ${LATEST_TAG}"
