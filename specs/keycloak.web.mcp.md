@@ -338,11 +338,12 @@ When `/api/mcp/consent/authorize` (§2.2) builds the picker-result token:
 ```
 
 **HMAC key sourcing:**
-- Production: `yourapp-mcp-handoff-hmac-key-{env}` from GCP Secret Manager.
-- Development: env var or local config file pointing at a dev key.
-- Test: a fixed key embedded in the test fixture (NOT a real key).
+- Production: `yourapp-mcp-handoff-hmac-key-yourapp-prod` from GCP Secret Manager.
+- Development: `yourapp-mcp-handoff-hmac-key-yourapp-dev` from GCP Secret Manager (or a local override key for developer machines that bypass IdP via the test-login endpoint).
+- Test (deployed `yourapp-test` realm): `yourapp-mcp-handoff-hmac-key-yourapp-test`.
+- Test fixtures (unit/IT): a fixed key embedded in the fixture (NOT a real key).
 
-The same key is shared with Keycloak's SPI; both sides fetch it identically.
+The same key is shared with Keycloak's SPI for the matching realm; both sides fetch it identically. Per-realm isolation (one HMAC key per realm, not one per YourApp web environment globally) defends against a single-realm leak compromising a different realm — see `keycloak-hmac-operations-guide.md` and `keycloak.prd.md` §16.8.5.
 
 ### 3.4 Replay cache
 
@@ -580,8 +581,8 @@ This is the contract enforcement that prevents version-drift bugs between the tw
 
 | Variable | Required | Description |
 |---|---|---|
-| `YOURAPP_MCP_HANDOFF_HMAC_KEY` | Yes | Current HMAC key (base64-encoded 32 bytes). Same key as SPI uses. |
-| `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS` | No | Previous key during rotation |
+| `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` | Yes | Current HMAC key for the realm this YourApp web environment maps to (e.g., prod YourApp web sets `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`, dev sets `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_DEV`). Base64-encoded 32 bytes. Same key value as Keycloak SPI uses for the same realm. The suffixed name matches the Keycloak SPI convention for cross-repo consistency and so that an accidentally-misnamed mount fails fast. |
+| `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` | No | Previous key during rotation for that realm. |
 | `KEYCLOAK_REALM_BASE` | Yes | e.g., `https://auth.yourapp.com/realms/yourapp-prod` |
 | `KEYCLOAK_ADMIN_CLIENT_ID` | Yes | `yourapp-prod-admin-api` |
 | `KEYCLOAK_ADMIN_CLIENT_SECRET` | Yes | Service account secret |

@@ -305,7 +305,7 @@ Cost: one additional Keycloak authentication flow to maintain (an extra page of 
 
 #### 2.3.4 Cross-system handoff token construction
 
-Both tokens (picker-request and picker-result) are short-lived JWTs signed with a **symmetric key (HS256)** held by both the Keycloak SPI and the YourApp backend. Stored as a shared secret rotated quarterly (`yourapp-mcp-handoff-hmac-key-{env}` in GCP Secrets Manager, mirroring the Keycloak PRD §10.5 secrets convention).
+Both tokens (picker-request and picker-result) are short-lived JWTs signed with a **symmetric key (HS256)** held by both the Keycloak SPI and the matching YourApp backend environment. **Per-realm:** one Keycloak instance hosts three realms (`yourapp-prod`, `yourapp-dev`, `yourapp-test`) and each holds its own HMAC key — a key leak in one realm cannot mint tokens accepted by another. Stored as a per-realm shared secret rotated quarterly (`yourapp-mcp-handoff-hmac-key-{realm}` in GCP Secrets Manager — e.g., `yourapp-mcp-handoff-hmac-key-yourapp-prod`; see Keycloak PRD §10.5 and `keycloak-hmac-operations-guide.md`). The SPI reads each realm's key from env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` (where `<R>` is the realm name uppercased with `-`→`_`); the matching YourApp backend reads its single realm's key from the same env-var name.
 
 **Why HMAC and not asymmetric:** both ends are first-party services owned by YourApp; symmetric is simpler, faster, and the operational story (one secret, rotated together) is cleaner than managing a key pair across systems.
 
@@ -526,7 +526,7 @@ When this design is absorbed into the formal PRDs:
 - **New §5.x — MCP integration realm structure:** introduce `mcp-dcr-policy` (Client Registration Policy), `mcp-default` (Client Scope inherited by DCR'd MCP clients), and `yourapp-mcp-api` (resource server audience). **Explicitly note** that no `yourapp-{env}-mcp-server` client exists; each MCP install gets its own DCR-generated `client_id`.
 - **New §6.x — `browser-mcp-tenant-pick` authentication flow:** a new flow duplicated from `browser-federated-only` with the SPI Authenticator step appended. Auto-bound to DCR'd MCP clients via `mcp-dcr-policy` defaults. Web users continue on `browser-federated-only` unchanged.
 - **New §6.y — Authenticator + Realm Resource Provider SPI (path iii handoff):** specifies the Authenticator interface implementation, the Realm Resource Provider for the picker-result callback, the three protocol mappers (`tenant`, `scope` override, audience `yourapp-mcp-api`), and the HMAC handoff key management.
-- **§10.5 secrets table:** add `yourapp-mcp-handoff-hmac-key-{env}`. (No `yourapp-keycloak-mcp-client-secret-{env}` — DCR'd clients have their own per-install secrets, not a shared one.)
+- **§10.5 secrets table:** add `yourapp-mcp-handoff-hmac-key-{realm}` (per-realm — one per `yourapp-prod`/`yourapp-dev`/`yourapp-test`). (No `yourapp-keycloak-mcp-client-secret-{env}` — DCR'd clients have their own per-install secrets, not a shared one.)
 - **§10.8 naming table:** add MCP-related rows — `mcp-dcr-policy`, `mcp-default`, `yourapp-mcp-api`, `browser-mcp-tenant-pick`, `mcp-handoff-hmac-key`, picker-flow URLs.
 - **§11.x runbook:** setup steps for the DCR policy, the `mcp-default` client scope and its protocol mappers, the new auth flow, and the SPI JAR (baked into the Keycloak Docker image alongside the Keycloakify theme JAR per §11.15 Dockerfile).
 - **§13 OpenTofu:** add `yourapp-realm-mcp/` module covering DCR policy + client scope + auth flow + protocol mappers (the SPI JAR is image-baked, not Tofu-managed).
@@ -544,7 +544,7 @@ None. Library §10 already specifies the Curate role pattern this design lifts t
 - New user-menu entry "Connected Agents" + corresponding page per §2.6 of this doc.
 - New tenant-admin view "MCP Connections" listing all connected agents tenant-wide.
 - Extension to `PermissionMappingRegistry.AccessLevelInfo` to surface the Bundle ↔ RBAC mapping grid for §1.9 / §2.5 consumption.
-- New backend route `POST /api/v1/mcp/consent/authorize` that validates the picker-request token, validates tenant membership, and issues the picker-result token. Reuses the HMAC handoff key from `yourapp-mcp-handoff-hmac-key-{env}`.
+- New backend route `POST /api/v1/mcp/consent/authorize` that validates the picker-request token, validates tenant membership, and issues the picker-result token. Reuses the HMAC handoff key from `yourapp-mcp-handoff-hmac-key-{realm}` — the realm matching the YourApp backend environment (prod backend → `yourapp-prod` realm's key, etc.). Read at runtime from env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>`.
 - New domain-context detection helper that, given a federated user's email domain, returns whether it matches a connected tenant directory binding (drives the §2.5.5 Case A / Case B branching).
 
 ---

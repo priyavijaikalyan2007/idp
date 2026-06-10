@@ -698,7 +698,7 @@ All secrets follow the convention `yourapp-<system>-<purpose>-<credential-type>-
 | `yourapp-google-oauth-client-secret-{env}` | Keycloak → Google (broker auth) | Google Cloud OAuth client |
 | `yourapp-github-oauth-client-secret-{env}` | Keycloak → GitHub (broker auth) | GitHub OAuth App |
 | `yourapp-keycloak-db-password-{env}` | Keycloak → Postgres | Postgres user |
-| `yourapp-mcp-handoff-hmac-key-{env}` | Keycloak SPI ↔ yourapp.com backend (path iii handoff) | Generated; 256-bit random, base64. Rotated quarterly with two-key overlap (§16.8.5). |
+| `yourapp-mcp-handoff-hmac-key-{realm}` | Keycloak SPI ↔ yourapp.com backend (path iii handoff) | Generated; 256-bit random, base64. **Per-realm** (`yourapp-prod`, `yourapp-dev`, `yourapp-test`) — one Keycloak instance hosts all three realms, but each holds its own HMAC key to keep cross-realm isolation. Rotated quarterly per realm with two-key overlap (§16.8.5, `keycloak-hmac-operations-guide.md`). |
 
 ### 10.6 Audit
 
@@ -772,9 +772,10 @@ Authoritative table. The OpenTofu IaC (§13) reads from this table.
 | **MCP — DCR endpoint** | `<issuer>/clients-registrations/openid-connect` | `https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect` |
 | **MCP — authentication flow name** | `browser-mcp-tenant-pick` (one per realm; appended SPI step) | `browser-mcp-tenant-pick` |
 | **MCP — Realm Resource Provider callback** | `<issuer>/mcp-picker-callback` | `https://auth.yourapp.com/realms/yourapp-prod/mcp-picker-callback` |
-| **MCP — consent wizard URL (yourapp.com side)** | `https://{app-hostname}/mcp/consent` | `https://prod.yourapp.com/mcp/consent` |
+| **MCP — consent wizard URL (yourapp.com side)** | `https://{yourapp-web-host}/mcp/consent` where `{yourapp-web-host}` is set per-realm via Authenticator config `yourapp.web.host` (§16.8.2, `keycloak.spi.mcp.md` §7.3) | `https://prod.yourapp.com/mcp/consent` for realm `yourapp-prod`; `https://dev.yourapp.com/mcp/consent` for `yourapp-dev` |
 | **MCP — SPI JAR name** | `yourapp-keycloak-mcp-spi-{version}.jar` | `yourapp-keycloak-mcp-spi-1.0.0.jar` |
-| **MCP — handoff HMAC key secret** | `yourapp-mcp-handoff-hmac-key-{env}` | `yourapp-mcp-handoff-hmac-key-prod` |
+| **MCP — handoff HMAC key secret** | `yourapp-mcp-handoff-hmac-key-{realm}` (per-realm) | `yourapp-mcp-handoff-hmac-key-yourapp-prod` |
+| **MCP — handoff HMAC env var** | `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` where `<R>` is the realm name uppercased with `-`→`_` | `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD` |
 | **MCP — DCR'd client IDs** | Auto-generated UUIDs by Keycloak (no convention; tracked via DCR metadata `client_name`) | `9a8b7c6d-...` |
 
 **Note on MCP:** there is intentionally **no static `yourapp-{env}-mcp-server` OIDC client.** DCR creates first-class Keycloak clients per MCP-client-install (one per `Claude Code on user X's laptop`, one per `Cursor on user Y's laptop`, etc.). The yourapp.com MCP server itself is a *resource server*, not a Keycloak client — identified by the audience string `yourapp-mcp-api` set via the `mcp-default` Client Scope. See §16.4 for the full architecture.
@@ -1980,11 +1981,12 @@ Java/Kotlin implementation of `org.keycloak.authentication.Authenticator`. Respo
 
 - Read `KeycloakSession.getContext().getAuthenticationSession().getAuthenticatedUser().getId()` to get the user's `sub`.
 - Read the requesting client's `client_id`, requested scopes, and the OAuth `state` parameter.
-- Construct the picker-request token (§16.8.5) and HMAC-sign it.
+- Read `{yourapp-web-host}` from the per-realm Authenticator config property `yourapp.web.host` (set in the admin console per §16.11 step 2; resolved at request time so the same SPI class serves all realms).
+- Construct the picker-request token (§16.8.5) and HMAC-sign it with the realm's HMAC key, read from env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` where `<R>` is the realm name uppercased with `-`→`_` (per-realm isolation; see §16.8.5 and `keycloak.spi.mcp.md` §7).
 - Issue HTTP 302 to `https://{yourapp-web-host}/mcp/consent?token=<picker-request-token>`.
 - Mark the auth step as `CHALLENGE` (awaiting external completion); Keycloak suspends the flow.
 
-The Authenticator is a single class, ~80 lines. Its `requiresUser()` returns `true` (must run after federated auth completes); `configuredFor(...)` returns `true` for all clients bound to this flow.
+The Authenticator is a single class, ~80 lines. Its `requiresUser()` returns `true` (must run after federated auth completes); `configuredFor(...)` returns `true` for all clients bound to this flow. `isConfigurable()` returns `true` to surface the `yourapp.web.host` property — the only per-realm config the SPI exposes.
 
 #### 16.8.3 The Realm Resource Provider (callback handler)
 
@@ -2056,11 +2058,13 @@ Both tokens (picker-request and picker-result) are short-lived JWTs signed with 
 
 **State-vs-claims separation:** the picker-request token carries the OAuth `state` value as one of its claims, so YourApp web never has to read `state` from the URL bar (avoids accidentally treating it as user-visible state). YourApp returns `state` to Keycloak inside the picker-result token; Keycloak then forwards it to the MCP client in the normal OAuth `state` callback parameter.
 
-**Key rotation:** the shared HMAC key (`yourapp-mcp-handoff-hmac-key-{env}` in GCP Secret Manager) is rotated quarterly. To avoid downtime during rotation, both SPI and YourApp backend support a two-key overlap pattern: each side accepts tokens signed by either the current or the previous key, while only signing with the current one. Cutover sequence:
-1. Generate new key version, add to Secret Manager (versions older than 2 are deleted after cutover).
-2. Deploy SPI + YourApp backend with two-key support reading both versions.
-3. Update both to sign with the new key while still accepting the previous.
-4. After all in-flight tokens have expired (5 min for picker-request, 1 min for picker-result, so 10 min safety margin), the previous key can be retired.
+**Key rotation:** keys are rotated quarterly **per realm** — one Keycloak instance hosts three realms (`yourapp-prod`, `yourapp-dev`, `yourapp-test`) and each holds its own HMAC key (`yourapp-mcp-handoff-hmac-key-{realm}` in GCP Secret Manager, mounted as `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>`). Rotating one realm does not require touching the others. To avoid downtime during a realm's rotation, both SPI and the matching YourApp backend environment support a two-key overlap pattern: each side accepts tokens signed by either the current or the previous key for that realm, while only signing with the current one. Cutover sequence (per realm `R`):
+1. Generate a new key for realm `R`, add a new version to `yourapp-mcp-handoff-hmac-key-{R}`. Move the prior current value into `yourapp-mcp-handoff-hmac-key-{R}-previous`.
+2. Wire `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` on both Keycloak and the matching YourApp backend environment; deploy both. Both sides now accept either key for that realm.
+3. After all in-flight tokens for realm `R` have expired (5 min for picker-request, 1 min for picker-result, so a 15 min safety margin), unwire `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` and redeploy both. The previous key is retired for that realm.
+4. Optionally destroy the prior secret version after 24h of healthy operation.
+
+Per-realm step-by-step procedures (including emergency rotation when a single realm's key is compromised) live in `keycloak-hmac-operations-guide.md`.
 
 #### 16.8.6 JAR build & deployment
 
@@ -2139,6 +2143,11 @@ Applied via admin console once per realm (prod, dev, test). OpenTofu codifies th
    - Authentication → Flows → "browser-federated-only" → Action → Duplicate. Name: `browser-mcp-tenant-pick`.
    - Add execution → "YourApp MCP Tenant Picker" (the SPI Authenticator).
    - Set the new step's requirement to **Required**.
+   - **Configure the Authenticator step:** click the gear icon on the YourApp MCP Tenant Picker step → set **YourApp web host** (`yourapp.web.host`) to the hostname YourApp web serves `/mcp/consent` at for this realm. No scheme, no trailing slash. Per-realm:
+     - `yourapp-prod` → `prod.yourapp.com`
+     - `yourapp-dev` → `dev.yourapp.com`
+     - `yourapp-test` → matching test hostname (decided when realm is created)
+     The SPI hard-fails the flow with a literate error if this value is unset (see `keycloak.spi.mcp.md` §7.3).
    - Save.
 
 3. **Configure the `mcp-default` Client Scope:**
@@ -2168,11 +2177,13 @@ Applied via admin console once per realm (prod, dev, test). OpenTofu codifies th
    - For each policy row in §16.4, add the corresponding policy entry.
    - For the auto-binding entries (Authentication Flow Override and Default Client Scopes), use the realm's Default Client Scopes settings; DCR-registered clients inherit these.
 
-6. **Configure HMAC handoff key:**
-   - Generate 256-bit random key: `openssl rand -base64 32`
-   - Store in GCP Secret Manager: `yourapp-mcp-handoff-hmac-key-{env}`
-   - Mount the secret into Keycloak Cloud Run revision as env var `YOURAPP_MCP_HANDOFF_HMAC_KEY` (SPI reads from this env).
-   - Mount into yourapp.com app's Cloud Run / Hetzner deployment as env var (YourApp backend reads from this env).
+6. **Configure HMAC handoff key (per realm):**
+   - Each realm holds its own HMAC key — `yourapp-prod`, `yourapp-dev`, and `yourapp-test` are isolated from each other. Repeat this step for each realm using the SPI.
+   - Generate a 256-bit random key: `openssl rand -base64 32`.
+   - Store in GCP Secret Manager as `yourapp-mcp-handoff-hmac-key-{realm}` (e.g., `yourapp-mcp-handoff-hmac-key-yourapp-prod`).
+   - Mount the secret into the Keycloak Cloud Run revision as env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` (e.g., `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`), where `<R>` is the realm name uppercased with `-`→`_`. The SPI reads this lazily on the first request through the realm; missing or malformed values fail the flow with a literate error code (`MISSING_HMAC_KEY`, `MALFORMED_BASE64`, `WRONG_KEY_LENGTH`).
+   - Mount the same secret into the matching YourApp backend environment (prod backend gets the `yourapp-prod` realm's key, dev backend gets `yourapp-dev`'s key, etc.) under the same env-var name. Per-realm isolation is preserved by per-environment YourApp backend deployments each holding exactly one realm's key.
+   - Detailed creation, distribution, rotation, and emergency-rotation procedures live in `keycloak-hmac-operations-guide.md`.
 
 7. **Configure realm-level OAuth 2.1 settings** (if not already done):
    - Realm settings → Tokens → Revoke Refresh Token: On
@@ -2195,16 +2206,17 @@ Applied via admin console once per realm (prod, dev, test). OpenTofu codifies th
 
 9. **Test the path (iii) handoff** (after YourApp web `/mcp/consent` is implemented):
    - Initiate an OAuth flow with the DCR-registered client.
-   - Verify the browser redirects through: federated IdP → `prod.yourapp.com/mcp/consent` (silent OIDC) → wizard → `auth.yourapp.com/.../mcp-picker-callback` → MCP client redirect URI.
+   - Verify the browser redirects through: federated IdP → `{yourapp.web.host for this realm}/mcp/consent` (e.g., `prod.yourapp.com/mcp/consent` for the `yourapp-prod` realm) → wizard → `auth.yourapp.com/realms/{realm}/mcp-picker-callback` → MCP client redirect URI.
    - Decode the resulting access token; verify `aud == "yourapp-mcp-api"`, `tenant` claim is set, `scope` claim reflects the user's choice (not the originally requested scopes).
 
 10. **Clean up smoke-test client:** delete via the registration_client_uri returned in step 8.
 
 ### 16.12 Verification Checklist
 
-**Realm-level:**
+**Realm-level (verify per realm: `yourapp-prod`, `yourapp-dev`, `yourapp-test`):**
 - [ ] SPI JAR loaded; "YourApp MCP Tenant Picker" Authenticator visible in admin console
 - [ ] `browser-mcp-tenant-pick` flow exists with SPI Authenticator as final step
+- [ ] SPI Authenticator step has `yourapp.web.host` configured to this realm's YourApp web hostname (no scheme, no trailing slash)
 - [ ] All 6 `yourapp:*` Client Scopes exist with consent text set; `yourapp:admin` is **not** in default scope list
 - [ ] `mcp-default` Client Scope exists with audience mapper for `yourapp-mcp-api` + tenant claim mapper + scope override mapper
 - [ ] `mcp-dcr-policy` configured with all entries from §16.4 including auto-binding to `browser-mcp-tenant-pick`
@@ -2228,8 +2240,9 @@ Applied via admin console once per realm (prod, dev, test). OpenTofu codifies th
 
 **Infrastructure:**
 - [ ] Cloudflare WAF rule for `/realms/*/clients-registrations/*` rate limit is active
-- [ ] HMAC handoff key present in GCP Secret Manager for the env
-- [ ] Both Keycloak and YourApp backend can read the key on startup (no boot failures)
+- [ ] HMAC handoff key present in GCP Secret Manager **per realm** (`yourapp-mcp-handoff-hmac-key-yourapp-prod`, `…-yourapp-dev`, `…-yourapp-test` when that realm exists)
+- [ ] Keycloak container env wires `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` for every realm using the SPI; startup log line `HMAC keys configured for realms: [...]` matches the expected realm set
+- [ ] Each YourApp backend environment reads its matching realm's key (prod backend → `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`, etc.); no environment holds another's key
 - [ ] yourapp.com MCP server endpoint at `/mcp` validates `aud` strictly (app-side; tracked separately from Keycloak realm config)
 
 ---

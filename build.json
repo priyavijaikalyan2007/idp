@@ -1,11 +1,14 @@
 {
   "keycloak_version": "26.6.0",
-  "git_commit": "4c72a48",
-  "version_tag": "26.6.0-4c72a48",
+  "spi_version": "0.1.0-SNAPSHOT",
+  "git_commit": "8b63f47",
+  "build_timestamp": "20260610022831",
+  "version_tag": "20260610022831-8b63f47",
   "local_tag": "keycloak:local",
-  "remote_tag": "your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak:26.6.0-4c72a48",
+  "remote_tag": "your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak:20260610022831-8b63f47",
+  "latest_tag": "your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak:latest",
   "registry": "your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak",
   "region": "your-region",
   "project_id": "your-gcp-project-id",
-  "built_at": "2026-05-26T18:39:06Z"
+  "built_at": "2026-06-10T02:28:31Z"
 }

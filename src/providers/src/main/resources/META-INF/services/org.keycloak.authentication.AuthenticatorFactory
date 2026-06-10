@@ -1,0 +1,4 @@
+# Keycloak Authenticator factories provided by this JAR.
+# One fully-qualified class name per non-comment line.
+# Lines starting with # are comments (java.util.ServiceLoader convention).
+io.yourapp.keycloak.mcp.authenticator.McpTenantPickerAuthenticatorFactory

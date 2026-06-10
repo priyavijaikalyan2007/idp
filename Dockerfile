@@ -56,19 +56,34 @@ ENV KC_CACHE=local
 
 # Runtime secrets / configuration the SPI(s) read on startup.
 # These are NOT set in the image - they're mounted as env vars by the deployment
-# platform (Cloud Run / Hetzner systemd / docker-compose) from Secret Manager:
+# platform (Cloud Run / Hetzner systemd / docker-compose) from Secret Manager.
 #
-#   YOURAPP_MCP_HANDOFF_HMAC_KEY    HMAC signing key shared between this SPI and
-#                                  YourApp web's /mcp/consent backend for the
-#                                  path (iii) handoff (PRD §16.8.5). Sourced
-#                                  from GCP Secret Manager:
-#                                  yourapp-mcp-handoff-hmac-key-{env}.
-#                                  Required if the MCP SPI is deployed.
-#                                  Rotated quarterly with two-key overlap.
+# Per-realm HMAC keys — one set per realm hosted by this Keycloak instance
+# (one Keycloak hosts yourapp-prod, yourapp-dev, yourapp-test; each realm holds
+# its OWN HMAC key for cross-realm isolation):
 #
-#   YOURAPP_WEB_HOST                Hostname of YourApp web for the picker
-#                                  redirect (e.g., "prod.yourapp.com").
-#                                  Required if the MCP SPI is deployed.
+#   YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>          Current HMAC key for realm <R>,
+#                                              where <R> is the realm name
+#                                              uppercased with - replaced by _
+#                                              (yourapp-prod -> YOURAPP_PROD).
+#                                              Base64-encoded 32 bytes. Sourced
+#                                              from GCP Secret Manager secret
+#                                              yourapp-mcp-handoff-hmac-key-<realm>.
+#                                              Required for each realm using
+#                                              the MCP SPI. Rotated quarterly
+#                                              with two-key overlap per realm.
+#
+#   YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R> Previous HMAC key during a
+#                                              rotation overlap window. Removed
+#                                              once all in-flight tokens have
+#                                              expired (15 min margin).
+#
+# The YourApp web hostname is configured per-realm via the Keycloak admin
+# console as an Authenticator config property (yourapp.web.host), NOT as an env
+# var — it varies by realm and is non-sensitive routing config that lives next
+# to the realm's flow definition.
+#
+# See specs/keycloak.spi.mcp.md §7 and specs/keycloak-hmac-operations-guide.md.
 
 # OCI image labels for traceability across Cloud Run revisions.
 # Override --build-arg values at `docker build` time to stamp specific commits/dates.

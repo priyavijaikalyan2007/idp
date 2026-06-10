@@ -1,0 +1,82 @@
+<!-- AGENT: Accumulated engineering insights from coding sessions on this repository. Consult before implementation; append new insights after each session. -->
+
+# Agent Insights — YourApp Keycloak IdP
+
+Insights are hard-won lessons from real bugs, design dead-ends, API archaeology, and user-feedback corrections during work on this repository. Each insight captures a *principle* — not just what happened, but *why* it matters and *how* to apply it next time.
+
+**For agents**: Read this at session start. Append new insights here when you hit a non-obvious wall and find a way through. Date entries.
+
+---
+
+## 1. Keycloak SPI integration
+
+### 1.1 Verify Keycloak's JOSE/auth APIs against the JARs, not docs (2026-06-08)
+Keycloak's published docs lag the source by 1–2 minor versions and the deprecation timeline of internal classes (`JWSBuilder.hmac256(byte[])`, `org.keycloak.jose.jws.Algorithm` enum, etc.) is not reliably called out anywhere except the JAR's `@Deprecated` annotations. Before committing to any signature/JOSE call, run `javap -p -classpath ~/.m2/repository/org/keycloak/...jar <FQCN>` to see the actual method set, then compile with `-Dmaven.compiler.showDeprecation=true` and replace anything that warns. The modern HMAC path in 26.6 is `JWSBuilder.sign(new MacSignatureSignerContext(KeyWrapper{secretKey, "HS256"}))`, not the public-API-looking `hmac256(byte[])`.
+
+**Principle**: For an SPI compiled against a fast-moving host runtime, the JARs are the API contract. Treat docs as orientation, not specification.
+
+### 1.2 OIDC `scope` is access-token-only; resist the spec's "implement three interfaces" pattern (2026-06-08)
+The design spec said `McpScopeOverrideMapper` should implement `OIDCAccessTokenMapper + OIDCIDTokenMapper + UserInfoTokenMapper`. But `org.keycloak.representations.IDToken` has no `setScope` method — OIDC reserves the `scope` claim for access tokens (RFC 6749/OIDC core). Implementing the other two marker interfaces would be either a no-op or a hack via `otherClaims`. Trimmed the mapper to `OIDCAccessTokenMapper` only and documented the deviation in the class JavaDoc.
+
+**Principle**: When a spec lists multiple integration points, sanity-check each against the underlying contract before mass-implementing. "Symmetric" interface sets often hide one-off semantics that justify only a subset.
+
+### 1.3 Suspend/resume uses the auth-session breadcrumb Keycloak already writes (2026-06-08)
+The Keycloak source-spike found a critical detail: when `context.challenge(Response)` runs on a REQUIRED execution, `DefaultAuthenticationFlow.processResult` auto-writes the auth-session note `AuthenticationProcessor.CURRENT_AUTHENTICATION_EXECUTION` = current execution id. The resume side doesn't need to track this — it just needs to redirect to `AuthenticationFlowURLHelper.getLastExecutionUrl(authSession)` which reads that note and rebuilds the URL. **Do not** construct an `AuthenticationProcessor` and call `authenticate()` from the callback — that re-runs the entire flow from the top.
+
+**Principle**: Before re-implementing flow machinery, study how `IdentityBrokerService.afterFirstBrokerLogin()` (or the equivalent canonical handler) resumes. Keycloak frequently provides the right primitive one method call away.
+
+### 1.4 Carry `client_id` + `tab_id` through every cross-process round-trip (2026-06-08)
+`AuthenticationSessionManager.getCurrentAuthenticationSession(realm, client, tabId)` keys on `(rootAuthSessionId from cookie, client, tabId)` — losing tab_id makes the cookie alone insufficient. Always sign `kc_client_id` + `kc_tab_id` + `auth_session_id` into any JWT that traverses an external system and is expected to resume a Keycloak flow.
+
+**Principle**: Auth sessions are not identified by cookie alone. Any handoff that comes back via a path that bypasses normal flow continuation must carry the routing tuple explicitly, HMAC-signed.
+
+---
+
+## 2. Test harness
+
+### 2.1 "Flip the last char of a JWS" is not a reliable tamper trick (2026-06-08)
+The Slice 1 `validate_tamperedSignature_throwsBadSignature` test was passing for the wrong reason. HS256 produces a 256-bit signature → base64url-encodes to 43 chars where the last char encodes only 4 meaningful bits (256 % 6 = 4 used, 2 unused). Flipping `A` → `B` at the last position changes one of the **unused** bits and the decoded signature bytes are identical. The bug stayed latent until the picker_result payload grew (added `kc_*` fields) and the alignment shifted to expose it. Fix: tamper with the **first** char of the signature segment, which always changes a meaningful bit.
+
+**Principle**: When testing failure detection, perturb input where you have a guarantee it changes the decoded value, not where you have an intuition. For base64-encoded fixed-size payloads, the boundary chars often have unused bits.
+
+### 2.2 Provided-scope is the right answer for Keycloak runtime classes (2026-06-08)
+Every `org.keycloak:*` dependency for an SPI should be `<scope>provided</scope>` — the runtime ships them, and bundling them in the SPI JAR causes class-loader confusion (duplicate classes, mismatched versions vs the runtime). The Maven Keycloak BOM (`org.keycloak.bom:keycloak-spi-bom`) handles version alignment for the public SPI artifacts; internal ones (`keycloak-server-spi-private`, `keycloak-services`) need explicit `<version>${keycloak.version}</version>` because the BOM doesn't manage them. Both work at provided scope.
+
+**Principle**: Treat the host runtime's classpath as the contract. Use `provided` consistently. Bundle only your own code and small utilities the runtime doesn't ship.
+
+### 2.3 Function-injection beats subclassing for testability when wrapping concrete Keycloak classes (2026-06-08)
+`AuthenticationSessionManager` and `AuthenticationFlowURLHelper` are concrete classes constructed inside handler methods, which makes them hard to mock without subclassing the resource provider. Cleaner pattern: a private constructor parameter taking `Function<KeycloakSession, AuthenticationSessionManager>` plus a `@FunctionalInterface ResumeUrlBuilder`. Production wires the real instantiations; tests wire mocks/stubs. The public constructor is a one-line passthrough so callers aren't burdened.
+
+**Principle**: For a class that uses concrete collaborators it can't avoid constructing, factor those constructions into single-method functional interfaces and inject them via a non-public constructor. Keeps the production API tight while making the seams visible to tests.
+
+---
+
+## 3. Build & tooling
+
+### 3.1 Maven XML rejects supplementary-plane Unicode (2026-06-08)
+The MARKERS.md emoji block (⚓ 📜 🔗 ⚡ 🛡️) is fine in Java source (javac handles UTF-8 surrogate pairs) but Maven's `KXmlParser` fails on supplementary-plane code points in XML comments. Use ASCII fallback tokens (`COMPONENT:`, `PURPOSE:`, etc.) in `pom.xml` and document the deviation inline. MARKERS.md doesn't list XML build files in its target formats, so the deviation is doctrinally clean.
+
+**Principle**: Apply convention rules at file granularity. "All files do X" is rarely true; check the parser, not the rule.
+
+### 3.2 JDK 21 + Mockito + Keycloak runtime has three JVM-noise sources, all fixable (2026-06-09)
+Keycloak's `JBossLoggerFinder` complains the LogManager wasn't set; Mockito's byte-buddy agent triggers the dynamic-agent-loading warning; the JBoss LogManager being appended to bootstrap classpath triggers the CDS sharing warning. All three are silenced by a single Surefire/Failsafe `<argLine>`:
+```
+@{argLine} -Xshare:off -Djava.util.logging.manager=org.jboss.logmanager.LogManager -javaagent:${net.bytebuddy:byte-buddy-agent:jar}
+```
+The `${net.bytebuddy:byte-buddy-agent:jar}` property requires adding the `maven-dependency-plugin:properties` execution. `@{argLine}` (not `${argLine}`) preserves Jacoco's argLine injection.
+
+**Principle**: Test-runner noise that looks irreducible is often three independent fixes stacked. Address them as a set, not one at a time.
+
+### 3.3 Test-time log output from the code-under-test is signal, not noise (2026-06-09)
+Several dozen `ERROR/WARN` lines appear in the test output because each test case deliberately drives the code into an error path that legitimately logs. Suppressing them via a `logging.properties` filter would also hide a regression where the SPI silently stopped logging an error case. Keep them visible; they're useful when a future test fails.
+
+**Principle**: Output from the system-under-test during tests is observable behaviour. Suppress only when volume actively impedes diagnosis.
+
+---
+
+## 4. Documentation & process
+
+### 4.1 Status doc is the contract; agentknowledge is the index (2026-06-08)
+`specs/keycloak.spi.mcp.status.md` carries the live narrative (what's done, what's broken, what's deferred, what each slice cost). `agentknowledge/{concepts,decisions,history}.yaml` is the queryable index. Updating one without the other splits the truth. Establish the rhythm: after each slice closes, append to both before moving on. The cost is ~30 lines of YAML/markdown and saves the next agent 30 minutes of code archaeology.
+
+**Principle**: A status doc explains intent; an agent knowledge base lets the next session locate. You need both, kept in sync as a single end-of-slice ritual.

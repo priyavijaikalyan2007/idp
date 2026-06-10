@@ -1,0 +1,3 @@
+# Keycloak RealmResourceProvider factories provided by this JAR.
+# One fully-qualified class name per non-comment line.
+io.yourapp.keycloak.mcp.resource.McpPickerCallbackResourceProviderFactory

@@ -1,0 +1,121 @@
+# Architectural Decision Records (ADRs).
+# Append new ADRs at the bottom. Never delete; mark superseded by setting status.
+# See KNOWLEDGE_ARCHITECTURE.md for the schema.
+
+- id: "ADR-001"
+  title: "Per-realm HMAC keys for MCP picker handoff"
+  date: "2026-06-07"
+  status: "Accepted"
+  context: >-
+    One Keycloak instance hosts three realms (yourapp-prod, yourapp-dev, yourapp-test).
+    A single global HMAC key would mean a leak in one realm could mint picker_result
+    tokens accepted by another, defeating cross-realm isolation. Per-realm env vars
+    (YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>) backed by per-realm GCP Secret Manager secrets
+    (yourapp-mcp-handoff-hmac-key-{realm}) close that path. Keys are read lazily by the
+    SPI on first request through each realm; rotation is per-realm with a 15-minute
+    overlap window.
+  files:
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak-hmac-operations-guide.md"
+    - "specs/keycloak.prd.md"
+
+- id: "ADR-002"
+  title: "Per-realm `yourapp.web.host` as Authenticator config (not env var)"
+  date: "2026-06-07"
+  status: "Accepted"
+  context: >-
+    The YourApp web hostname the SPI redirects to (e.g., prod.yourapp.com vs dev.yourapp.com)
+    varies per realm and is non-sensitive routing config. Storing it as a global env var
+    forces a single value across all realms hosted by the same Keycloak. Instead the
+    Authenticator exposes a configurable property `yourapp.web.host` set per realm in the
+    admin console; the value is captured by realm export. SPI fails the flow with a
+    literate error if unset for the active realm.
+  files:
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak.prd.md"
+
+- id: "ADR-003"
+  title: "Reuse Keycloak's bundled JOSE/HMAC/JSON libraries; add no external JWT dependency"
+  date: "2026-06-07"
+  status: "Accepted"
+  context: >-
+    The SPI signs and verifies HS256 JWTs and serialises JSON payloads. Keycloak ships
+    org.keycloak.jose.jws.JWSBuilder, org.keycloak.crypto.HMACProvider, and
+    org.keycloak.util.JsonSerialization (Jackson under the hood). Adding Nimbus or JJWT
+    would duplicate functionality, expand the deployed JAR, and increase CVE surface for
+    no functional gain. Per BACKEND_LIBRARY_SELECTION.md "check existing modules first."
+  files:
+    - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-004"
+  title: "Custom protocol mapper for scope override (not Script Mapper)"
+  date: "2026-06-07"
+  status: "Accepted"
+  context: >-
+    The `scope` claim override (reading session note `yourapp_scopes`) can be implemented
+    either as a ~30-line custom mapper (Option A) or as a Keycloak Script Mapper running
+    JavaScript (Option B). Option B requires --features=scripts which is preview in
+    Keycloak 26.x. Option A is a clean, testable Java class with no feature-flag
+    dependency and ships in the SPI JAR alongside the rest of the code.
+  files:
+    - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-005"
+  title: "JWT claim names use snake_case on the wire"
+  date: "2026-06-08"
+  status: "Accepted"
+  context: >-
+    Picker-request and picker-result JWT claim names follow OAuth/JWT/OIDC ecosystem
+    convention (snake_case: mcp_client_id, mcp_requested_scopes, picker_request_jti,
+    user_sub_echo, chosen_tenant_id, granted_scopes). Java POJO fields are camelCase
+    bridged via Jackson @JsonProperty. Locks the wire format so YourApp web and the SPI
+    never drift.
+  files:
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak.spi.mcp.status.md"
+
+- id: "ADR-006"
+  title: "Use org.jboss.logging.Logger (Keycloak idiom); deviate from LOGGING.md SLF4J example"
+  date: "2026-06-08"
+  status: "Accepted"
+  context: >-
+    LOGGING.md §12 illustrates Java logging with SLF4J + Logback + MDC. The Keycloak SPI
+    instead uses org.jboss.logging.Logger because (a) Keycloak ships it in keycloak-core,
+    no extra dependency; (b) every published Keycloak SPI example uses JBoss Logging;
+    (c) JBoss Logging delegates to whatever backend Keycloak's runtime configures, so the
+    semantic LOGGING.md rules (levels, mandatory context, masking) still apply. Adding
+    SLF4J would force a bridge layer for no benefit.
+  files:
+    - "specs/keycloak.spi.mcp.status.md"
+
+- id: "ADR-008"
+  title: "HandoffTokenSigner uses MacSignatureSignerContext, not deprecated JWSBuilder.hmac256"
+  date: "2026-06-09"
+  status: "Accepted"
+  context: >-
+    Keycloak 26.6 deprecates JWSBuilder.EncodingBuilder.hmac256(byte[]) AND
+    hmac256(SecretKey) AND the org.keycloak.jose.jws.Algorithm enum. The modern
+    path is JWSBuilder.sign(SignatureSignerContext), constructed from a
+    MacSignatureSignerContext wrapping a KeyWrapper that carries the SecretKey
+    and the algorithm identifier as a wire-format string ("HS256" per RFC 7518
+    §3.1, hardcoded to avoid the deprecated Algorithm enum). Signer instances
+    are cached per realm (was: SecretKey per realm) so the KeyWrapper +
+    MacSignatureSignerContext construction happens once. Compilation is now
+    warning-free under -Dmaven.compiler.showDeprecation=true.
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/jwt/HandoffTokenSigner.java"
+
+- id: "ADR-007"
+  title: "Adopt MIT License for the repository"
+  date: "2026-06-08"
+  status: "Accepted"
+  context: >-
+    The repository licenses its source under MIT. LICENSE.md text follows the standard
+    MIT template used in the author's sibling repositories (pvk2007/theme et al.);
+    copyright holder is "Outcrop Inc." per COPYRIGHT_INFO.md. Cloud-provider trademarked
+    icons listed in NOTICE.md remain under their respective provider terms. Source files
+    include SPDX-License-Identifier: MIT and SPDX-FileCopyrightText: 2026 Outcrop Inc.
+    in their headers.
+  files:
+    - "LICENSE.md"
+    - "COPYRIGHT_HEADER.md"

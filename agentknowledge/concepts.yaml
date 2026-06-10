@@ -1,0 +1,49 @@
+# Domain concepts mapped to canonical anchor files.
+# Concept names are PascalCase and stable across files (see MARKERS.md ⚓ anchors).
+# Add new concepts when introducing a service, controller, or shared module.
+# Until a concept's code lands, anchor_file may point to the spec that defines it.
+
+- name: "McpTenantPickerFlow"
+  definition: "End-to-end OAuth authentication flow for MCP clients that branches off the federated login to a tenant-picker handoff hosted on YourApp web."
+  anchor_file: "specs/keycloak.spi.mcp.md"
+  related: ["McpHandoffJwt", "McpScopeOverride", "McpDefaultClientScope", "McpTenantPickerAuthenticator"]
+
+- name: "McpTenantPickerAuthenticator"
+  definition: "Final step of the browser-mcp-tenant-pick flow. Builds a signed PickerRequestToken carrying the user/client/scope/OAuth state plus auth-session correlation fields (auth_session_id, kc_client_id, kc_tab_id) needed for the callback to find and resume the suspended flow. 302-redirects via context.challenge(Response.seeOther(...)). Per-realm yourapp.web.host comes from AuthenticatorConfig; per-realm HMAC key comes from McpSpiConfig."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+  related: ["McpTenantPickerFlow", "McpHandoffJwt", "McpSpiConfig", "McpPickerCallbackResourceProvider"]
+
+- name: "McpHandoffJwt"
+  definition: "Pair of HS256 JWTs (picker_request, picker_result) exchanged between the Keycloak SPI and YourApp web's /mcp/consent endpoint to carry the user's tenant and scope choices. Signed per-realm with the HMAC key from YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>. Wire format: snake_case claim names; Java POJOs are camelCase bridged via Jackson @JsonProperty (ADR-005)."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/jwt/PickerRequestToken.java"
+  related: ["McpTenantPickerFlow", "HmacKeyRotation", "McpSpiConfig"]
+
+- name: "McpSpiConfig"
+  definition: "Per-realm SPI configuration resolver. Reads YOURAPP_MCP_HANDOFF_HMAC_KEY__<R> (and optional _PREVIOUS variant) from the JVM environment. Validates standard base64 and 32-byte length on first request through each realm. Surfaces failures as McpSpiConfigException with codes MISSING_HMAC_KEY, MALFORMED_BASE64, WRONG_KEY_LENGTH, MISSING_WEB_HOST."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/config/McpSpiConfig.java"
+  related: ["McpHandoffJwt", "HmacKeyRotation"]
+
+- name: "HandoffTokenValidator"
+  definition: "Validates incoming picker_result JWTs against the active realm's current (and optional previous, during rotation) HMAC key. Checks signature via Keycloak's HMACProvider, then iss/aud/exp/iat claims, then consumes the jti via ReplayCache. Cross-realm replay defeats at the signature step because each realm holds a distinct HMAC key."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/jwt/HandoffTokenValidator.java"
+  related: ["McpHandoffJwt", "McpSpiConfig", "McpPickerCallbackResourceProvider"]
+
+- name: "McpPickerCallbackResourceProvider"
+  definition: "JAX-RS endpoint mounted at /realms/{realm}/mcp-picker-callback. Receives the picker-result JWT from YourApp web, validates via HandoffTokenValidator, looks up the suspended AuthenticationSessionModel via AuthenticationSessionManager (cookie + auth_session_id fallback), cross-checks user_sub_echo against the auth session's authenticated user, writes user-session notes yourapp_tenant_id + yourapp_scopes, and 302s to AuthenticationFlowURLHelper.getLastExecutionUrl so Keycloak's flow engine resumes the Authenticator's CHALLENGED execution. Function-injected session-manager factory + resume-URL builder enable unit testing without a real Keycloak runtime."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
+  related: ["McpTenantPickerAuthenticator", "HandoffTokenValidator", "McpScopeOverride", "McpHandoffJwt"]
+
+- name: "HmacKeyRotation"
+  definition: "Two-key overlap rotation pattern for the MCP handoff HMAC key. Per-realm scheduled quarterly with a 15-minute overlap window; per-realm emergency cut-over for confirmed exposure."
+  anchor_file: "specs/keycloak-hmac-operations-guide.md"
+  related: ["McpHandoffJwt"]
+
+- name: "McpScopeOverride"
+  definition: "Custom OIDC protocol mapper that reads user-session note `yourapp_scopes` and rewrites the access-token `scope` claim. (ID-token and userinfo variants intentionally omitted — scope is access-token-only per OIDC.) Resolves the wizard-chosen scopes to the issued token without rebuilding Keycloak's consent screen. Mapper = factory in one class per Keycloak's OIDC SPI convention."
+  anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/mapper/McpScopeOverrideMapper.java"
+  related: ["McpDefaultClientScope", "McpTenantPickerFlow", "McpPickerCallbackResourceProvider"]
+
+- name: "McpDefaultClientScope"
+  definition: "Realm-level Client Scope (`mcp-default`) auto-assigned to DCR-registered MCP clients. Contains the audience mapper (`yourapp-mcp-api`), tenant claim mapper (User Session Note → `tenant`), and the McpScopeOverride mapper."
+  anchor_file: "specs/keycloak.prd.md"
+  related: ["McpScopeOverride", "McpTenantPickerFlow"]
