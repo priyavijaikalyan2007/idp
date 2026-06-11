@@ -76,10 +76,19 @@ Specified in `specs/keycloak.web.mcp.md`. Key points the Knobby web team needs f
 
 ## TD-003: `KC_BOOTSTRAP_ADMIN_PASSWORD` may have been silently dropped
 
-**Status:** Needs verification on next deploy
+**Status:** Resolved 2026-06-10
 **Priority:** Medium
 **Created:** 2026-06-09
 **Current location:** `cloudrun.yaml`
+
+### Resolution
+
+The 2026-06-10 deploys (revisions through `knobbyauth-00020`) ran with the corrected
+binding (`KC_BOOTSTRAP_ADMIN_PASSWORD` from Secret Manager `knobby-keycloak-bootstrap-password`)
+and the operator logged into the admin console and switched realms during incident
+debugging — admin authentication works on the fixed configuration. Note the admin
+*user* predates the fix (bootstrap only creates the user when absent), so the binding
+fix mattered for clean-database scenarios, which is now the verified-good path.
 
 ### What we have now
 
@@ -156,3 +165,69 @@ If the index becomes inadequate for a future search task, append the missing ent
 ### Triggers to revisit
 
 - Future agent reports "couldn't find <class> via concepts.yaml".
+
+---
+
+## TD-007: Pin the Keycloak base image by SHA digest
+
+**Status:** Deferred
+**Priority:** Medium
+**Created:** 2026-06-10
+**Current location:** `Dockerfile` (`FROM quay.io/keycloak/keycloak:26.6.0`)
+
+### What we have now
+
+Both Dockerfile stages pull `quay.io/keycloak/keycloak:26.6.0` by tag. Quay tags are
+mutable: a re-published `26.6.0` would silently change the base under us between
+builds, and the two `FROM` lines could in principle even resolve differently if a
+re-publish landed mid-build. During the 2026-06-10 incident this ambiguity cost real
+diagnostic time — "did the base drift?" had to be ruled out empirically instead of
+being impossible by construction.
+
+### Implementation plan
+
+1. `docker buildx imagetools inspect quay.io/keycloak/keycloak:26.6.0` → record the
+   manifest-list digest.
+2. Change both `FROM` lines to `quay.io/keycloak/keycloak:26.6.0@sha256:<digest>`
+   (keep the tag for human readability; the digest is what pins).
+3. Document the digest-refresh step in the upgrade runbook: bumping Keycloak =
+   update tag + digest together, one commit.
+
+Estimated effort: 15 minutes.
+
+### Triggers to revisit
+
+- Next Keycloak version bump (do it as part of that change).
+- Any future "image content changed without a commit" suspicion.
+
+---
+
+## TD-008: `run.sh` cannot reproduce optimized-image behaviour
+
+**Status:** Deferred
+**Priority:** Medium
+**Created:** 2026-06-10
+**Current location:** `run.sh`
+
+### What we have now
+
+`run.sh` starts the locally-built image with `--entrypoint /opt/keycloak/bin/kc.sh ... start-dev`.
+`start-dev` re-augments the Quarkus application at startup, bypassing everything
+`kc.sh build` baked into the image. That is convenient for theme/SPI iteration but
+means the local runner exercises a *different* application than production runs —
+optimized-augmentation defects are invisible to it (see AGENT_INSIGHTS.md §5.4).
+
+### Implementation plan
+
+Add a `--prod` flag to `run.sh` that drops the entrypoint override and runs the
+image's own `ENTRYPOINT` (`start --optimized`) with the same env contract Cloud Run
+supplies (`KC_DB=postgres`, sidecar URL, hostname flags). The incident-reproduction
+recipe used on 2026-06-10 (vanilla image initialises the schema, suspect image runs
+optimized against it) can live in a comment block in the script.
+
+Estimated effort: ~30 minutes.
+
+### Triggers to revisit
+
+- Next production incident suspected to be image-related.
+- Any change to the Dockerfile build stage or `kc.sh build` flags.

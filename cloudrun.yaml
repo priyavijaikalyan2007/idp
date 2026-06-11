@@ -1,130 +1,96 @@
 apiVersion: serving.knative.dev/v1
-kind: Service
+kind: Revision
 metadata:
-  name: knobbyauth
+  name: knobbyauth-00020-p6v
   namespace: 871965503155
-  selfLink: /apis/serving.knative.dev/v1/namespaces/871965503155/services/knobbyauth
-  uid: 4805a74a-95e2-481d-abcf-a3a72e302867
-  resourceVersion: AAZSqGvINck
-  generation: 8
-  creationTimestamp: "2026-05-25T17:03:15.280797Z"
+  selfLink: /apis/serving.knative.dev/v1/namespaces/871965503155/revisions/knobbyauth-00020-p6v
+  uid: 8ce65350-15d3-4965-984b-c7cf24b1fb8d
+  resourceVersion: AAZT4BZTvcw
+  generation: 1
+  creationTimestamp: "2026-06-10T06:08:21.241546Z"
   labels:
+    client.knative.dev/nonce: 9b5995d0-8756-425b-bf10-0ace12898ee8
+    serving.knative.dev/configuration: knobbyauth
+    serving.knative.dev/configurationGeneration: 20
+    serving.knative.dev/service: knobbyauth
+    serving.knative.dev/serviceUid: 4805a74a-95e2-481d-abcf-a3a72e302867
+    serving.knative.dev/route: knobbyauth
     run.googleapis.com/satisfiesPzs: "true"
     cloud.googleapis.com/location: asia-southeast1
+    run.googleapis.com/startupProbeType: Custom
   annotations:
-    serving.knative.dev/creator: priyavijai.kalyan2007@proton.me
-    serving.knative.dev/lastModifier: priyavijai.kalyan2007@proton.me
+    autoscaling.knative.dev/maxScale: 1
+    autoscaling.knative.dev/minScale: 1
     run.googleapis.com/client-name: cloud-console
-    run.googleapis.com/operation-id: d5b6b222-151b-4ced-8e42-ac6d52394648
-    run.googleapis.com/ingress: all
-    run.googleapis.com/ingress-status: all
-    run.googleapis.com/invoker-iam-disabled: "true"
-    run.googleapis.com/maxScale: 1
-    run.googleapis.com/urls: "[\"https://knobbyauth-871965503155.asia-southeast1.run.app\"\
-      ,\"https://knobbyauth-5qvdsp73la-as.a.run.app\"]"
+    run.googleapis.com/execution-environment: gen2
+    serving.knative.dev/creator: priyavijai.kalyan2007@proton.me
+    run.googleapis.com/operation-id: ce5d9ff0-2173-4179-9ff6-132f535e7474
+    run.googleapis.com/startup-cpu-boost: "true"
+  ownerReferences:
+  - kind: Configuration
+    name: knobbyauth
+    uid: f681709d-ef2d-4152-99ef-0a627455472c
+    apiVersion: serving.knative.dev/v1
+    controller: true
+    blockOwnerDeletion: true
 spec:
-  template:
-    metadata:
-      labels:
-        client.knative.dev/nonce: f6fbc5cb-f913-4b35-bf14-2c54af1b043b
-        run.googleapis.com/startupProbeType: Default
-      annotations:
-        autoscaling.knative.dev/maxScale: 1
-        run.googleapis.com/execution-environment: gen2
-        run.googleapis.com/client-name: cloud-console
-        run.googleapis.com/startup-cpu-boost: "true"
-    spec:
-      containerConcurrency: 10
-      timeoutSeconds: 300
-      serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
-      containers:
-      - name: keycloak-1
-        image: asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak@sha256:916af884331a946ab7aac2d5325ebd6bea6a003d5a2c629e841f59970f91357f
-        ports:
-        - name: http1
-          containerPort: 8080
-        env:
-        - name: KC_DB
-          value: postgres
-        - name: KC_DB_URL
-          value: jdbc:postgresql://ep-solitary-bar-aodntij6-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?user=neondb_owner&sslmode=require&channelBinding=require
-        - name: KC_DB_USERNAME
-          value: neondb_owner
-        - name: KC_HOSTNAME
-          value: auth.knobby.io
-        - name: KC_HOSTNAME_STRICT
-          value: "true"
-        - name: KC_HTTP_ENABLED
-          value: "true"
-        - name: KC_PROXY_HEADERS
-          value: xforwarded
-        - name: KC_HEALTH_ENABLED
-          value: "true"
-        - name: KC_METRICS_ENABLED
-          value: "true"
-        - name: KC_BOOTSTRAP_ADMIN_USERNAME
-          value: admin
-        - name: KC_DB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: latest
-              name: knobby-keycloak-db-password
-        - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-          # NOTE: prior to 2026-06-09 this entry's `name:` was
-          # KC_BOOTSTRAP_ADMIN_PASSWORD= (with a trailing `=`). That made the env-
-          # var name invalid and Cloud Run was likely silently dropping it. Fixed
-          # during the MCP SPI rollout. Verify the bootstrap admin actually works
-          # on the next deploy.
-          valueFrom:
-            secretKeyRef:
-              key: latest
-              name: knobby-keycloak-bootstrap-password
-        # ---------------------------------------------------------------------
-        # MCP SPI handoff HMAC keys (per realm). Uncomment and commit each entry
-        # once the matching GCP Secret Manager secret exists. See
-        # specs/keycloak-hmac-operations-guide.md §3 for the secret-creation
-        # procedure.
-        #
-        # Per-realm: one Keycloak instance hosts knobby-prod, knobby-dev, and
-        # (future) knobby-test. Each realm holds its OWN HMAC key for cross-realm
-        # isolation. Until at least one of these is wired AND the realm's
-        # `browser-mcp-tenant-pick` flow is configured per
-        # specs/keycloak.prd.md §16.11, MCP login flows will fail with
-        # `MISSING_HMAC_KEY` in the Keycloak logs.
-        #
-        # - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD
-        #   valueFrom:
-        #     secretKeyRef:
-        #       name: knobby-mcp-handoff-hmac-key-knobby-prod
-        #       key: latest
-        # - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_DEV
-        #   valueFrom:
-        #     secretKeyRef:
-        #       name: knobby-mcp-handoff-hmac-key-knobby-dev
-        #       key: latest
-        # - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_TEST
-        #   valueFrom:
-        #     secretKeyRef:
-        #       name: knobby-mcp-handoff-hmac-key-knobby-test
-        #       key: latest
-        #
-        # During a rotation overlap, ALSO add the matching previous-slot entries:
-        # - name: KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS__KNOBBY_PROD
-        #   valueFrom:
-        #     secretKeyRef:
-        #       name: knobby-mcp-handoff-hmac-key-knobby-prod-previous
-        #       key: latest
-        # ---------------------------------------------------------------------
-        resources:
-          limits:
-            cpu: 1000m
-            memory: 512Mi
-        startupProbe:
-          timeoutSeconds: 240
-          periodSeconds: 240
-          failureThreshold: 1
-          tcpSocket:
-            port: 8080
-  traffic:
-  - percent: 100
-    latestRevision: true
+  containerConcurrency: 10
+  timeoutSeconds: 300
+  serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
+  containers:
+  - name: keycloak-1
+    image: asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak@sha256:4fe81bb20107f175f59d8fe04833336465ffe2ad05655cf0cb52985fd1b01c52
+    ports:
+    - name: http1
+      containerPort: 8080
+    env:
+    - name: KC_DB
+      value: postgres
+    - name: KC_DB_URL
+      value: jdbc:postgresql://ep-solitary-bar-aodntij6-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?user=neondb_owner&sslmode=require&channelBinding=require
+    - name: KC_DB_USERNAME
+      value: neondb_owner
+    - name: KC_HOSTNAME
+      value: auth.knobby.io
+    - name: KC_HOSTNAME_STRICT
+      value: "true"
+    - name: KC_HTTP_ENABLED
+      value: "true"
+    - name: KC_PROXY_HEADERS
+      value: xforwarded
+    - name: KC_HEALTH_ENABLED
+      value: "true"
+    - name: KC_METRICS_ENABLED
+      value: "true"
+    - name: KC_BOOTSTRAP_ADMIN_USERNAME
+      value: admin
+    - name: KC_CACHE
+      value: local
+    - name: KC_DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: latest
+          name: knobby-keycloak-db-password-prod
+    - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          key: latest
+          name: knobby-keycloak-bootstrap-password
+    - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD
+      valueFrom:
+        secretKeyRef:
+          key: latest
+          name: knobby-mcp-handoff-hmac-key-knobby-prod
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    startupProbe:
+      initialDelaySeconds: 30
+      timeoutSeconds: 240
+      periodSeconds: 240
+      failureThreshold: 5
+      httpGet:
+        path: /health/ready
+        port: 9000
+
