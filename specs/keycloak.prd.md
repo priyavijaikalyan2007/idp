@@ -698,7 +698,7 @@ All secrets follow the convention `yourapp-<system>-<purpose>-<credential-type>-
 | `yourapp-google-oauth-client-secret-{env}` | Keycloak → Google (broker auth) | Google Cloud OAuth client |
 | `yourapp-github-oauth-client-secret-{env}` | Keycloak → GitHub (broker auth) | GitHub OAuth App |
 | `yourapp-keycloak-db-password-{env}` | Keycloak → Postgres | Postgres user |
-| `yourapp-mcp-handoff-hmac-key-{realm}` | Keycloak SPI ↔ yourapp.com backend (path iii handoff) | Generated; 256-bit random, base64. **Per-realm** (`yourapp-prod`, `yourapp-dev`, `yourapp-test`) — one Keycloak instance hosts all three realms, but each holds its own HMAC key to keep cross-realm isolation. Rotated quarterly per realm with two-key overlap (§16.8.5, `keycloak-hmac-operations-guide.md`). |
+| `yourapp-mcp-handoff-hmac-key-{env}` | Keycloak SPI ↔ yourapp.com backend (path iii handoff) | Generated; 256-bit random, base64. Rotated quarterly with two-key overlap (§16.8.5). |
 
 ### 10.6 Audit
 
@@ -772,10 +772,9 @@ Authoritative table. The OpenTofu IaC (§13) reads from this table.
 | **MCP — DCR endpoint** | `<issuer>/clients-registrations/openid-connect` | `https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect` |
 | **MCP — authentication flow name** | `browser-mcp-tenant-pick` (one per realm; appended SPI step) | `browser-mcp-tenant-pick` |
 | **MCP — Realm Resource Provider callback** | `<issuer>/mcp-picker-callback` | `https://auth.yourapp.com/realms/yourapp-prod/mcp-picker-callback` |
-| **MCP — consent wizard URL (yourapp.com side)** | `https://{yourapp-web-host}/mcp/consent` where `{yourapp-web-host}` is set per-realm via Authenticator config `yourapp.web.host` (§16.8.2, `keycloak.spi.mcp.md` §7.3) | `https://prod.yourapp.com/mcp/consent` for realm `yourapp-prod`; `https://dev.yourapp.com/mcp/consent` for `yourapp-dev` |
+| **MCP — consent wizard URL (yourapp.com side)** | `https://{app-hostname}/mcp/consent` | `https://prod.yourapp.com/mcp/consent` |
 | **MCP — SPI JAR name** | `yourapp-keycloak-mcp-spi-{version}.jar` | `yourapp-keycloak-mcp-spi-1.0.0.jar` |
-| **MCP — handoff HMAC key secret** | `yourapp-mcp-handoff-hmac-key-{realm}` (per-realm) | `yourapp-mcp-handoff-hmac-key-yourapp-prod` |
-| **MCP — handoff HMAC env var** | `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` where `<R>` is the realm name uppercased with `-`→`_` | `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD` |
+| **MCP — handoff HMAC key secret** | `yourapp-mcp-handoff-hmac-key-{env}` | `yourapp-mcp-handoff-hmac-key-prod` |
 | **MCP — DCR'd client IDs** | Auto-generated UUIDs by Keycloak (no convention; tracked via DCR metadata `client_name`) | `9a8b7c6d-...` |
 
 **Note on MCP:** there is intentionally **no static `yourapp-{env}-mcp-server` OIDC client.** DCR creates first-class Keycloak clients per MCP-client-install (one per `Claude Code on user X's laptop`, one per `Cursor on user Y's laptop`, etc.). The yourapp.com MCP server itself is a *resource server*, not a Keycloak client — identified by the audience string `yourapp-mcp-api` set via the `mcp-default` Client Scope. See §16.4 for the full architecture.
@@ -1720,27 +1719,64 @@ Each of the 6 atoms becomes a Keycloak **Client Scope**:
 
 All 6 are configured with `Display On Consent Screen: On`, `Include In Token Scope: On`. The first 5 are assigned as **default scopes** to clients registered through `mcp-dcr-policy` (§16.4); `yourapp:admin` is an **optional** scope that must be explicitly requested. The user's actual choice in the consent wizard (§16.7) overrides the requested scope set via the SPI's session-note → protocol-mapper mechanism (§16.8).
 
-### 16.4 DCR Access Model — Anonymous Registration With Strict Policies (`mcp-dcr-policy`)
+### 16.4 DCR Access Model — Anonymous Registration With Strict Policies
 
-DCR is enabled in **anonymous** mode (any client can register without proving identity first), constrained by a realm-level **Client Registration Policy** named `mcp-dcr-policy`. This is the standard MCP-spec posture: developer-friendly enough that anyone can wire up their own MCP client without manual onboarding, but defended against trivial attacks.
+DCR is enabled in **anonymous** mode (any client can register without proving identity first), constrained by **two complementary Keycloak configuration systems** working together. This is the standard MCP-spec posture: developer-friendly enough that anyone can wire up their own MCP client without manual onboarding, but defended against trivial attacks.
 
 There is **no static `yourapp-{env}-mcp-server` OIDC client.** Every MCP client install gets its own auto-generated `client_id` via DCR. Claude Code on your laptop is one client; Claude Code on a colleague's laptop is a separate one. The yourapp.com MCP server itself is a *resource server*, identified by the audience string `yourapp-mcp-api` — not a Keycloak client. The MCP server validates `aud == "yourapp-mcp-api"` on every incoming token; this audience is set on DCR'd tokens via the default Client Scope `mcp-default` (§16.6).
 
-**Policies on `mcp-dcr-policy`:**
+#### The two configuration systems
 
-| Policy | Configuration | Why |
+Keycloak 26.x splits DCR-time hardening across two related-but-distinct mechanisms; both must be configured for full coverage:
+
+1. **Client Registration Policies (CRP)** — the legacy system at *Realm settings → Client registration → Anonymous Access Policies*. Runs at registration time; controls *what kind of client* can be created (scope whitelist, mapper whitelist, consent forcing, host trust, count limit).
+2. **Client Policies** — the newer profile-based system at *Realm settings → Client policies*. Enforces *how the client must behave* at request time (PKCE, redirect URI security, response types, session security). Profiles bundle executors; policies bundle conditions that activate profiles. This is where OAuth 2.1 / FAPI-style hardening lives.
+
+A few requirements aren't enforceable via either system out of the box and need workarounds (documented below).
+
+#### System 1: Client Registration Policy entries (anonymous)
+
+Configure these under *Realm settings → Client registration → Anonymous Access Policies → Create*:
+
+| Policy provider | Configuration | Why |
 |---|---|---|
-| Allowed Client Scopes | `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share`, `yourapp:admin`, `mcp-default`, `openid`, `offline_access` | Prevents registration with privileged scopes like `realm-admin` or other yourapp clients' scopes |
-| Allowed Protocol Mappers | Built-in defaults only | Prevents injection of malicious claim mappers (e.g., forging `sub`, `email`, or `tenant`) |
-| Consent Required | Force `consentRequired = true` | All DCR-registered clients require user consent on first authorization; can't silently obtain tokens. The wizard in §16.7 is the consent UI. |
-| Trusted Hosts | `*` initially, with rate limiting via Cloudflare WAF | Limits which IPs can hit the DCR endpoint |
-| Client Registration Maximum | 1 per registration token | Prevents one bad actor from creating thousands of clients with a single token |
-| PKCE Required | Enforce S256 on every DCR-registered client | Aligns with §8.2 PKCE policy for the static `yourapp-{env}-web` client |
-| Allowed Grant Types | `authorization_code`, `refresh_token` only | No `password`, `implicit`, or `client_credentials` for dynamically-registered clients |
-| Allowed Redirect URIs | HTTPS-only; no wildcards; no `localhost` in prod (localhost permitted in dev) | Prevents tokens being delivered to attacker-controlled URIs |
-| Token Endpoint Auth Method | `none` (public client) or `client_secret_basic` | Both supported per MCP spec; `none` is standard for desktop/CLI clients |
-| Authentication Flow Override | `browser-mcp-tenant-pick` | Auto-binds every DCR'd MCP client to the MCP-specific browser flow (§16.8.1). Web users' `browser-federated-only` flow stays untouched. |
-| Default Client Scopes | `mcp-default`, `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share` | Pre-assigns the Author bundle (§16.3.2) and the audience-binding `mcp-default` scope. `yourapp:admin` is an **optional** scope, not default — clients must explicitly request it. |
+| `allowed-client-scopes` | Whitelist: `openid`, `offline_access`, `mcp-default`, `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share`, `yourapp:admin` | Prevents registration with privileged scopes like `realm-admin` or other clients' custom scopes |
+| `allowed-protocol-mapper-types` | Whitelist: `oidc-audience-mapper`, `oidc-usersessionmodel-note-mapper`, `yourapp-mcp-scope-override` (your SPI's mapper), `oidc-sub-mapper`, `oidc-full-name-mapper`, `oidc-usermodel-attribute-mapper`, `oidc-usermodel-property-mapper`. Or skip this policy for v1 — the security-critical mappers (audience, tenant, scope override) are attached to the `mcp-default` Client Scope, not the client, so DCR'd clients can't override them. This policy only restricts what *additional* mappers a DCR'd client may attach to itself. | Prevents a DCR'd client from attaching mappers that forge claims like `sub`, `email`, `tenant`. |
+| `consent-required` | (no configuration — just add the entry) | Forces `consentRequired=true` on every DCR'd client. Belt-and-suspenders with the Client Policy version below. |
+| `trusted-hosts` | Permissive initially (`*` or wide range); tighten later with Cloudflare WAF rate limiting in front | Limits which IPs can hit the DCR endpoint |
+| `max-clients` (`client-registration-max-clients`) | Sane upper bound, e.g., 10000 | Prevents one bad actor from creating millions of clients to exhaust storage |
+
+Note: there are no PKCE, grant-type, redirect-URI, or auth-method entries in this system. Those live in Client Policies (System 2).
+
+#### System 2: Client Policy profile + policy
+
+**Create one profile** at *Realm settings → Client policies → Profiles → Create*, named `mcp-hardening`, with these executors:
+
+| Executor | Configuration | Purpose |
+|---|---|---|
+| `pkce-enforcer` | Code Challenge Method: `S256` only | Enforces PKCE on all matched clients |
+| `secure-redirect-uri-enforcer` | Mode: HTTPS only (with localhost exception for dev realm if needed) | Production: rejects HTTP redirect URIs; rejects wildcards |
+| `secure-response-type` | Default config | Forbids implicit response types (`token`, `id_token`) — only `code` permitted |
+| `consent-required` | Default config | Belt-and-suspenders with CRP `consent-required` |
+| `secure-session` | Default config | Enforces secure cookies and session binding |
+| `full-scope-disabled` | Default config | Prevents clients from receiving wider scope than their explicit configuration allows |
+
+**Create one policy** at *Realm settings → Client policies → Policies → Create*, named `mcp-anonymous-dcr`, with:
+- **Condition:** `client-updater-context` with **Update Client Source = `ByAnonymous`** (matches only clients created via anonymous DCR — exactly the MCP clients).
+- **Active Profile:** `mcp-hardening`
+
+Other static clients in the realm (`yourapp-{env}-web`, `yourapp-{env}-admin-api`) are NOT matched by this condition (they're created by authenticated admins, matched by `ByAuthenticatedUser`) and continue to operate under their own configuration.
+
+> **Note on executor names:** the exact executor IDs in Keycloak 26.6.0's "Add executor" dropdown should be verified against the admin console. The executors documented above are described by their *behavior*; the actual UI names may differ slightly (e.g., redirect-URI hardening may be exposed as `secure-redirect-uri`, `secure-client-uris`, or similar — pick the one whose description matches HTTPS enforcement). The PRD will be updated as the actual names are confirmed.
+
+#### Things that need workarounds (not enforceable as simple policies)
+
+| Requirement | Workaround |
+|---|---|
+| **Default Client Scopes** (assign `mcp-default` + Author bundle automatically) | Configure as **realm-default Client Scopes** for any new client (Realm settings → Client scopes → set `mcp-default`, `yourapp:read`, `yourapp:comment`, `yourapp:curate`, `yourapp:write`, `yourapp:share` to "Default"). `yourapp:admin` stays "Optional". This applies to all newly-created clients including DCR'd ones; static clients can have their assignments overridden manually. |
+| **Auth flow override** to `browser-mcp-tenant-pick` | Two practical options: (a) set `browser-mcp-tenant-pick` as the **realm's default browser flow** (Authentication → Bindings → Browser flow); affects all clients but is fine if the realm is dedicated to MCP-style workflows. (b) Post-process DCR'd clients via the `yourapp-{env}-admin-api` service account to set `authenticationFlowBindingOverrides.browser` after registration — yourapp.com's `/mcp/consent` backend can do this on first-use of each MCP client. |
+| **Allowed grant types** (reject `password`, `client_credentials`, `implicit`) | (1) Disable the Direct Grant flow at the realm level (Authentication → Flows → Direct Grant Flow → unbind or delete). (2) `implicit` is gated by `secure-response-type` (above). (3) `client_credentials` requires `serviceAccountsEnabled=true`, which DCR'd public clients don't get by default — the `consent-required` and `secure-session` executors prevent its meaningful use. |
+| **Token Endpoint Auth Method** (`none` for public clients, `client_secret_basic` for confidential) | Both are permitted by default; DCR'd clients pick what they need. No restriction necessary. |
 
 **Tightening lever:** if abuse becomes a problem, the model can be flipped to authenticated DCR — clients must present an initial access token issued by yourapp.com's UI on behalf of an authenticated user. Admin-console toggle, no schema change. Anonymous mode is the right starting posture for MCP ecosystem compatibility.
 
@@ -1981,12 +2017,11 @@ Java/Kotlin implementation of `org.keycloak.authentication.Authenticator`. Respo
 
 - Read `KeycloakSession.getContext().getAuthenticationSession().getAuthenticatedUser().getId()` to get the user's `sub`.
 - Read the requesting client's `client_id`, requested scopes, and the OAuth `state` parameter.
-- Read `{yourapp-web-host}` from the per-realm Authenticator config property `yourapp.web.host` (set in the admin console per §16.11 step 2; resolved at request time so the same SPI class serves all realms).
-- Construct the picker-request token (§16.8.5) and HMAC-sign it with the realm's HMAC key, read from env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` where `<R>` is the realm name uppercased with `-`→`_` (per-realm isolation; see §16.8.5 and `keycloak.spi.mcp.md` §7).
+- Construct the picker-request token (§16.8.5) and HMAC-sign it.
 - Issue HTTP 302 to `https://{yourapp-web-host}/mcp/consent?token=<picker-request-token>`.
 - Mark the auth step as `CHALLENGE` (awaiting external completion); Keycloak suspends the flow.
 
-The Authenticator is a single class, ~80 lines. Its `requiresUser()` returns `true` (must run after federated auth completes); `configuredFor(...)` returns `true` for all clients bound to this flow. `isConfigurable()` returns `true` to surface the `yourapp.web.host` property — the only per-realm config the SPI exposes.
+The Authenticator is a single class, ~80 lines. Its `requiresUser()` returns `true` (must run after federated auth completes); `configuredFor(...)` returns `true` for all clients bound to this flow.
 
 #### 16.8.3 The Realm Resource Provider (callback handler)
 
@@ -2009,7 +2044,7 @@ Three mappers attached to the `mcp-default` Client Scope (so they apply automati
 | MCP Granted Scopes | Custom (replaces standard scope mapper) | `yourapp_scopes` (set by SPI) | `scope` | **Overrides** the requested-scope-set; the user's actual consent choice wins |
 | MCP Audience | Audience | (static) | `aud = yourapp-mcp-api` | Per §16.6 |
 
-The MCP Granted Scopes mapper is the non-trivial one: Keycloak's default scope-claim behavior is to emit the intersection of (client's allowed scopes) ∩ (requested scopes) ∩ (granted scopes). We need it to emit *exactly* the session note's value, ignoring whatever was requested. This requires either a Script Mapper (set the `scope` claim from session note `yourapp_scopes`) or a small custom protocol mapper class. Either way, it's a few dozen lines of code; the choice between script and custom-class is an implementation detail.
+The MCP Granted Scopes mapper is the non-trivial one: Keycloak's default scope-claim behavior is to emit the intersection of (client's allowed scopes) ∩ (requested scopes) ∩ (granted scopes). We need it to emit *exactly* the session note's value, ignoring whatever was requested. The SPI ships a custom protocol mapper (`McpScopeOverrideMapper`, see §16.8.4 and `KEYCLOAK_MCP_SPI_DESIGN.md` §5.5) that handles this; configuration is just selecting "yourapp mcp scope override" as the mapper type when adding it to the `mcp-default` Client Scope. A Script Mapper alternative (Option B) exists for the case where the SPI is not deployed, but it's a fallback only.
 
 #### 16.8.5 Handoff token construction & key management
 
@@ -2058,13 +2093,11 @@ Both tokens (picker-request and picker-result) are short-lived JWTs signed with 
 
 **State-vs-claims separation:** the picker-request token carries the OAuth `state` value as one of its claims, so YourApp web never has to read `state` from the URL bar (avoids accidentally treating it as user-visible state). YourApp returns `state` to Keycloak inside the picker-result token; Keycloak then forwards it to the MCP client in the normal OAuth `state` callback parameter.
 
-**Key rotation:** keys are rotated quarterly **per realm** — one Keycloak instance hosts three realms (`yourapp-prod`, `yourapp-dev`, `yourapp-test`) and each holds its own HMAC key (`yourapp-mcp-handoff-hmac-key-{realm}` in GCP Secret Manager, mounted as `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>`). Rotating one realm does not require touching the others. To avoid downtime during a realm's rotation, both SPI and the matching YourApp backend environment support a two-key overlap pattern: each side accepts tokens signed by either the current or the previous key for that realm, while only signing with the current one. Cutover sequence (per realm `R`):
-1. Generate a new key for realm `R`, add a new version to `yourapp-mcp-handoff-hmac-key-{R}`. Move the prior current value into `yourapp-mcp-handoff-hmac-key-{R}-previous`.
-2. Wire `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` on both Keycloak and the matching YourApp backend environment; deploy both. Both sides now accept either key for that realm.
-3. After all in-flight tokens for realm `R` have expired (5 min for picker-request, 1 min for picker-result, so a 15 min safety margin), unwire `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` and redeploy both. The previous key is retired for that realm.
-4. Optionally destroy the prior secret version after 24h of healthy operation.
-
-Per-realm step-by-step procedures (including emergency rotation when a single realm's key is compromised) live in `keycloak-hmac-operations-guide.md`.
+**Key rotation:** the shared HMAC key (`yourapp-mcp-handoff-hmac-key-{env}` in GCP Secret Manager) is rotated quarterly. To avoid downtime during rotation, both SPI and YourApp backend support a two-key overlap pattern: each side accepts tokens signed by either the current or the previous key, while only signing with the current one. Cutover sequence:
+1. Generate new key version, add to Secret Manager (versions older than 2 are deleted after cutover).
+2. Deploy SPI + YourApp backend with two-key support reading both versions.
+3. Update both to sign with the new key while still accepting the previous.
+4. After all in-flight tokens have expired (5 min for picker-request, 1 min for picker-result, so 10 min safety margin), the previous key can be retired.
 
 #### 16.8.6 JAR build & deployment
 
@@ -2129,123 +2162,17 @@ The DCR endpoint is internet-exposed and anonymously accessible by design. The p
 
 Defense in depth: Cloudflare in front, Keycloak policies enforced, yourapp.com MCP server validates `aud`, yourapp.com backend validates RBAC at handoff. No single layer is sufficient on its own.
 
-### 16.11 Manual Realm Configuration (until OpenTofu)
+### 16.11 Realm Configuration
 
-Applied via admin console once per realm (prod, dev, test). OpenTofu codifies these per §13 once realm config IaC lands.
+Step-by-step admin console configuration has moved to `KEYCLOAK_SETUP_GUIDE.md` — the operational "how" companion to this PRD. That guide is 26.6.x-specific and explicit about exact UI labels. It covers infrastructure deployment (Cloud Run + Cloud SQL/Neon/Supabase, or Hetzner VM + Docker Compose), realm + IdP foundation, and the full MCP setup sequence.
 
-1. **Deploy the SPI JAR to Keycloak:**
-   - Build `yourapp-keycloak-mcp-spi-{version}.jar` per §16.8.6.
-   - Update Dockerfile to `COPY` the JAR to `/opt/keycloak/providers/` *before* the `kc.sh build` line.
-   - Build new image, push, deploy to Cloud Run (will become Hetzner-hosted per the planned migration).
-   - On startup, Keycloak logs should show the new provider loaded; verify in the admin console under Server Info → Providers.
+Sections of the setup guide that implement this PRDs requirements:
+- Setup Guide §A or §B → image deployment + infrastructure
+- Setup Guide §C → realm + IdP foundation (PRD §6, §8, §11)
+- Setup Guide §D → MCP-specific configuration (PRD §16)
+- Setup Guide §E → verification checklist (was PRD §16.12)
 
-2. **Create the `browser-mcp-tenant-pick` authentication flow:**
-   - Authentication → Flows → "browser-federated-only" → Action → Duplicate. Name: `browser-mcp-tenant-pick`.
-   - Add execution → "YourApp MCP Tenant Picker" (the SPI Authenticator).
-   - Set the new step's requirement to **Required**.
-   - **Configure the Authenticator step:** click the gear icon on the YourApp MCP Tenant Picker step → set **YourApp web host** (`yourapp.web.host`) to the hostname YourApp web serves `/mcp/consent` at for this realm. No scheme, no trailing slash. Per-realm:
-     - `yourapp-prod` → `prod.yourapp.com`
-     - `yourapp-dev` → `dev.yourapp.com`
-     - `yourapp-test` → matching test hostname (decided when realm is created)
-     The SPI hard-fails the flow with a literate error if this value is unset (see `keycloak.spi.mcp.md` §7.3).
-   - Save.
-
-3. **Configure the `mcp-default` Client Scope:**
-   - Client Scopes → Create. Name: `mcp-default`. Type: Default. Protocol: openid-connect.
-   - In the new scope → Mappers → Add → Audience.
-     - Name: `mcp-api-audience`
-     - Included Custom Audience: `yourapp-mcp-api`
-     - Add to access token: On
-     - Add to ID token: Off
-   - In the new scope → Mappers → Add → User Session Note (the `tenant` claim mapper).
-     - Name: `mcp-tenant`
-     - User Session Note: `yourapp_tenant_id`
-     - Token Claim Name: `tenant`
-     - Claim JSON Type: String
-     - Add to ID token: On; Add to access token: On; Add to userinfo: On
-   - In the new scope → Mappers → Add → Script Mapper (or custom mapper) for the scope override (`scope` claim from session note `yourapp_scopes`).
-     - This is the non-trivial mapper. Implementation detail per §16.8.4.
-
-4. **Create the 6 atomic Client Scopes** per §16.3.6 table. For each:
-   - Type: None (assigned to clients per request or per DCR policy default; not assigned to other realm clients)
-   - Include In Token Scope: On
-   - Display On Consent Screen: On
-   - Consent Screen Text: per §16.3.6 (placeholder copy; finalize before launch)
-
-5. **Configure the realm-level Client Registration Policy `mcp-dcr-policy`:**
-   - Client Registration → Policies → Anonymous Access Policies → Create.
-   - For each policy row in §16.4, add the corresponding policy entry.
-   - For the auto-binding entries (Authentication Flow Override and Default Client Scopes), use the realm's Default Client Scopes settings; DCR-registered clients inherit these.
-
-6. **Configure HMAC handoff key (per realm):**
-   - Each realm holds its own HMAC key — `yourapp-prod`, `yourapp-dev`, and `yourapp-test` are isolated from each other. Repeat this step for each realm using the SPI.
-   - Generate a 256-bit random key: `openssl rand -base64 32`.
-   - Store in GCP Secret Manager as `yourapp-mcp-handoff-hmac-key-{realm}` (e.g., `yourapp-mcp-handoff-hmac-key-yourapp-prod`).
-   - Mount the secret into the Keycloak Cloud Run revision as env var `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` (e.g., `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`), where `<R>` is the realm name uppercased with `-`→`_`. The SPI reads this lazily on the first request through the realm; missing or malformed values fail the flow with a literate error code (`MISSING_HMAC_KEY`, `MALFORMED_BASE64`, `WRONG_KEY_LENGTH`).
-   - Mount the same secret into the matching YourApp backend environment (prod backend gets the `yourapp-prod` realm's key, dev backend gets `yourapp-dev`'s key, etc.) under the same env-var name. Per-realm isolation is preserved by per-environment YourApp backend deployments each holding exactly one realm's key.
-   - Detailed creation, distribution, rotation, and emergency-rotation procedures live in `keycloak-hmac-operations-guide.md`.
-
-7. **Configure realm-level OAuth 2.1 settings** (if not already done):
-   - Realm settings → Tokens → Revoke Refresh Token: On
-   - Realm settings → Tokens → Refresh Token Max Reuse: 0
-   - Realm settings → Login → Require SSL: All requests
-
-8. **Test DCR manually:**
-   ```bash
-   curl -X POST "https://auth.yourapp.com/realms/yourapp-prod/clients-registrations/openid-connect" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "client_name": "DCR smoke-test client",
-       "redirect_uris": ["https://example.com/callback"],
-       "grant_types": ["authorization_code", "refresh_token"],
-       "token_endpoint_auth_method": "none",
-       "scope": "openid yourapp:read yourapp:write"
-     }'
-   ```
-   Expected: 201 Created with `client_id`, `registration_access_token`, `registration_client_uri`. Verify in admin console that the new client has `mcp-default` and the 5 default `yourapp:*` scopes assigned and the flow binding set to `browser-mcp-tenant-pick`.
-
-9. **Test the path (iii) handoff** (after YourApp web `/mcp/consent` is implemented):
-   - Initiate an OAuth flow with the DCR-registered client.
-   - Verify the browser redirects through: federated IdP → `{yourapp.web.host for this realm}/mcp/consent` (e.g., `prod.yourapp.com/mcp/consent` for the `yourapp-prod` realm) → wizard → `auth.yourapp.com/realms/{realm}/mcp-picker-callback` → MCP client redirect URI.
-   - Decode the resulting access token; verify `aud == "yourapp-mcp-api"`, `tenant` claim is set, `scope` claim reflects the user's choice (not the originally requested scopes).
-
-10. **Clean up smoke-test client:** delete via the registration_client_uri returned in step 8.
-
-### 16.12 Verification Checklist
-
-**Realm-level (verify per realm: `yourapp-prod`, `yourapp-dev`, `yourapp-test`):**
-- [ ] SPI JAR loaded; "YourApp MCP Tenant Picker" Authenticator visible in admin console
-- [ ] `browser-mcp-tenant-pick` flow exists with SPI Authenticator as final step
-- [ ] SPI Authenticator step has `yourapp.web.host` configured to this realm's YourApp web hostname (no scheme, no trailing slash)
-- [ ] All 6 `yourapp:*` Client Scopes exist with consent text set; `yourapp:admin` is **not** in default scope list
-- [ ] `mcp-default` Client Scope exists with audience mapper for `yourapp-mcp-api` + tenant claim mapper + scope override mapper
-- [ ] `mcp-dcr-policy` configured with all entries from §16.4 including auto-binding to `browser-mcp-tenant-pick`
-- [ ] Refresh Token Rotation enabled at realm level
-
-**DCR endpoint:**
-- [ ] DCR endpoint returns 201 for a well-formed request that complies with all policies
-- [ ] DCR endpoint returns 4xx for requests violating any single policy (test each)
-- [ ] DCR-registered client has `mcp-default` + Author-bundle scopes as defaults
-- [ ] DCR-registered client has flow binding `browser-mcp-tenant-pick`
-
-**End-to-end:**
-- [ ] A DCR-registered client can complete an authorization code + PKCE flow through the full path (iii) handoff
-- [ ] The resulting access token has `aud = "yourapp-mcp-api"`, the user-chosen scopes, and the §8.3 user claims
-- [ ] The `tenant` claim is set correctly to the user's chosen tenant
-- [ ] The `scope` claim reflects the consent wizard choice, not the originally requested scopes
-- [ ] HMAC handoff tokens cannot be replayed
-- [ ] Tampered HMAC tokens are rejected with `error=invalid_handoff`
-- [ ] Empty-membership users see the §16.7.4 halt state instead of the wizard
-- [ ] Connected Agents UI lists the new grant; [Disconnect] revokes successfully
-
-**Infrastructure:**
-- [ ] Cloudflare WAF rule for `/realms/*/clients-registrations/*` rate limit is active
-- [ ] HMAC handoff key present in GCP Secret Manager **per realm** (`yourapp-mcp-handoff-hmac-key-yourapp-prod`, `…-yourapp-dev`, `…-yourapp-test` when that realm exists)
-- [ ] Keycloak container env wires `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` for every realm using the SPI; startup log line `HMAC keys configured for realms: [...]` matches the expected realm set
-- [ ] Each YourApp backend environment reads its matching realm's key (prod backend → `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`, etc.); no environment holds another's key
-- [ ] yourapp.com MCP server endpoint at `/mcp` validates `aud` strictly (app-side; tracked separately from Keycloak realm config)
-
----
+When PRD intent and setup guide instructions diverge: the PRD is the authority on *what and why*; the setup guide is the authority on *how* for the current Keycloak version. Update both when reality changes.
 
 ## 17. References
 
