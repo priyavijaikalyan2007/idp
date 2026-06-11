@@ -80,3 +80,27 @@ Several dozen `ERROR/WARN` lines appear in the test output because each test cas
 `specs/keycloak.spi.mcp.status.md` carries the live narrative (what's done, what's broken, what's deferred, what each slice cost). `agentknowledge/{concepts,decisions,history}.yaml` is the queryable index. Updating one without the other splits the truth. Establish the rhythm: after each slice closes, append to both before moving on. The cost is ~30 lines of YAML/markdown and saves the next agent 30 minutes of code archaeology.
 
 **Principle**: A status doc explains intent; an agent knowledge base lets the next session locate. You need both, kept in sync as a single end-of-slice ritual.
+
+---
+
+## 5. Operations & incident debugging
+
+### 5.1 Failures that cluster by time are environmental; failures that cluster by artifact are yours (2026-06-10)
+The first SPI deploy coincided with `42P01 relation does not exist` errors and everyone (user and agent alike) reached for "the new image broke it". But the timeline showed a rollback to the *previous day's known-good image* failing in the same window, and two vanilla images succeeding *after* the window. The failures correlated with **when** deploys happened, not **what** was deployed. Before accepting an artifact-correlation theory, lay out every deploy attempt on a timeline and check whether a known-good artifact also failed inside the suspect window.
+
+**Principle**: Artifact bisection is only valid when trials are interleaved in time. A fails / B works proves nothing if all A-trials preceded all B-trials.
+
+### 5.2 Exonerate (or convict) a suspect image by running the exact artifact, not a rebuild (2026-06-10)
+The decisive experiment was running the *literal failed image ID* (`docker images` still had it) under the production entrypoint `start --optimized`, against a schema pre-initialised by the vanilla image — the same sequence production went through. It wrote rows into the exact table production said didn't exist, served the failing endpoints, and soaked 6+ hours clean. A rebuild would have left doubt ("maybe the rebuild differs"); the exact image ID left none. Corollary: keep failed images around — they are evidence. `check_image.sh` + `kc.sh show-config` diff turns "what differs between these images?" into a one-line answer.
+
+**Principle**: Reproduce with the byte-identical artifact and the production launch path. Every substitution (rebuilt JAR, dev-mode entrypoint, fresh schema) is a hole the conclusion can leak through.
+
+### 5.3 Read the failing SQL before blaming your code (2026-06-10)
+The failing statement was `select re1_0.ID from REALM re1_0` — stock Keycloak SQL from `JpaRealmProvider`, on a code path (`user-session-purge-expired`) the SPI never touches, while *other* connections in the same process were happily querying the same tables. No build-time JAR can make Postgres hide a table from some connections and not others; that symptom set points at connection routing (pooler/compute transient on Neon) before it points at anything in the repository. The early JAX-RS theory (`final` class, `@Path("/")`) never explained the observed symptom — it was pattern-matching on "what did we change?" rather than "what does the evidence say?".
+
+**Principle**: Match the proposed mechanism to the observed symptom before acting on it. If the theory can't explain why login worked while realm-switch failed on the same tables, it's the wrong theory — and code changes made under it must be reverted, not kept "just in case".
+
+### 5.4 `start-dev` cannot reproduce optimized-image problems (2026-06-10)
+`run.sh` boots the image with `kc.sh start-dev`, which re-augments the Quarkus application at startup — silently bypassing whatever `kc.sh build` baked at image-build time. Any defect living in the optimized augmentation (provider registry, build-time config) is invisible under `start-dev`. Incident reproduction must use the image's real entrypoint (`start --optimized`) with production-equivalent env vars. Tracked as TD-008.
+
+**Principle**: A local runner that swaps the entrypoint tests your code, not your image. Keep one path that runs the image exactly as production does.
