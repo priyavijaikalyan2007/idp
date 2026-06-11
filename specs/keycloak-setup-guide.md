@@ -1,16 +1,41 @@
 # Keycloak Setup From Scratch — Step-by-Step Guide
 
-**Status:** Draft v2 (Cloud Run first; VM path retained as later option)
-**Companion to:** `keycloak-operations-spec.md`
+**Status:** Draft v3 (Cloud Run + realm foundation + MCP setup)
+**Companion to:** `keycloak-operations-spec.md`, `KEYCLOAK_AUTH_PRD.md` (architecture / rationale), `KEYCLOAK_MCP_SPI_DESIGN.md` (SPI implementation)
 
-This guide covers two deployment paths. Pick one.
+> ## ⚠️ UI label accuracy disclaimer
+>
+> **The exact UI labels and navigation paths in this guide have not been verified against Keycloak 26.6.0.** Items I have lower confidence on are marked `[?]`, but the rest should also be treated as approximations until validated against your actual admin console.
+>
+> What's verified: the high-level architecture, what each step is *trying to achieve*, the API behavior the smoke tests check.
+>
+> What's not verified: exact button text, tab names, navigation paths, executor names, condition names, configuration field labels.
+>
+> **As you work through each step, if the UI shows something different from what's written here:**
+> 1. Trust the UI.
+> 2. Note the actual label you see.
+> 3. Update this guide.
+>
+> The smoke tests in `./smoke.sh` are the authoritative check on whether the setup achieved the intended state — they query the admin REST API directly and don't depend on UI labels.
+
+This guide covers infrastructure setup, realm foundation, and MCP-specific configuration. The PRD has the "what and why"; this guide has the "how." Where the two diverge, trust what your admin console actually shows and update this guide.
+
+**Deployment paths** — pick one:
 
 - **Option A — Cloud Run + Cloud SQL/Neon/Supabase. Recommended now.** Fastest time-to-market, native secrets integration, one-command deploys, minimal ops. Cold-start latency on first login of a session is the main trade-off; tolerable pre-PMF.
 - **Option B — Hetzner VM + Docker Compose + managed Postgres. Recommended later.** When you have 3+ services that benefit from co-location (Keycloak + Elasticsearch + workers + Redis), the economics flip. Migrating Keycloak from Cloud Run to a VM later is hours, not a re-architecture.
 
 Both assume: Keycloak `26.6.x` pinned, platform-managed TLS, realm names per ops spec (`knobby-prod`, `knobby-staging`, `knobby-dev`), hostname `auth.knobby.io`.
 
+**Reading order:**
+- Pre-flight (both options)
+- Section A or Section B (infrastructure deployment)
+- Section C (realm + IdP foundation)
+- Section D (MCP-specific configuration; requires §C complete + MCP SPI image deployed per `KEYCLOAK_MCP_SPI_DESIGN.md`)
+- Section E (verification checklist)
+
 **STOP** = human action required.
+**[?]** = best guess at exact UI label in 26.6.x — verify against your admin console.
 
 ---
 
@@ -18,9 +43,12 @@ Both assume: Keycloak `26.6.x` pinned, platform-managed TLS, realm names per ops
 
 1. **STOP — DNS access** for `auth.knobby.io` confirmed.
 2. **STOP — Google OAuth client** created at https://console.cloud.google.com/apis/credentials. Authorized redirect URIs: `https://auth.knobby.io/realms/knobby-{prod,staging,dev}/broker/google/endpoint`. Save Client ID + Secret.
-3. **STOP — Auth0 dashboard access + Management API access** confirmed (needed later for migration).
-4. **STOP — GCP Secret Manager** chosen as secret store.
-5. **Decide Postgres home** (Option A): Cloud SQL, Neon, or Supabase.
+3. **STOP — Microsoft Entra app registration** (multi-tenant): redirect URI `https://auth.knobby.io/realms/knobby-{env}/broker/microsoft-oidc/endpoint`, publisher domain `knobby.io`. Save Client ID + Secret. See PRD §6.3, §11.9.
+4. **STOP — GitHub OAuth app** created. Authorized callback URL: `https://auth.knobby.io/realms/knobby-{env}/broker/github/endpoint`. Save Client ID + Secret.
+5. **STOP — Auth0 dashboard access + Management API access** confirmed (needed later for migration).
+6. **STOP — GCP Secret Manager** chosen as secret store.
+7. **Decide Postgres home** (Option A): Cloud SQL, Neon, or Supabase.
+8. **For §D (MCP setup) only — STOP — MCP SPI build infrastructure** in place: repo scripts (`build.sh`, `push.sh`, `deploy.sh`, `test.sh`, `smoke.sh`), `src/providers/` Maven module per `KEYCLOAK_MCP_SPI_DESIGN.md`, the SPI JAR built and packaged into the custom Keycloak Docker image. Defer §D until §A or §B + §C is complete and the MCP SPI image is deployed.
 
 ---
 
@@ -324,10 +352,11 @@ Start with dev. Identity Providers → Add → Google. Alias `google` (exact). C
 
 ## C.4 OIDC clients
 
-Per realm:
-- **`knobby-web-ui`** — confidential, standard flow only. Redirect URI: `https://app.knobby.io/auth/callback`. Web origin: `https://app.knobby.io`. Copy secret to Secret Manager.
-- **`knobby-backend-api`** — confidential, service accounts only. Backend JWT validation uses public JWKS; no secret required for that path.
-- **`knobby-mcp-server`** — deferred to Layer 1 MCP work; uses Dynamic Client Registration.
+Per realm. Naming per PRD §10.8 conventions: `knobby-{env}-{purpose}`.
+
+- **`knobby-{env}-web`** — confidential, standard flow only, PKCE-S256 required. Redirect URIs: `https://prod.knobby.io/auth/callback` (prod) / equivalent per env. Backchannel logout URL: `/auth/backchannel-logout`. Web origin: `https://prod.knobby.io` / per env. Copy secret to Secret Manager. See PRD §8.2.
+- **`knobby-{env}-admin-api`** — confidential, service accounts only, 8 realm-management roles per PRD §11.13: `view-users`, `manage-users`, `view-realm`, `view-clients`, `query-users`, `query-groups`, `view-identity-providers`, `manage-identity-providers`.
+- **`knobby-{env}-mcp-server`** — does **not** exist as a static client. MCP clients self-register via Dynamic Client Registration; see §D. The knobby.io MCP server is a *resource server* identified by audience `knobby-mcp-api`, not a Keycloak client.
 
 ## C.5 Verify minimal token shape
 
@@ -340,24 +369,307 @@ If extras appear, remove the offending client scope or mapper. The minimal-token
 
 ---
 
-# SECTION D: Verification Checklist
+# SECTION D: MCP Setup (Both Options)
+
+Requires: §C complete, custom Keycloak image with the MCP SPI deployed (per `KEYCLOAK_MCP_SPI_DESIGN.md`), `KNOBBY_MCP_HANDOFF_HMAC_KEY` + `KNOBBY_WEB_HOST` env vars injected into the Keycloak runtime.
+
+Setup ordering matters — later steps depend on earlier ones. Follow in sequence.
+
+## D.1 Verify the SPI is loaded
+
+Run `./smoke.sh`. Look at Test 14.
+
+- **Green** → SPI loaded. Proceed.
+- **Red** → SPI not loaded. Check Cloud Run startup logs: `./logs.sh | grep -i "knobby\|spi\|provider\|exception"`. Common causes: META-INF/services file has wrong factory class name; JAR's Keycloak SDK version doesn't match the base image; `target/providers/` was empty at `docker build` time.
+
+## D.2 Create the `browser-mcp-tenant-pick` authentication flow
+
+**Path:** Authentication → Flows
+
+1. Find `browser-federated-only` → row action menu → **Duplicate**.
+2. Name the copy: `browser-mcp-tenant-pick`. Open it.
+3. At the bottom of the flow, **Add step** [?]. In the picker, find **Knobby MCP Tenant Picker** [?] (or whatever display name your SPI's `AuthenticatorFactory.getDisplayType()` returns — search "knobby" or "mcp").
+4. Set the new step's requirement to **Required**.
+5. Save.
+
+**Verify:** `./smoke.sh` → Test 15 green.
+
+## D.3 Create the six atomic `knobby:*` Client Scopes
+
+**Path:** Client scopes → **Create client scope** (repeat 6×)
+
+Per scope:
+- **Name:** as below
+- **Type:** **None** [?] (don't auto-assign; the consent wizard explicitly grants them)
+- **Protocol:** **OpenID Connect**
+- **Display on consent screen:** **On**
+- **Consent screen text:** as below
+- **Include in token scope:** **On**
+
+| Name | Consent screen text |
+|---|---|
+| `knobby:read` | Read your resources |
+| `knobby:comment` | Comment on resources you have access to |
+| `knobby:curate` | Tag, link, and organize resources |
+| `knobby:write` | Create, edit, and delete resources |
+| `knobby:share` | Share resources with other users in this tenant |
+| `knobby:admin` | **Administer this tenant** (manage users, settings, audit) |
+
+**Verify:** `./smoke.sh` → Test 16 green.
+
+## D.4 Create the `mcp-default` Client Scope
+
+**Path:** Client scopes → **Create client scope**
+
+- **Name:** `mcp-default`
+- **Description:** "Audience binding and tenant/scope claims for MCP clients"
+- **Type:** **Default** [?] (so it can be assigned as realm-default in §D.7)
+- **Protocol:** **OpenID Connect**
+- **Display on consent screen:** **Off** (the consent wizard handles UX)
+- **Include in token scope:** **Off** (we don't want `mcp-default` itself appearing as a scope value)
+
+Save, then in the **Mappers** tab, add three mappers (§D.4a–c).
+
+### D.4a Audience mapper
+
+Add mapper → By configuration → **Audience**:
+- **Name:** `mcp-default-audience`
+- **Included Custom Audience:** `knobby-mcp-api`
+- **Add to access token:** **On**
+
+### D.4b User Session Note mapper (`tenant` claim)
+
+Add mapper → By configuration → **User Session Note**:
+- **Name:** `mcp-default-tenant-claim`
+- **User Session Note:** `knobby_tenant_id`
+- **Token Claim Name:** `tenant`
+- **Claim JSON Type:** `String`
+- **Add to ID token:** **On**
+- **Add to access token:** **On**
+
+### D.4c Knobby MCP Scope Override mapper (SPI's custom mapper)
+
+Add mapper → By configuration → **Knobby MCP Scope Override** [?] (search "knobby"):
+- **Name:** `mcp-default-scope-override`
+- No other configuration needed; the mapper hardcodes `knobby_scopes` session note → `scope` claim. If you see additional fields with toggles for token targets, leave defaults — the mapper applies to access tokens unconditionally.
+
+**Verify:** `./smoke.sh` → Tests 17 (and sub-checks) and 29 green.
+
+## D.5 Client Registration Policies (legacy CRP)
+
+**Path:** Realm settings → Client registration → Anonymous Access Policies [?]
+
+The exact path in 26.6.x may differ — look for "Client registration" as a tab within Realm settings or a top-level sidebar item. Anonymous policies are the relevant scope.
+
+Add each policy below: **Create policy** [?] → select provider → configure → save.
+
+| Provider | Configuration |
+|---|---|
+| `allowed-client-scopes` | Whitelist: `openid`, `offline_access`, `profile`, `email`, `mcp-default`, all six `knobby:*` scopes |
+| `consent-required` | None (just create the entry — no fields) |
+| `trusted-hosts` | Permissive initially; tighten with Cloudflare WAF rate limiting in front |
+| `max-clients` | `10000` |
+
+**Optional:** `allowed-protocol-mapper-types`. Skip for v1 — the security-critical mappers are attached to the `mcp-default` scope (not the client), so DCR'd clients can't override them. See PRD §16.4 for the rationale and full whitelist if you want belt-and-suspenders later.
+
+**Verify:** `./smoke.sh` → Test 18 (some sub-checks may still red if other policies aren't configured here; that's expected).
+
+## D.6 Client Policies (newer profile-based system)
+
+**Path:** Realm settings → Client policies
+
+Two parts: create a Profile of executors, then create a Policy with a condition that activates the profile.
+
+### D.6a Profile `mcp-hardening`
+
+Profiles tab → **Create profile** [?]:
+- **Name:** `mcp-hardening`
+- **Description:** "OAuth 2.1 hardening for DCR'd MCP clients"
+
+After saving, the profile is editable. Add executors via **Add executor** [?].
+
+The table below describes behaviors; match by description in your actual UI dropdown. Keycloak has renamed and split executors across versions; the names below are my best guess for 26.6.x. If your dropdown shows different exact labels, **trust the dropdown** and let me know so this guide can be corrected.
+
+| Behavior | Likely UI name [?] | Configuration |
+|---|---|---|
+| Enforce PKCE on all requests | `pkce-enforcer` | Code Challenge Method: `S256` |
+| Restrict response types to `code` only (forbid implicit) | `secure-response-type` | (default) |
+| Force consent required | `consent-required` | (default) |
+| Enforce HTTPS / secure redirect URIs | One of `secure-client-uris`, `secure-redirect-uri`, similar | (default) |
+| Secure session binding | `secure-session` | (default) |
+| Disable client full-scope access | `full-scope-disabled` | (default) |
+
+Save.
+
+### D.6b Policy `mcp-anonymous-dcr`
+
+Policies tab → **Create policy** [?]:
+- **Name:** `mcp-anonymous-dcr`
+- **Description:** "Apply mcp-hardening to anonymously DCR'd clients"
+- **Enabled:** **On**
+
+Add condition: **Condition type:** `client-updater-context`. **Update Client Source:** `ByAnonymous`. (Other values like `ByAuthenticatedUser` exist for non-MCP clients — `ByAnonymous` matches DCR'd ones.)
+
+Add profile reference: `mcp-hardening`.
+
+Save.
+
+**Verify:** Smoke tests 22, 23, 24 (DCR rejects bad inputs) exercise this indirectly after §D.12.
+
+## D.7 Set realm-default Client Scopes
+
+**Path:** Realm settings → Client scopes [?] (a tab within Realm settings, not the top-level Client scopes section)
+
+Move to **Default Client Scopes** (auto-assigned to all new clients):
+- `mcp-default`
+- `knobby:read`
+- `knobby:comment`
+- `knobby:curate`
+- `knobby:write`
+- `knobby:share`
+
+Move to **Optional Client Scopes** (clients explicitly request):
+- `knobby:admin`
+
+Save.
+
+**Caveat:** these realm-defaults apply to all newly-created clients. The existing `knobby-{env}-web` and `knobby-{env}-admin-api` clients are unaffected. If you ever recreate them, manually remove the MCP scopes from their assignments.
+
+## D.8 Bind the browser flow
+
+Two options:
+
+**Option A — set realm's default browser flow to `browser-mcp-tenant-pick`.** Affects all clients. The SPI Authenticator must short-circuit cleanly for non-MCP clients (those without `mcp-default` scope assigned).
+
+**Path:** Authentication → Bindings → **Browser Flow:** `browser-mcp-tenant-pick`. Save.
+
+**Verify the web client still works:** sign in to `https://prod.knobby.io` in a fresh browser. If it breaks, switch to Option B.
+
+**Option B — keep realm browser flow as `browser-federated-only`; post-process DCR'd clients in Knobby web.** Knobby web's `/mcp/consent` backend sets `authenticationFlowBindingOverrides.browser` on each DCR'd client at first-use via the Admin API. More surgical. No admin console action here; logic lives in Knobby web (`KNOBBY_WEB_MCP_ENDPOINTS.md`).
+
+## D.9 OAuth 2.1 token settings
+
+**Path:** Realm settings → Tokens
+
+- **Revoke Refresh Token:** **On**
+- **Refresh Token Max Reuse:** `0`
+- Save.
+
+**Verify:** `./smoke.sh` → Test 19 green.
+
+## D.10 Disable Direct Grant flow (optional hardening)
+
+**Path:** Authentication → Bindings
+
+- **Direct Grant Flow:** unbind, or set to a flow that always fails. Save.
+
+This prevents any client (including DCR'd ones) from using the password grant even if they request it.
+
+**Verify:** `./smoke.sh` → Test 23 green.
+
+## D.11 Verify HMAC handoff key is mounted
+
+Should already be in place from image deploy. Sanity-check:
+
+```bash
+gcloud secrets describe knobby-mcp-handoff-hmac-key-prod
+gcloud run services describe keycloak --region=us-central1 \
+  --format='value(spec.template.spec.containers[0].env[].valueFrom.secretKeyRef.name)' \
+  | grep handoff
+```
+
+The same secret value must also be injected into Knobby web's runtime environment.
+
+**Verify:** `./smoke.sh` → Test 20 green.
+
+## D.12 Test DCR end-to-end
+
+```bash
+curl -X POST "https://auth.knobby.io/realms/knobby-prod/clients-registrations/openid-connect" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "DCR smoke-test client",
+    "redirect_uris": ["https://example.com/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "token_endpoint_auth_method": "none",
+    "scope": "openid knobby:read knobby:write"
+  }'
+```
+
+Expected: **HTTP 201** with `client_id`, `registration_access_token`, `registration_client_uri` in the JSON. Save these for cleanup in §D.13.
+
+Inspect the new client in the admin console:
+- **Client Scopes** tab: Default = `mcp-default` + 5 author-bundle `knobby:*` scopes; Optional = `knobby:admin`
+- **Settings** tab: PKCE method = S256; standard flow on; direct grants off
+- **Advanced** tab (if D.8 Option A): browser flow override = `browser-mcp-tenant-pick`
+
+**Verify:** Smoke Tests 21–25 green.
+
+## D.13 Cleanup
+
+```bash
+curl -X DELETE "https://auth.knobby.io/realms/knobby-prod/clients-registrations/openid-connect/<client_id>" \
+  -H "Authorization: Bearer <registration_access_token>"
+```
+
+Expected: **HTTP 204**.
+
+**Verify:** `./smoke.sh` → Test 26 green.
+
+## D.14 End-to-end MCP handoff test (manual; deferred)
+
+Cannot run until Knobby web's `/mcp/consent` sub-app is deployed. When ready, run smoke Test 33 — the manual end-to-end walkthrough that exercises: federated IdP → silent OIDC bootstrap → 3-step consent wizard → picker-result handoff → Keycloak callback → access token. Decode the resulting access token and verify:
+- `aud == "knobby-mcp-api"`
+- `tenant == <chosen tenant UUID>`
+- `scope == <user's wizard selection>` (not the originally requested scopes — proves the scope override mapper works)
+
+---
+
+# SECTION E: Verification Checklist
+
+## E.1 Infrastructure + realm foundation
 
 - [ ] `https://auth.knobby.io/` returns Keycloak welcome page with valid TLS.
 - [ ] Real admin works; bootstrap admin disabled; bootstrap env vars removed.
 - [ ] All three realms exist.
 - [ ] Google federation works in `knobby-dev` with a test account.
 - [ ] Google federation configured in `knobby-prod` (not yet tested with real users).
-- [ ] `knobby-web-ui` and `knobby-backend-api` clients in all three realms.
-- [ ] Token contains only standard OIDC claims.
+- [ ] Microsoft federation works in `knobby-dev` with a work and a personal MSA account.
+- [ ] GitHub federation works in `knobby-dev`.
+- [ ] `knobby-{env}-web` and `knobby-{env}-admin-api` clients in all three realms.
+- [ ] Token contains only standard OIDC claims (per ops spec §4.5).
 - [ ] Database backups configured; restore tested within 7 days.
 - [ ] Brute force detection ON; user registration OFF in all realms.
 - [ ] All secrets in Secret Manager.
-- [ ] (Option B) UFW enabled; SSH password auth disabled; unattended-upgrades enabled.
+- [ ] (Option B only) UFW enabled; SSH password auth disabled; unattended-upgrades enabled.
 - [ ] DNS resolves; TLS valid.
 - [ ] Uptime check hits `/realms/knobby-prod/.well-known/openid-configuration`.
 - [ ] Runbook in `/docs/ops/keycloak-runbook.md` covers chosen path, secrets location, admin access, credential rotation, restore, version upgrade.
+- [ ] `./smoke.sh` Tests 1–13 all green.
 
-All checked → proceed to Auth0 → Keycloak migration in ops spec §10.
+## E.2 MCP setup
+
+- [ ] MCP SPI image deployed to Cloud Run.
+- [ ] `./smoke.sh` Test 14 green (SPI loaded).
+- [ ] `browser-mcp-tenant-pick` flow exists with SPI Authenticator as Required final step (Test 15 green).
+- [ ] All six `knobby:*` atomic Client Scopes configured (Test 16 green).
+- [ ] `mcp-default` Client Scope exists with three mappers: audience, tenant session note, scope override (Tests 17 and 29 green).
+- [ ] Client Registration Policies configured: `allowed-client-scopes`, `consent-required`, `trusted-hosts`, `max-clients`.
+- [ ] Client Policy profile `mcp-hardening` exists with PKCE + response type + consent + secure URI + secure session + full-scope-disabled executors.
+- [ ] Client Policy `mcp-anonymous-dcr` exists with `client-updater-context: ByAnonymous` condition activating `mcp-hardening`.
+- [ ] Realm-default Client Scopes set: `mcp-default` + Author bundle as Default; `knobby:admin` as Optional.
+- [ ] Browser flow binding configured (Option A: realm default = `browser-mcp-tenant-pick`, or Option B: post-DCR processing in Knobby web).
+- [ ] Refresh token rotation enabled (Test 19 green).
+- [ ] Direct Grant flow disabled (Test 23 green).
+- [ ] HMAC handoff key present in Secret Manager (Test 20 green).
+- [ ] Manual DCR test passes 201 with correct shape; cleanup successful (Tests 21–26 green).
+- [ ] `./smoke.sh` Tests 14–29 all green.
+
+## E.3 End-to-end (deferred until Knobby web `/mcp/consent` ready)
+
+- [ ] Smoke Test 33 passes: full MCP handoff flow produces access token with correct `aud`, `tenant`, `scope` claims.
+
+All §E.1 + §E.2 checked → realm-side MCP setup complete. Proceed to Auth0 → Keycloak migration in ops spec §10 (if not already done) and to Knobby web `/mcp/consent` implementation.
 
 ---
 
