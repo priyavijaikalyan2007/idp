@@ -9,7 +9,7 @@
   related: ["McpHandoffJwt", "McpScopeOverride", "McpDefaultClientScope", "McpTenantPickerAuthenticator"]
 
 - name: "McpTenantPickerAuthenticator"
-  definition: "Final step of the browser-mcp-tenant-pick flow. Builds a signed PickerRequestToken carrying the user/client/scope/OAuth state plus auth-session correlation fields (auth_session_id, kc_client_id, kc_tab_id) needed for the callback to find and resume the suspended flow. 302-redirects via context.challenge(Response.seeOther(...)). Per-realm knobby.web.host comes from AuthenticatorConfig; per-realm HMAC key comes from McpSpiConfig."
+  definition: "Final step of the browser-mcp-tenant-pick flow. Opens with a short-circuit guard (spec §5.1): if the client is not an MCP client (i.e. it lacks the mcp-default client scope as either a default or optional scope, checked via ClientModel.getClientScopes(true/false).containsKey), it calls context.success() and returns so regular web logins and non-MCP clients pass through untouched — this lets the flow be bound realm-wide without hijacking normal logins. For MCP clients it builds a signed PickerRequestToken carrying the user/client/scope/OAuth state plus auth-session correlation fields (auth_session_id, kc_client_id, kc_tab_id) needed for the callback to find and resume the suspended flow, then 302-redirects via context.challenge(Response.seeOther(...)). Per-realm knobby.web.host comes from AuthenticatorConfig; per-realm HMAC key comes from McpSpiConfig."
   anchor_file: "src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
   related: ["McpTenantPickerFlow", "McpHandoffJwt", "McpSpiConfig", "McpPickerCallbackResourceProvider"]
 
@@ -44,6 +44,6 @@
   related: ["McpDefaultClientScope", "McpTenantPickerFlow", "McpPickerCallbackResourceProvider"]
 
 - name: "McpDefaultClientScope"
-  definition: "Realm-level Client Scope (`mcp-default`) auto-assigned to DCR-registered MCP clients. Contains the audience mapper (`knobby-mcp-api`), tenant claim mapper (User Session Note → `tenant`), and the McpScopeOverride mapper."
+  definition: "Realm-level Client Scope (`mcp-default`) auto-assigned to DCR-registered MCP clients. Contains the audience mapper (`knobby-mcp-api`), tenant claim mapper (User Session Note → `tenant`), and the McpScopeOverride mapper. Doubles as the MCP-client discriminator: McpTenantPickerAuthenticator's short-circuit guard treats a client as MCP-enabled iff this scope is assigned (default or optional), so presence of `mcp-default` is the on/off switch for the whole tenant-picker handoff."
   anchor_file: "specs/keycloak.prd.md"
   related: ["McpScopeOverride", "McpTenantPickerFlow"]

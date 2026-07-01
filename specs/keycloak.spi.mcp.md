@@ -2,7 +2,7 @@
 
 Companion to `KEYCLOAK_AUTH_PRD.md` §16.8. The PRD specifies the architecture and contract; this document specifies *how* to implement that contract — file layout, build setup, class skeletons, error handling, testing.
 
-**Document version:** v0.4 — per-realm HMAC keys (env-var convention `KNOBBY_MCP_HANDOFF_HMAC_KEY__<REALM>`) and per-realm `knobby.web.host` Authenticator config, replacing the prior single-instance env vars. One Keycloak instance serves three realms (`knobby-prod`, `knobby-dev`, `knobby-test`); single global keys/hosts would defeat env isolation and routing.
+**Document version:** v0.3 — unified build output to repo-root `/target/` (Maven/Java convention) with subdirectories per artifact type (`/target/providers/`, `/target/themes/`).
 
 ---
 
@@ -309,6 +309,21 @@ Called when this step is first encountered in the flow.
 Pseudocode:
 ```
 authenticate(context):
+    0. // SHORT-CIRCUIT GUARD (critical).
+       // This Authenticator may run in a flow that is bound realm-wide as the
+       // default browser flow (setup guide D.8 Option A). In that case it also
+       // executes for NON-MCP clients (e.g. knobby-{env}-web). Those must pass
+       // through untouched — only MCP clients get the picker redirect.
+       //
+       // An MCP client is identified by having the 'mcp-default' client scope
+       // assigned (default or optional). Non-MCP clients don't have it.
+       client = context.getAuthenticationSession().getClient()
+       isMcpClient = client.getClientScopes(true).containsKey("mcp-default")
+                     || client.getClientScopes(false).containsKey("mcp-default")
+       if not isMcpClient:
+           context.success()      // no-op: let the flow finish as normal login
+           return
+
     1. user = context.getUser()             // set by previous flow steps
        if user is null:
            context.failure(INTERNAL_ERROR, "MCP picker reached without authenticated user")
@@ -333,25 +348,9 @@ authenticate(context):
            .expiresAt(now + 5 minutes)
            .build()
 
-    4. realmName = context.getRealm().getName()
-       authConfig = context.getAuthenticatorConfig()
-       if authConfig is null or isBlank(authConfig.getConfig().get("knobby.web.host")):
-           log.errorf("Authenticator config missing knobby.web.host realm=%s", realmName)
-           context.failure(INTERNAL_ERROR, "MCP picker not configured for this realm")
-           return
-       knobbyWebHost = authConfig.getConfig().get("knobby.web.host")
-
-       try:
-           signed_token = signer.sign(picker_request, realmName)
-       catch McpSpiConfigException e:
-           log.errorf("HMAC key not configured realm=%s code=%s", realmName, e.getCode())
-           context.failure(INTERNAL_ERROR, "MCP picker not configured for this realm")
-           return
-
+    4. signed_token = HandoffTokenSigner.sign(picker_request)
+       knobbyWebHost = McpSpiConfig.knobbyWebHost()       // e.g., "prod.knobby.io"
        redirect_url = "https://" + knobbyWebHost + "/mcp/consent?token=" + URL_encode(signed_token)
-       // Both knobbyWebHost (per-realm Authenticator config) and the HMAC key
-       // (per-realm env var KNOBBY_MCP_HANDOFF_HMAC_KEY__<REALM>) vary by realm.
-       // See §7 for the configuration model.
 
     5. log.info("Emitting MCP picker request for user={} client={} jti={}",
                 user.getId(), clientId, picker_request.jti)
@@ -418,28 +417,13 @@ public class McpTenantPickerAuthenticatorFactory implements AuthenticatorFactory
 - `getId()` → `PROVIDER_ID` constant
 - `getDisplayType()` → `"Knobby MCP Tenant Picker"`  (what the admin console shows)
 - `getReferenceCategory()` → `"knobby-mcp"`
-- `isConfigurable()` → `true`  (per-realm `knobby.web.host`)
-- `getConfigProperties()` → one entry:
-  ```
-  new ProviderConfigProperty(
-      "knobby.web.host",                                        // name (config key)
-      "Knobby web host",                                        // label
-      "Hostname Knobby web serves /mcp/consent at, for this " + // help text
-          "realm. No scheme, no trailing slash. " +
-          "E.g., 'prod.knobby.io' in knobby-prod, " +
-          "'dev.knobby.io' in knobby-dev. " +
-          "The Authenticator constructs https://<host>/mcp/consent?token=...",
-      ProviderConfigProperty.STRING_TYPE,
-      null                                                      // no default — required per realm
-  )
-  ```
-  Per-realm because one Keycloak instance serves multiple Knobby web hosts (knobby-prod → prod.knobby.io, knobby-dev → dev.knobby.io, knobby-test → ...). See §7.3.
+- `isConfigurable()` → `false`
+- `getConfigProperties()` → empty list
 - `getRequirementChoices()` → `[REQUIRED]` (no other options make sense for this step)
 - `isUserSetupAllowed()` → `false`
-- `getHelpText()` → `"Redirects MCP-client auth flows to Knobby web for tenant picker and consent. Required final step of browser-mcp-tenant-pick flow. Configure knobby.web.host per realm."`
+- `getHelpText()` → `"Redirects MCP-client auth flows to Knobby web for tenant picker and consent. Required final step of browser-mcp-tenant-pick flow."`
 - `create(KeycloakSession session)` → `new McpTenantPickerAuthenticator()`
-- `init(Config.Scope config)` → enumerate `System.getenv()` entries matching `KNOBBY_MCP_HANDOFF_HMAC_KEY__*` and log the set of realms with keys configured (operator visibility at startup; see §7.2). No per-realm validation here — env vars are read lazily on first request through each realm.
-- `postInit(...)`, `close()` → no-op for this SPI
+- `init(...)`, `postInit(...)`, `close()` → no-op for this SPI
 
 ### 5.3 McpPickerCallbackResourceProvider
 
@@ -679,41 +663,35 @@ public class PickerResultToken {
 ### 6.3 HandoffTokenSigner
 
 Responsibilities:
-- Sign POJOs into HS256 JWTs using the current HMAC key **for the active realm**.
-- Source the HMAC key from `McpSpiConfig`, which reads the realm-scoped env var (§7.1).
-- Cache decoded key bytes per realm to avoid repeated env-var reads and base64 decoding.
+- Sign POJOs into HS256 JWTs using the current HMAC key.
+- Source the HMAC key from `McpSpiConfig` (env var).
 
 Pseudocode:
 ```
 class HandoffTokenSigner:
-    private final McpSpiConfig config;
-    private final ConcurrentMap<String, byte[]> currentKeyByRealm;
+    private final byte[] currentKey;
 
     HandoffTokenSigner(McpSpiConfig config):
-        this.config = config
-        this.currentKeyByRealm = new ConcurrentHashMap<>()
+        this.currentKey = base64Decode(config.handoffHmacKey())
+        if currentKey.length != 32:
+            throw new IllegalArgumentException("HMAC key must be 32 bytes (256 bits)")
 
-    String sign(Object payload, String realmName) throws McpSpiConfigException:
-        byte[] key = currentKeyByRealm.computeIfAbsent(realmName,
-            r -> base64Decode(config.handoffHmacKey(r)))    // throws McpSpiConfigException if absent/malformed
-
-        // Use Keycloak's bundled JWS infrastructure — do NOT hand-roll base64url
-        // or HMAC. The runtime already ships these and they are battle-tested.
-        return new JWSBuilder()
-            .type("JWT")
-            .jsonContent(payload)
-            .hmac256(key);
+    String sign(Object payload):
+        header = '{"alg":"HS256","typ":"JWT"}'
+        encHeader = base64url(header)
+        encPayload = base64url(JsonSerialization.writeValueAsString(payload))
+        signingInput = encHeader + "." + encPayload
+        signature = HMAC_SHA256(currentKey, signingInput.getBytes("UTF-8"))
+        encSignature = base64url(signature)
+        return signingInput + "." + encSignature
 ```
 
-Implementation notes:
-- Use `org.keycloak.jose.jws.JWSBuilder` and `org.keycloak.crypto.hash.MacAlgorithmProvider` (or equivalent — confirm exact API surface against Keycloak 26.6 source). Do **not** introduce Nimbus or any external JOSE library; the runtime's own classes are sufficient.
-- `config.handoffHmacKey(realmName)` resolves `KNOBBY_MCP_HANDOFF_HMAC_KEY__<R>` where `<R>` is the realm name uppercased with `-`→`_` (§7.1). Validation (present, valid base64, 32 bytes) lives in `McpSpiConfig`; signer is purely a consumer.
-- The cache is unbounded by design — bounded by the number of realms (3 today; never expected to exceed ~10). No eviction needed.
+Note: Keycloak ships `com.nimbusds:nimbus-jose-jwt` and similar JWT libraries. Prefer using one of those rather than hand-rolling. Keycloak's own `org.keycloak.crypto` package has HMAC utilities too.
 
 ### 6.4 HandoffTokenValidator
 
 Responsibilities:
-- Verify signature against the **active realm's** current key (or previous key during rotation).
+- Verify signature against current key (or previous key during rotation).
 - Verify `iss`, `aud`, `exp`, `iat`.
 - Check `jti` for replay (via ReplayCache, §6.5).
 - Return parsed POJO on success; throw `HandoffValidationException` on failure.
@@ -721,35 +699,31 @@ Responsibilities:
 Pseudocode:
 ```
 class HandoffTokenValidator:
-    private final McpSpiConfig config;
+    private final byte[] currentKey;
+    private final byte[] previousKey;     // nullable
     private final ReplayCache replayCache;
-    private final ConcurrentMap<String, byte[]> currentKeyByRealm;
-    private final ConcurrentMap<String, Optional<byte[]>> previousKeyByRealm;
 
     HandoffTokenValidator(McpSpiConfig config, ReplayCache cache):
-        this.config = config
+        this.currentKey = base64Decode(config.handoffHmacKey())
+        this.previousKey = config.handoffHmacKeyPrevious() != null
+                           ? base64Decode(config.handoffHmacKeyPrevious())
+                           : null
         this.replayCache = cache
-        this.currentKeyByRealm = new ConcurrentHashMap<>()
-        this.previousKeyByRealm = new ConcurrentHashMap<>()
 
-    PickerResultToken validatePickerResult(String jwt, String realmName) throws ...:
-        byte[] currentKey = currentKeyByRealm.computeIfAbsent(realmName,
-            r -> base64Decode(config.handoffHmacKey(r)))
-        Optional<byte[]> previousKey = previousKeyByRealm.computeIfAbsent(realmName, r -> {
-            String v = config.handoffHmacKeyPrevious(r)         // null if not set
-            return v == null ? Optional.empty() : Optional.of(base64Decode(v))
-        })
-        // NB: previousKey cache is NOT invalidated when env var disappears post-rotation.
-        // Acceptable because removing _PREVIOUS env var coincides with a container redeploy,
-        // which restarts the JVM and rebuilds the cache.
+    PickerResultToken validatePickerResult(String jwt):
+        parts = jwt.split("\\.")
+        if parts.length != 3:
+            throw HandoffValidationException(MALFORMED)
 
-        // Use Keycloak's bundled JWS verification — do NOT hand-roll signature checks.
-        JWSInput parsed = new JWSInput(jwt)               // throws if structurally malformed
-        if !HMACProvider.verify(parsed, currentKey):
-            if previousKey.isEmpty() || !HMACProvider.verify(parsed, previousKey.get()):
+        signingInput = parts[0] + "." + parts[1]
+        receivedSig = base64urlDecode(parts[2])
+
+        // Try current key first, then previous (for rotation)
+        if !constantTimeEquals(HMAC_SHA256(currentKey, signingInput), receivedSig):
+            if previousKey == null || !constantTimeEquals(HMAC_SHA256(previousKey, signingInput), receivedSig):
                 throw HandoffValidationException(BAD_SIGNATURE)
 
-        PickerResultToken payload = parsed.readJsonContent(PickerResultToken.class)
+        payload = JsonSerialization.readValue(base64urlDecode(parts[1]), PickerResultToken.class)
 
         // Standard JWT claim checks
         if !payload.iss.equals("knobby-web-mcp-consent"):
@@ -762,20 +736,12 @@ class HandoffTokenValidator:
         if payload.iat > now + 60:    // future-dated (clock skew tolerance)
             throw HandoffValidationException(FUTURE_DATED)
 
-        // Replay check (global cache — UUID v4 jti collision across realms is astronomically
-        // unlikely; per-realm cache adds no security and complicates the implementation).
+        // Replay check
         if !replayCache.tryConsume(payload.jti, payload.exp):
             throw HandoffValidationException(REPLAY)
 
         return payload
 ```
-
-The callsite in §5.3 step 2 passes `realm.getName()` derived from the JAX-RS path parameter `{realm}`:
-```
-tokenObj = validator.validatePickerResult(pickerResult, realm.getName())
-```
-
-A `picker_result` captured from `knobby-prod` and replayed against `/realms/knobby-dev/mcp-picker-callback` fails at signature verification because each realm holds a distinct HMAC key. This is the cross-realm isolation that motivates per-realm keys.
 
 ### 6.5 ReplayCache
 
@@ -815,104 +781,43 @@ For multi-instance Keycloak deployments (clustered), this cache would need to be
 
 ## 7. Configuration
 
-This SPI is configured in two layers:
-
-| Layer | Holds | Per | Storage | Sensitive? |
-|---|---|---|---|---|
-| Per-realm environment variables | HMAC key(s) for signing and validating picker-request / picker-result JWTs | Realm | Cloud Run env, backed by GCP Secret Manager | Yes — never enters the Keycloak DB |
-| Per-realm Authenticator config (admin console) | Knobby web hostname for this realm's `/mcp/consent` endpoint | Realm | Keycloak realm DB / realm export | No |
-
-**Rationale.** One Keycloak instance serves three realms (`knobby-prod`, `knobby-dev`, `knobby-test`). A single global HMAC key shared across realms would mean: dev Knobby web's HMAC key, if exfiltrated, could mint a valid `picker_result` carrying any `chosen_tenant_id`/`grantedScopes`, POST it to `/realms/knobby-prod/mcp-picker-callback`, and have it pass signature validation. Per-realm keys close that path. The web host, by contrast, is non-sensitive routing config and lives most naturally next to the realm's flow definition in the admin console (where it is also captured by realm export).
-
-### 7.1 Per-realm environment variables
-
-For each realm `R` that uses the MCP SPI, set the following on the Keycloak container. The suffix `<R>` is the realm name uppercased with `-` replaced by `_` (e.g., `knobby-prod` → `KNOBBY_PROD`). The double-underscore separator (`__`) makes the boundary between the fixed prefix and the realm suffix unambiguous when parsing env-var names.
+### 7.1 Environment variables
 
 | Variable | Required? | Description |
 |---|---|---|
-| `KNOBBY_MCP_HANDOFF_HMAC_KEY__<R>` | Yes (per realm using the SPI) | Current HMAC key for realm `R`, base64-encoded 32 bytes (256 bits). Standard base64 (not URL-safe). Used for signing picker-request and validating picker-result tokens within this realm. |
-| `KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` | Only during rotation for realm `R` | Previous HMAC key for realm `R`. When set, the validator accepts tokens signed with either current or previous. Removed once all in-flight tokens have expired (15-minute overlap window — see `keycloak-hmac-operations-guide.md` §4). |
+| `KNOBBY_MCP_HANDOFF_HMAC_KEY` | Yes | Current HMAC key, base64-encoded (32 bytes = 256 bits). Used for both signing outgoing picker-request tokens and validating incoming picker-result tokens. |
+| `KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS` | No | Previous HMAC key during rotation. If set, the validator accepts tokens signed with either current or previous. Removed once all in-flight tokens have expired. |
+| `KNOBBY_WEB_HOST` | Yes | Hostname of Knobby web for the picker redirect (e.g., `"prod.knobby.io"`). No scheme, no trailing slash. The Authenticator constructs the full URL as `https://<host>/mcp/consent?token=...`. |
 
-Expected env vars for the three realms:
+### 7.2 Startup validation
 
-```
-KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD            ← required when knobby-prod uses the SPI
-KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_DEV             ← required when knobby-dev uses the SPI
-KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_TEST            ← required when knobby-test exists and uses the SPI
-```
-
-A realm that does not use the MCP SPI requires no env var. Resolution is lazy: env vars are read on the first request through the realm, not at startup, so the absence of an unused realm's env var is not an error.
-
-### 7.2 Startup behavior and lazy resolution
-
-`McpSpiConfig` is lazy by design — the SPI does not enumerate which realms exist at JVM startup (realms come and go independently of the SPI deployment cycle). Validation happens in two places:
-
-**At startup (`AuthenticatorFactory.init`):** scan `System.getenv()` for keys matching the pattern `KNOBBY_MCP_HANDOFF_HMAC_KEY__*` and log the set of realms with HMAC keys configured. Single line, operator-visible:
-
-```
-INFO Loaded MCP SPI provider knobby-mcp-tenant-picker.
-     HMAC keys configured for realms: [knobby-prod, knobby-dev]
-     (knobby-test absent — that realm will not be able to use the MCP SPI until configured)
-```
-
-The startup scan does **not** decode or validate key values — that would require holding decoded keys in memory longer than necessary. It only confirms env-var presence.
-
-**On first request through realm `R`:** `McpSpiConfig.handoffHmacKey(realmName)` resolves the env var, validates it (present, valid standard base64, decodes to exactly 32 bytes), and caches the validated string in the signer/validator. Failures throw `McpSpiConfigException` with a code:
-
-| Code | Trigger |
-|---|---|
-| `MISSING_HMAC_KEY` | `KNOBBY_MCP_HANDOFF_HMAC_KEY__<R>` not set |
-| `MALFORMED_BASE64` | Value is not valid standard base64 (URL-safe base64 also rejected) |
-| `WRONG_KEY_LENGTH` | Value decodes to ≠ 32 bytes |
-
-The Authenticator catches `McpSpiConfigException` and fails the flow with a literate error (§8). The first such failure surfaces immediately on the first MCP login test through the misconfigured realm — well before any external user sees it.
+`McpSpiConfig` reads these env vars eagerly at first use. If a required var is missing or malformed, throw a runtime exception that surfaces in Keycloak's startup logs and halts the SPI from registering. The Authenticator and RealmResourceProvider both depend on McpSpiConfig, so the failure cascades obviously rather than silently breaking flows at request time.
 
 ```
 class McpSpiConfig:
-    private static final String ENV_KEY_PREFIX = "KNOBBY_MCP_HANDOFF_HMAC_KEY__";
-    private static final String ENV_KEY_PREVIOUS_PREFIX = "KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS__";
+    private static final String ENV_HMAC_KEY = "KNOBBY_MCP_HANDOFF_HMAC_KEY"
+    private static final String ENV_HMAC_KEY_PREVIOUS = "KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS"
+    private static final String ENV_KNOBBY_WEB_HOST = "KNOBBY_WEB_HOST"
 
-    String handoffHmacKey(String realmName) throws McpSpiConfigException:
-        String envName = ENV_KEY_PREFIX + normalize(realmName)   // knobby-prod → KNOBBY_PROD
-        String value = System.getenv(envName)
+    String handoffHmacKey():
+        String value = System.getenv(ENV_HMAC_KEY)
         if isBlank(value):
-            throw new McpSpiConfigException(MISSING_HMAC_KEY, envName)
+            throw IllegalStateException("Required env var " + ENV_HMAC_KEY + " not set")
         try:
             byte[] bytes = Base64.getDecoder().decode(value)
             if bytes.length != 32:
-                throw new McpSpiConfigException(WRONG_KEY_LENGTH, envName, bytes.length)
+                throw IllegalStateException(ENV_HMAC_KEY + " must decode to 32 bytes, got " + bytes.length)
         catch IllegalArgumentException e:
-            throw new McpSpiConfigException(MALFORMED_BASE64, envName)
+            throw IllegalStateException(ENV_HMAC_KEY + " is not valid base64")
         return value
 
-    String handoffHmacKeyPrevious(String realmName):
-        // Returns null if not set — that is the steady-state case, not an error.
-        String envName = ENV_KEY_PREVIOUS_PREFIX + normalize(realmName)
-        String value = System.getenv(envName)
-        return isBlank(value) ? null : value
-        // Caller validates length/base64 the same way as current — extract a private helper.
-
-    private static String normalize(String realmName):
-        return realmName.toUpperCase(Locale.ROOT).replace('-', '_')
+    // similar for handoffHmacKeyPrevious() (returns null if not set)
+    // similar for knobbyWebHost() (required, must not be blank)
 ```
 
-The web host is **not** read by `McpSpiConfig` — it is read from `AuthenticatorConfigModel` in `McpTenantPickerAuthenticator.authenticate()` (§5.1 step 4). Keep concerns separate: env vars hold secrets; admin-console config holds routing.
+### 7.3 Replay cache configuration
 
-### 7.3 Per-realm Authenticator configuration: `knobby.web.host`
-
-Surfaced by `McpTenantPickerAuthenticatorFactory.getConfigProperties()` (§5.2). The admin console exposes it on the `browser-mcp-tenant-pick` flow's execution config for the Authenticator step.
-
-| Property | Type | Required | Description |
-|---|---|---|---|
-| `knobby.web.host` | String | Yes | Hostname Knobby web serves `/mcp/consent` at, for this realm. No scheme, no trailing slash. Per-realm convention: `prod.knobby.io` for `knobby-prod`, `dev.knobby.io` for `knobby-dev`, `test.knobby.io` (or a local equivalent) for `knobby-test`. |
-
-Captured by realm export — re-applying a realm export reinstates this value. The Authenticator hard-fails the flow with a literate error (§8) if `knobby.web.host` is unset for the active realm. This catches the "new realm created without finishing the flow config" case before any user-visible damage.
-
-Operational note: when adding a new realm, the order is (1) create the realm and import its config, (2) set `KNOBBY_MCP_HANDOFF_HMAC_KEY__<R>` in Cloud Run, (3) verify `knobby.web.host` is set on the Authenticator execution. The smoke suite (`./smoke.sh`) Test 15 confirms the SPI Authenticator is wired into the flow but does not validate config presence; an extension to smoke is recommended (see `keycloak-hmac-operations-guide.md` §6).
-
-### 7.4 Replay cache configuration
-
-Currently hardcoded in `ReplayCache` (maxSize=10000, maxAgeSeconds=600). Single cache across all realms — UUID v4 jti collisions across realms are astronomically unlikely, and the cache is per Keycloak JVM. If tuning is ever needed, expose via env vars.
+Currently hardcoded in `ReplayCache` (maxSize=10000, maxAgeSeconds=600). If tuning is ever needed, expose via env vars.
 
 ---
 
@@ -922,15 +827,11 @@ Currently hardcoded in `ReplayCache` (maxSize=10000, maxAgeSeconds=600). Single 
 
 | Category | Triggers | User-facing response | Logging |
 |---|---|---|---|
-| Realm configuration error | Missing `KNOBBY_MCP_HANDOFF_HMAC_KEY__<R>`, malformed key, or missing `knobby.web.host` Authenticator config for the active realm | Authentication flow fails with `access_denied`; user sees Keycloak's standard error page | ERROR with realm name and code (`MISSING_HMAC_KEY`, `MISSING_WEB_HOST`, `MALFORMED_BASE64`, `WRONG_KEY_LENGTH`). Never log raw key material. |
+| Configuration error | Missing env var, malformed key | SPI fails to load; Keycloak startup fails | ERROR with stack trace |
 | Authenticator misuse | `action()` called unexpectedly | OAuth flow fails with `access_denied` | WARN with context |
-| Picker-result validation failure | HMAC mismatch, expired, replay, user mismatch | HTTP 400 JSON `{"error": "invalid_handoff", "error_description": "..."}` | WARN with category code, realm name, jti — no PII |
+| Picker-result validation failure | HMAC mismatch, expired, replay, user mismatch | HTTP 400 JSON `{"error": "invalid_handoff", "error_description": "..."}` | WARN with category code, no PII |
 | Session not found | Auth session expired before user returned | HTTP 400 JSON `{"error": "session_not_found"}` | WARN |
 | Internal error (uncaught exception) | Bug | HTTP 500 generic | ERROR with stack trace |
-
-Two exception types separate config errors from validation errors:
-- `McpSpiConfigException` — thrown by `McpSpiConfig` when env vars are missing/malformed for a realm, or by the Authenticator when `knobby.web.host` is unset. Codes: `MISSING_HMAC_KEY`, `MISSING_WEB_HOST`, `MALFORMED_BASE64`, `WRONG_KEY_LENGTH`.
-- `HandoffValidationException` — thrown by `HandoffTokenValidator` on JWT validation failures. Codes per §6.4.
 
 ### `HandoffValidationException`
 
@@ -1017,11 +918,8 @@ public class EndToEndHandoffIT {
     static KeycloakContainer keycloak = new KeycloakContainer("quay.io/keycloak/keycloak:26.6.0")
         .withProviderClassesFrom("target/classes")
         .withRealmImportFile("test-realm.json")
-        // Test realm name in test-realm.json is "knobby-test-it" (kept distinct from
-        // the real knobby-test environment realm to avoid accidental conflation).
-        // knobby.web.host for this realm is set inside test-realm.json itself
-        // (as Authenticator config), not via env var.
-        .withEnv("KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_TEST_IT", BASE64_TEST_KEY);
+        .withEnv("KNOBBY_MCP_HANDOFF_HMAC_KEY", BASE64_TEST_KEY)
+        .withEnv("KNOBBY_WEB_HOST", "localhost:8090");
 
     @Test
     void authenticator_emits_valid_picker_request() { ... }

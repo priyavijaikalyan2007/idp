@@ -47,6 +47,7 @@ import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.models.AuthenticatorConfigModel;
+import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -71,6 +72,13 @@ public final class McpTenantPickerAuthenticator implements Authenticator
 
     /** Per-realm Authenticator config key for the Knobby web hostname. */
     static final String CONFIG_KEY_WEB_HOST = "knobby.web.host";
+
+    /**
+     * Client scope whose presence marks a client as MCP-enabled. The tenant
+     * picker only fires for clients carrying this scope; all others pass
+     * through untouched (see the short-circuit guard in {@link #authenticate}).
+     */
+    static final String MCP_CLIENT_SCOPE = "mcp-default";
 
     /** Constants required by Knobby web's picker-request validator. */
     static final String ISSUER = "keycloak-mcp-spi";
@@ -109,6 +117,26 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     @Override
     public void authenticate(AuthenticationFlowContext context)
     {
+        AuthenticationSessionModel authSession = context.getAuthenticationSession();
+
+        // Short-circuit guard (spec §5.1). This step may be bound realm-wide as
+        // the default browser flow, in which case it also runs for NON-MCP
+        // clients (regular web logins, service clients). Those must pass through
+        // untouched — only MCP clients get the tenant-picker redirect. An MCP
+        // client is one carrying the mcp-default client scope (default or
+        // optional); non-MCP clients never have it.
+        ClientModel client = authSession.getClient();
+        if (!isMcpClient(client))
+        {
+            if (log.isDebugEnabled())
+            {
+                log.debugf("Skipping MCP picker for non-MCP client=%s realm=%s",
+                        client.getClientId(), context.getRealm().getName());
+            }
+            context.success();
+            return;
+        }
+
         UserModel user = context.getUser();
         if (user == null)
         {
@@ -120,7 +148,6 @@ public final class McpTenantPickerAuthenticator implements Authenticator
 
         RealmModel realm = context.getRealm();
         String realmName = realm.getName();
-        AuthenticationSessionModel authSession = context.getAuthenticationSession();
 
         String knobbyWebHost = resolveWebHost(context, realmName);
         if (knobbyWebHost == null)
@@ -187,6 +214,17 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /**
+     * An MCP client carries the {@code mcp-default} client scope, assigned as
+     * either a default or an optional scope. Regular web logins and service
+     * clients never have it, so the picker redirect is skipped for them.
+     */
+    private static boolean isMcpClient(ClientModel client)
+    {
+        return client.getClientScopes(true).containsKey(MCP_CLIENT_SCOPE)
+                || client.getClientScopes(false).containsKey(MCP_CLIENT_SCOPE);
+    }
 
     private String resolveWebHost(AuthenticationFlowContext context, String realmName)
     {

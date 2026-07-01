@@ -5,6 +5,10 @@ Categories per Keep a Changelog: Added, Changed, Fixed, Removed, Deprecated, Sec
 
 ## [Unreleased]
 
+### Changed
+
+- 2026-07-01 — The MCP tenant-picker Authenticator now short-circuits for non-MCP clients (spec §5.1). `McpTenantPickerAuthenticator.authenticate()` opens with a guard: if the client lacks the `mcp-default` client scope (as a default or optional scope), it calls `context.success()` and returns, so regular `knobby-{env}-web` logins and other non-MCP clients pass through untouched. This lets `browser-mcp-tenant-pick` be bound realm-wide (setup guide D.8 Option A) without hijacking normal logins — **`mcp-default` is now the on/off switch for the whole handoff**, so MCP clients must have that scope assigned for the picker to fire. Added `MCP_CLIENT_SCOPE` constant + `isMcpClient(ClientModel)` helper; 5 new unit tests (113 unit + 1 IT green). ADR-009.
+
 ### Added
 
 - 2026-06-10 — `check_image.sh`: forensic image-inspection helper (OCI traceability labels, baked-in `/opt/keycloak/providers/` contents, Quarkus build artifacts). Born during the production incident below; pipe two invocations into files and diff to answer "what differs between these images?" in seconds.
