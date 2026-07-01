@@ -13,6 +13,9 @@ __pycache__/
 # Obsidian
 **/.obsidian/
 
+# Dump Files
+*.dump
+
 # Build Output Folders
 #  - **/target/   ignores any Maven module's target dir (e.g., src/providers/target/)
 #                 AND the repo-root /target/ staging dir produced by build.sh.
