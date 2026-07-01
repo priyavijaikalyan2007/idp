@@ -99,3 +99,15 @@ The image is innocent. The failures cluster by *time window*, not by image conte
 1. The MCP SPI is deployed to production. The YourApp web `/mcp/consent` companion (TD-002) remains the launch blocker.
 2. If 42P01-style "relation does not exist" errors recur on tables that exist, suspect the Neon pooler/compute first; `check_image.sh` plus the §"How it was debugged" recipe above is the fast falsification path for image theories.
 3. `run.sh` boots `start-dev`, which re-augments and therefore cannot reproduce optimized-build issues — use the TD-008 recipe (production entrypoint against the sidecar) for incident reproduction.
+
+---
+
+## Session: 2026-07-01 — Non-MCP client short-circuit
+
+The user updated spec §5.1 with a step-0 short-circuit guard and asked for it to be implemented before configuring the MCP flows. Problem being solved: when `browser-mcp-tenant-pick` is bound realm-wide as the default browser flow (setup guide D.8 Option A), the Authenticator's `authenticate()` runs for *every* client — including regular `yourapp-{env}-web` logins and service clients — and without a guard it would 302 all of them to YourApp web's `/mcp/consent`, breaking normal login.
+
+Implemented via TDD (V-V-P-T-I-R-V-C): verified `ClientModel.getClientScopes(boolean) -> Map<String,ClientScopeModel>` and `AbstractAuthenticationFlowContext.success()` against the 26.6.0 JARs first (per AGENT_INSIGHTS §1.1), wrote 5 failing tests, then added the guard. An MCP client is one carrying the `mcp-default` client scope as a default or optional scope; non-MCP clients get `context.success()` (a pass-through — `success()` not `attempted()`, since `attempted()` would fail a REQUIRED execution) and the flow finishes as a normal login. Extracted `MCP_CLIENT_SCOPE` constant + `isMcpClient(ClientModel)` helper. 113 unit + 1 IT green. Recorded ADR-009.
+
+**Configuration implication surfaced for the user:** `mcp-default` is now the single on/off switch for the whole handoff. The flow can be bound realm-wide safely, but MCP clients must have the `mcp-default` scope assigned (default or optional) for the picker to fire.
+
+Documentation swept (concepts, decisions ADR-009, history, status log, changelog), committed, and a new image built + pushed for the user to redeploy after finishing realm configuration.

@@ -119,3 +119,27 @@
   files:
     - "LICENSE.md"
     - "COPYRIGHT_HEADER.md"
+
+- id: "ADR-009"
+  title: "McpTenantPickerAuthenticator short-circuits for non-MCP clients via the mcp-default scope"
+  date: "2026-07-01"
+  status: "Accepted"
+  context: >-
+    The browser-mcp-tenant-pick flow may be bound realm-wide as the default browser
+    flow (setup guide D.8 Option A), in which case the Authenticator's authenticate()
+    also runs for NON-MCP clients — regular yourapp-{env}-web logins and service
+    clients. Without a guard, those would all be 302-redirected to YourApp web's
+    /mcp/consent, breaking normal login. Spec §5.1 was updated with a step-0
+    short-circuit: an MCP client is identified by carrying the mcp-default client
+    scope (as a default OR optional scope), tested via
+    ClientModel.getClientScopes(true).containsKey("mcp-default") ||
+    getClientScopes(false).containsKey(...). Non-MCP clients get context.success()
+    (a no-op pass-through for the REQUIRED execution — success(), not attempted(),
+    because attempted() would fail a REQUIRED step) and the flow completes as a
+    normal login. This makes mcp-default the single on/off switch for the handoff
+    and lets the flow be bound realm-wide safely. Constant MCP_CLIENT_SCOPE =
+    "mcp-default" and a private isMcpClient(ClientModel) helper encapsulate the
+    check. 5 new unit tests (113 unit + 1 IT green).
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+    - "specs/keycloak.spi.mcp.md"

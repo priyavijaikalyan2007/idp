@@ -34,6 +34,7 @@ import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.models.AuthenticatorConfigModel;
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -70,6 +71,7 @@ class McpTenantPickerAuthenticatorTest
     @Mock private AuthenticationSessionModel authSession;
     @Mock private RootAuthenticationSessionModel rootAuthSession;
     @Mock private ClientModel client;
+    @Mock private ClientScopeModel mcpDefaultScope;
     @Mock private AuthenticatorConfigModel authConfigModel;
     @Mock private KeycloakSession session;
 
@@ -104,6 +106,13 @@ class McpTenantPickerAuthenticatorTest
                 .thenReturn("oauth-state-xyz");
         when(client.getClientId()).thenReturn("mcp-client-abc");
         when(rootAuthSession.getId()).thenReturn("root-auth-1");
+
+        // By default the happy-path client IS an MCP client: it carries the
+        // mcp-default client scope as a default scope. Tests exercising the
+        // short-circuit override these stubs.
+        when(client.getClientScopes(true))
+                .thenReturn(Map.of(McpTenantPickerAuthenticator.MCP_CLIENT_SCOPE, mcpDefaultScope));
+        when(client.getClientScopes(false)).thenReturn(Map.of());
 
         Map<String, String> webHostConfig = new HashMap<>();
         webHostConfig.put(McpTenantPickerAuthenticator.CONFIG_KEY_WEB_HOST,
@@ -142,6 +151,66 @@ class McpTenantPickerAuthenticatorTest
         // A JWS has three base64url segments joined by '.'.
         assertEquals(3, decoded.split("\\.").length,
                 "decoded token must be a 3-part JWS: " + decoded);
+    }
+
+    // ------------------------------------------- short-circuit: non-MCP client
+
+    @Test
+    void authenticate_nonMcpClient_shortCircuitsWithSuccess()
+    {
+        // Client carries neither a default nor an optional mcp-default scope.
+        when(client.getClientScopes(true)).thenReturn(Map.of());
+        when(client.getClientScopes(false)).thenReturn(Map.of());
+
+        authenticator.authenticate(context);
+
+        verify(context).success();
+    }
+
+    @Test
+    void authenticate_nonMcpClient_neverChallenges()
+    {
+        when(client.getClientScopes(true)).thenReturn(Map.of());
+        when(client.getClientScopes(false)).thenReturn(Map.of());
+
+        authenticator.authenticate(context);
+
+        verify(context, never()).challenge(org.mockito.ArgumentMatchers.any(Response.class));
+    }
+
+    @Test
+    void authenticate_nonMcpClient_neverFailsFlow()
+    {
+        when(client.getClientScopes(true)).thenReturn(Map.of());
+        when(client.getClientScopes(false)).thenReturn(Map.of());
+
+        authenticator.authenticate(context);
+
+        verify(context, never()).failure(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void authenticate_mcpScopeAsOptional_proceedsToChallenge()
+    {
+        // Not a default scope, but present as an optional scope — still MCP.
+        when(client.getClientScopes(true)).thenReturn(Map.of());
+        when(client.getClientScopes(false))
+                .thenReturn(Map.of(McpTenantPickerAuthenticator.MCP_CLIENT_SCOPE, mcpDefaultScope));
+
+        authenticator.authenticate(context);
+
+        Response response = captureChallengeResponse();
+        assertEquals(Response.Status.SEE_OTHER.getStatusCode(), response.getStatus());
+    }
+
+    @Test
+    void authenticate_mcpScopeAsDefault_doesNotShortCircuit()
+    {
+        // setUp() already makes the client an MCP client via a default scope.
+        authenticator.authenticate(context);
+
+        verify(context, never()).success();
+        captureChallengeResponse();
     }
 
     // ------------------------------------------------------- failure: no user

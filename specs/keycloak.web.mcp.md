@@ -338,12 +338,11 @@ When `/api/mcp/consent/authorize` (§2.2) builds the picker-result token:
 ```
 
 **HMAC key sourcing:**
-- Production: `yourapp-mcp-handoff-hmac-key-yourapp-prod` from GCP Secret Manager.
-- Development: `yourapp-mcp-handoff-hmac-key-yourapp-dev` from GCP Secret Manager (or a local override key for developer machines that bypass IdP via the test-login endpoint).
-- Test (deployed `yourapp-test` realm): `yourapp-mcp-handoff-hmac-key-yourapp-test`.
-- Test fixtures (unit/IT): a fixed key embedded in the fixture (NOT a real key).
+- Production: `yourapp-mcp-handoff-hmac-key-{env}` from GCP Secret Manager.
+- Development: env var or local config file pointing at a dev key.
+- Test: a fixed key embedded in the test fixture (NOT a real key).
 
-The same key is shared with Keycloak's SPI for the matching realm; both sides fetch it identically. Per-realm isolation (one HMAC key per realm, not one per YourApp web environment globally) defends against a single-realm leak compromising a different realm — see `keycloak-hmac-operations-guide.md` and `keycloak.prd.md` §16.8.5.
+The same key is shared with Keycloak's SPI; both sides fetch it identically.
 
 ### 3.4 Replay cache
 
@@ -507,8 +506,37 @@ Encapsulates YourApp's calls to Keycloak's Admin REST API:
 - `listUserConsents(userId)` → fetch grants for the Connected Agents view
 - `revokeConsent(userId, clientId)` → disconnect
 - `listClients(filter)` → for the tenant-admin aggregate view
+- `bindBrowserFlow(clientId, flowAlias)` → **only if using flow-binding Option B** (setup guide D.8). Sets `authenticationFlowBindingOverrides.browser` on a DCR'd client so it routes through `browser-mcp-tenant-pick`. See §7.2.1.
 
 Authentication: client_credentials grant as the `yourapp-{env}-admin-api` service account (same as the smoke test). The service account's roles per PRD §11.13 already cover these endpoints (view-users, view-clients, manage-users).
+
+#### 7.2.1 `bindBrowserFlow` — conditional (Option B only)
+
+Whether this method is needed depends on the flow-binding decision in setup guide D.8:
+
+- **If Option A (realm-level browser flow binding) was chosen** — this method is NOT needed. Keycloak's realm default browser flow is `browser-mcp-tenant-pick`, and the SPI short-circuits for non-MCP clients (SPI design §5.1 step 0). YourApp web does nothing about flow binding. **This is the recommended path.**
+- **If Option B (per-client binding) was chosen** — implement this method and call it once per DCR'd client at first-use.
+
+Behavior (Option B):
+```
+bindBrowserFlow(clientId, flowAlias = "browser-mcp-tenant-pick"):
+    1. Resolve the flow's internal id from its alias:
+       GET /admin/realms/{realm}/authentication/flows
+       → find entry where .alias == flowAlias, take .id
+    2. Fetch the client's internal id:
+       GET /admin/realms/{realm}/clients?clientId={clientId}
+       → take [0].id
+    3. Read the client representation, set:
+       authenticationFlowBindingOverrides.browser = <flow id>
+       PUT /admin/realms/{realm}/clients/{internalId}
+    4. Idempotency: if the override is already set to the right flow id, no-op.
+       Safe to call on every MCP session start; cache the "already bound" set
+       in YourApp web to avoid redundant Admin API calls.
+```
+
+When to call: the natural point is the first time a given `mcp_client_id` appears at `/mcp/consent` (§2.1). Track which client_ids have been bound (a small persistent set or a per-client flag) so this runs once per client, not once per session.
+
+**Recommendation:** prefer Option A (SPI short-circuit + realm binding) and skip this method entirely. Option B exists for the case where the realm hosts non-MCP clients that must never touch the MCP flow, or where the SPI can't be modified to short-circuit.
 
 ### 7.3 `HmacKeyProvider`
 
@@ -581,8 +609,8 @@ This is the contract enforcement that prevents version-drift bugs between the tw
 
 | Variable | Required | Description |
 |---|---|---|
-| `YOURAPP_MCP_HANDOFF_HMAC_KEY__<R>` | Yes | Current HMAC key for the realm this YourApp web environment maps to (e.g., prod YourApp web sets `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_PROD`, dev sets `YOURAPP_MCP_HANDOFF_HMAC_KEY__YOURAPP_DEV`). Base64-encoded 32 bytes. Same key value as Keycloak SPI uses for the same realm. The suffixed name matches the Keycloak SPI convention for cross-repo consistency and so that an accidentally-misnamed mount fails fast. |
-| `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS__<R>` | No | Previous key during rotation for that realm. |
+| `YOURAPP_MCP_HANDOFF_HMAC_KEY` | Yes | Current HMAC key (base64-encoded 32 bytes). Same key as SPI uses. |
+| `YOURAPP_MCP_HANDOFF_HMAC_KEY_PREVIOUS` | No | Previous key during rotation |
 | `KEYCLOAK_REALM_BASE` | Yes | e.g., `https://auth.yourapp.com/realms/yourapp-prod` |
 | `KEYCLOAK_ADMIN_CLIENT_ID` | Yes | `yourapp-prod-admin-api` |
 | `KEYCLOAK_ADMIN_CLIENT_SECRET` | Yes | Service account secret |
