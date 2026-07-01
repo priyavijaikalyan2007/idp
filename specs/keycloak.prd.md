@@ -1729,14 +1729,14 @@ There is **no static `yourapp-{env}-mcp-server` OIDC client.** Every MCP client 
 
 Keycloak 26.x splits DCR-time hardening across two related-but-distinct mechanisms; both must be configured for full coverage:
 
-1. **Client Registration Policies (CRP)** — the legacy system at *Realm settings → Client registration → Anonymous Access Policies*. Runs at registration time; controls *what kind of client* can be created (scope whitelist, mapper whitelist, consent forcing, host trust, count limit).
+1. **Client Registration Policies (CRP)** — the legacy system at *Clients → Client Registration → Anonymous Access Policies*. Runs at registration time; controls *what kind of client* can be created (scope whitelist, mapper whitelist, consent forcing, host trust, count limit).
 2. **Client Policies** — the newer profile-based system at *Realm settings → Client policies*. Enforces *how the client must behave* at request time (PKCE, redirect URI security, response types, session security). Profiles bundle executors; policies bundle conditions that activate profiles. This is where OAuth 2.1 / FAPI-style hardening lives.
 
 A few requirements aren't enforceable via either system out of the box and need workarounds (documented below).
 
 #### System 1: Client Registration Policy entries (anonymous)
 
-Configure these under *Realm settings → Client registration → Anonymous Access Policies → Create*:
+Configure these under *Clients → Client Registration → Anonymous Access Policies → Create*:
 
 | Policy provider | Configuration | Why |
 |---|---|---|
@@ -2174,7 +2174,135 @@ Sections of the setup guide that implement this PRDs requirements:
 
 When PRD intent and setup guide instructions diverge: the PRD is the authority on *what and why*; the setup guide is the authority on *how* for the current Keycloak version. Update both when reality changes.
 
-## 17. References
+## 17. Client Taxonomy and Authentication Models (Forward-Looking)
+
+> **Status:** Roadmap / architecture. Only the "regular user (browser)" and "MCP client" rows are implemented today. The rest are documented here so the design assumptions are explicit and the future work is scoped, not so they are built now.
+
+### 17.1 Why this section exists
+
+The auth design as built carries an implicit assumption: **every client is either (a) an MCP client that self-registers via DCR, or (b) the first-party web client.** The SPI short-circuit (§16.8 / SPI design §5.1 step 0) already relaxes this by letting non-MCP interactive clients pass through the MCP-bound browser flow untouched — but the roadmap introduces client types that break the assumption more fundamentally:
+
+- **SDK / API clients** auto-generated from yourapp.com's Swagger surface — both *user-context* (a script or tool acting as a person) and *service-context* (a background integration or sync service acting as itself).
+- **Native mobile applications.**
+- **A browser plugin.**
+- **Agents** — already designed in the Agentics specs, included here for reconciliation.
+- **Enterprise SSO** for human users authenticating through a customer's own IdP.
+
+This section catalogs those client types, states how each authenticates, and identifies what must be built. It does not change any current implementation.
+
+### 17.2 Two authentication authorities, one authorization plane
+
+The critical architectural framing: yourapp.com already has **more than one place a request can be authenticated**, and exactly **one place it is authorized**.
+
+**Authentication authorities:**
+
+1. **Keycloak** — issues and (via JWKS) backs validation of OAuth/OIDC tokens. Used by interactive principals (humans in a browser, MCP clients, user-context CLI/SDK) and potentially by OAuth-style machine-to-machine clients (client credentials grant).
+2. **yourapp.com app layer** — authenticates two non-Keycloak credential types directly, per the Agentics design:
+   - **Native yourapp identity** — the principal signs each canonicalized request with its **private key** (asymmetric keypair). The request gateway looks up the principal's `credential_handle`, confirms it is active via the Key Manager (`KM.status`), and verifies the signature (`KM.verify`). This is the agent "native" path (Agentics §4.4); it is *request signing*, not shared symmetric keys.
+   - **Federated identity** — the principal presents an OIDC token from an external issuer (e.g. a cloud provider service account). yourapp.com validates it against per-tenant trust config: issuer, allowed audiences, allowed subject patterns, required claims, standard time-based checks, and replay defenses (Agentics §4.5). This validation happens in the app layer, *not* in Keycloak.
+
+**Authorization plane (single):** regardless of how a request was authenticated, it resolves to a **Principal** (the generalized identity abstraction, Agentics Foundation 1). All RBAC / FGAC / tenancy decisions operate on the Principal in the yourapp.com app layer. Authentication answers "who are you?"; the Principal is the answer; authorization ("what may you do?") is uniform from there.
+
+This is the unifying insight for everything below: **new client types are new ways to prove identity and resolve to a Principal. They do not each need bespoke authorization.** The design work for a new client type is (1) pick its authentication authority and method, (2) ensure it resolves to a Principal with the right tenancy binding.
+
+### 17.3 Client taxonomy
+
+| Client type | Interactive? | Auth method | Credential | Authenticated by | Status |
+|---|---|---|---|---|---|
+| Regular user (web) | Yes | Browser flow, federated IdP | Session cookie / OIDC tokens | Keycloak | **Built** |
+| MCP client | Yes (first connect) | DCR + PKCE + consent wizard | Per-tenant OAuth tokens | Keycloak + yourapp consent | **Built** |
+| User-context CLI / SDK / tool | Yes (login step) | Auth Code + PKCE (loopback) or Device Grant | OAuth tokens + refresh | Keycloak | Roadmap (small) |
+| Service integration — OAuth M2M | No | Client Credentials grant | Confidential `client_id` + secret/cert | Keycloak | Roadmap (design) |
+| Service integration — native key | No | Request signing (asymmetric keypair) | KM `credential_handle` + keypair | yourapp.com app layer (KM) | Roadmap — reuses agent native path |
+| Service integration — federated | No | External IdP token | Cloud/enterprise service-account token | yourapp.com app layer | Roadmap — reuses agent federated path |
+| Agent (native) | No | Request signing (asymmetric keypair) | KM `credential_handle` + keypair | yourapp.com app layer (KM) | **Designed** (Agentics §4.4) |
+| Agent (federated) | No | External IdP token | Issuer-minted token | yourapp.com app layer | **Designed** (Agentics §4.5) |
+| Native mobile app | Yes | Auth Code + PKCE via system browser | OAuth tokens + refresh | Keycloak | Roadmap (extends interactive) |
+| Browser plugin | Yes | Auth Code + PKCE | OAuth tokens | Keycloak | Roadmap (extends interactive) |
+| Enterprise SSO user | Yes | SAML / OIDC brokering to customer IdP | Session / tokens | Keycloak (brokered) | Partial (alias convention exists) |
+
+### 17.4 What each roadmap client type needs
+
+#### User-context CLI / SDK / tool (script acting as a person)
+
+The `gcloud auth login` / `gh auth login` / `aws sso login` pattern. The tool opens the system browser, the user authenticates through the normal federated IdP, and the token returns to a loopback listener (`http://127.0.0.1:<port>/callback`) or via the Device Authorization Grant for headless contexts.
+
+- **Authentication authority:** Keycloak.
+- **Is it an MCP client?** No. It talks to the regular yourapp.com API, not the MCP server. It does **not** get `mcp-default`, so the SPI short-circuit passes it through to normal federated login (no consent wizard). This is exactly the case the short-circuit was built for.
+- **What must be built:**
+  - Enable the **Device Authorization Grant** flow on the relevant client(s) for headless/remote CLI use (Keycloak supports it; it is off by default). Loopback Auth Code + PKCE needs no server-side change — any public client can do it; it is SDK ergonomics (implement the loopback listener, cache tokens, refresh).
+  - Decide the **audience** these tokens carry so the regular API validates them (distinct from `yourapp-mcp-api`; see §17.5).
+  - SDK token cache + refresh handling.
+- **Tenancy:** the user's existing tenant memberships, same as web. If a CLI action needs a tenant chosen (multi-tenant user), that is a CLI UX concern, not a new auth mechanism.
+
+#### Service-context integration (background sync / push / pull, acting as itself)
+
+No user, no browser. A daemon that syncs data in or out. This maps directly onto the **existing Principal + credential machinery** — a service integration is a non-agent service Principal. Three candidate credential models, and the design decision is which to offer (§17.5):
+
+- **(a) OAuth M2M — Keycloak confidential client + Client Credentials grant.** The integration holds a `client_id` + secret (or cert). It requests a token from Keycloak's token endpoint with `grant_type=client_credentials`; yourapp validates the JWT via JWKS. Analogous to **Azure MSAL "app authentication."** Requires deliberate confidential-client provisioning (not anonymous DCR — the Client Policies correctly forbid DCR public clients from meaningful client-credentials use). New work: a provisioning path (admin-created or self-service confidential clients) and secret lifecycle.
+- **(b) Native key — reuse the agent KM path.** The integration is issued an asymmetric keypair via the Key Manager and signs each request. Analogous to **AWS SDK "key authentication"** (request signing). New work: extend KM credential issuance to non-agent service Principals and provide a self-service key-issuance UI. Minimal new *mechanism* — the signing/verification path already exists for agents.
+- **(c) Federated — reuse the agent federated path.** The integration authenticates with its own cloud/enterprise IdP (e.g. a GCP service account) and presents that token; yourapp validates it against per-tenant trust config. Analogous to **Azure MSAL app auth when the customer uses their own IdP.** New work: expose the per-tenant federated-trust configuration (already designed for agents) to service integrations, and a registration UI.
+
+**Reconciliation note:** (b) and (c) are *already built for agents*. Extending them to service integrations is largely a matter of Principal typing and a provisioning UI, not new authentication machinery. (a) is the genuinely new path and the only one that involves Keycloak. A reasonable v1 could offer just (b) — it reuses the most existing code and gives integration authors the familiar "issue a key, sign requests" ergonomics — and add (a)/(c) as demand appears.
+
+#### Native mobile app
+
+Standard mobile OAuth: Auth Code + PKCE via the system browser component (ASWebAuthenticationSession on iOS, Custom Tabs on Android), with a custom-scheme (`com.yourapp.app://callback`) or app-link redirect.
+
+- **Authentication authority:** Keycloak. From Keycloak's perspective this **is** a browser flow, so the SPI short-circuit applies: MCP-enabled mobile client → MCP flow; regular mobile client → passthrough.
+- **What must be built — mostly redirect-URI policy, not flow logic:** custom-scheme and app-link redirects intersect with the `secure-redirect-uri` executor and (if re-added) the Trusted Hosts policy. HTTPS-only enforcement may reject custom-scheme redirects. This is the **same class of decision as loopback redirects for desktop MCP clients** (setup guide F.1) — resolve it deliberately when mobile lands: either register the specific custom schemes / app-link domains, or relax the redirect policy for these clients.
+- Token cache in the platform keystore; refresh handling.
+
+#### Browser plugin
+
+A browser extension is a browser-based public client with PKCE.
+
+- **Authentication authority:** Keycloak. MCP-enabled plugin → MCP flow; regular plugin → passthrough (SPI short-circuit).
+- **What must be built:** the extension's redirect URL (`chrome-extension://<id>/...` or a hosted redirect page) must satisfy the redirect-URI policy — same policy question as mobile. Otherwise no new mechanism.
+
+#### Enterprise SSO (human users via a customer IdP)
+
+Customers who want their employees to authenticate through their own corporate IdP (Okta, Entra, Ping, etc.).
+
+- **Authentication authority:** Keycloak, brokering to the customer IdP via SAML or OIDC. The IdP-alias naming convention already reserves `saml-<slug>` (§10.8), so the topology anticipates this.
+- **What must be built:** per-customer SAML/OIDC IdP registration in the realm; attribute mapping (align claims to the token contract in §8.3); optionally **SCIM** for user provisioning/deprovisioning; handling of IdP-initiated SSO if a customer requires it. This extends the existing federated model rather than replacing it — an enterprise user still resolves to a Principal exactly like a Google-federated user does.
+
+### 17.5 Open design decisions
+
+These need answers before the corresponding client type is built:
+
+1. **Audience taxonomy per surface.** The MCP server validates `aud == yourapp-mcp-api`. The regular API needs its own audience (e.g. `yourapp-api`) so a token minted for one surface is not accepted at the other. Define the full audience set and which client types request which audiences. This is the same "tokens are audience-scoped" discipline the platform already applies.
+2. **Service-context credential model(s) to offer** — (a) OAuth M2M, (b) native KM key, (c) federated — or some subset. Recommendation: start with (b) since it reuses the agent path and gives familiar key-issuance ergonomics; add (a)/(c) on demand.
+3. **Self-service credential provisioning UX.** For both user-context (no provisioning — they just log in) and service-context (they need a key or client issued). Where in yourapp.com does a developer create a service Principal and obtain its credential? How is it scoped to a tenant? How is it rotated/revoked? This is app-layer product design, informed by the existing KM and agent-provisioning work.
+4. **Device Authorization Grant** — enable per-client, and decide the UX for the "enter this code" step.
+5. **Redirect-URI policy for non-HTTPS schemes** (loopback, custom scheme, app-link, extension URLs). One coherent policy decision that serves desktop CLI, mobile, and browser-plugin clients rather than three separate ad-hoc fixes. Ties to setup guide F.1 (Trusted Hosts) and the `secure-redirect-uri` executor (setup guide D.6).
+
+### 17.6 What flow binding (setup guide D.8) does and does not cover
+
+To close the loop with the operational decision already made: the browser-flow binding in setup guide D.8 governs **only interactive browser-based login.** It is relevant to: regular web users, MCP clients, user-context CLI (during its browser login step), mobile, and browser plugins. The SPI short-circuit is what lets all the *non-MCP* interactive clients share the MCP-bound realm flow safely.
+
+It is **irrelevant** to non-interactive clients — OAuth M2M (client credentials), native-key service integrations, and agents never traverse a browser flow, so no flow-binding configuration affects them. Their authentication is a token-endpoint call or a signed request, not an `/authorize` redirect.
+
+### 17.7 Dependencies on current work
+
+Nothing in §17 requires immediate work, and nothing blocks the current roadmap (finish realm config, complete the MCP consent sub-app). But three properties of the *current* design must be preserved so the future client types slot in without a refactor. All three are already satisfied — this subsection makes them explicit so they aren't broken inadvertently.
+
+**1. Audience is validated deliberately (already correct — keep it that way).**
+The finished Auth0→Keycloak migration already does this right: the web client's dedicated audience mapper (`yourapp-{env}-web-audience`, §8.3) stamps the `aud` claim, and the .NET app validates it (`ValidateAudience = true`, `ValidAudience = <web client id>`, §8.2). That is a real security boundary — a token minted for another surface (e.g. `aud: yourapp-mcp-api`) is rejected by the web API, and vice versa.
+
+*Forward-looking evolution (not a fix — a generalization):* today the web API validates `aud == <web client id>`. That works in a single-interactive-client world. When user-context CLI, mobile, or browser-plugin clients arrive, they are **different Keycloak clients with different client ids**, so their tokens would carry a different `aud` and be rejected by an API that pins the web client's id. The clean evolution is a **shared resource audience** for the regular API — e.g. `yourapp-api` — that every API-calling client requests (via a shared client scope's audience mapper) and that the API validates, exactly parallel to how `yourapp-mcp-api` identifies the MCP resource server regardless of which DCR'd client calls it. This is §17.5 decision #1. Until then, the current per-client-id validation is correct and secure; no change needed now.
+
+*Verification:* smoke Test 11 includes a sub-check that the web client (or its default scopes) carries an `oidc-audience-mapper`, pinning the current-correct producer-side behavior so a future scope refactor can't silently regress it to `aud=account`. The consumer-side check (`ValidateAudience = true` in the app) is app-side and lives in the .NET auth configuration, not the smoke test.
+
+**2. The token claim contract is shared across all Principal types (§8.3).**
+Web users, and every future interactive client type (CLI, mobile, enterprise-SSO), flow through the same claims (`idp`, `microsoftTenantId`, `googleHd`) and the same tenant-derivation logic. The discipline: do not add a claim or a tenant-resolution shortcut that only the web client understands. Any interactive client must be able to authenticate and resolve to the correct Principal + tenant using the identical, client-agnostic derivation. This is already the design; the note is "keep it client-agnostic."
+
+**3. Keycloak stays a thin authenticator; the Principal + authorization plane stays in yourapp.com (Invariant 8).**
+§17's entire taxonomy depends on Keycloak authenticating OAuth principals while the yourapp.com app layer owns the Principal abstraction, native-key and federated validation, and all RBAC/FGAC/tenancy. If authorization logic (roles, groups, tenant claims minted authoritatively by Keycloak) ever migrated into Keycloak, the taxonomy would fracture — each client type would need bespoke authorization instead of resolving to a uniform Principal. Invariant 8 already forbids this. The note is "the migration and all future auth work must preserve Invariant 8."
+
+None of these is an action item. They are guardrails: as long as the current design's invariants hold, the §17 client types are additive, each one a new authentication path landing on the existing Principal + authorization plane.
+
+## 18. References
 
 - Keycloak Server Administration Guide (v26): https://www.keycloak.org/docs/latest/server_admin/
 - Keycloakify: https://keycloakify.dev (see `KEYCLOAK_THEMING_GUIDE.md`)
@@ -2190,9 +2318,14 @@ When PRD intent and setup guide instructions diverge: the PRD is the authority o
 - RFC 8414 — OAuth 2.0 Authorization Server Metadata: https://datatracker.ietf.org/doc/html/rfc8414
 - RFC 8707 — Resource Indicators for OAuth 2.0: https://datatracker.ietf.org/doc/html/rfc8707
 - RFC 9728 — OAuth 2.0 Protected Resource Metadata: https://datatracker.ietf.org/doc/html/rfc9728
+- RFC 8628 — OAuth 2.0 Device Authorization Grant: https://datatracker.ietf.org/doc/html/rfc8628
 - Model Context Protocol authorization spec: https://modelcontextprotocol.io/specification/draft/basic/authorization
 - yourapp.com Access Control PRD.
 - yourapp.com Audit Trail ADRs 001/002/003.
 - yourapp.com Approval System Requirements.
 - yourapp.com Infrastructure Hardening Plan.
+- yourapp.com Agentics Layer specs — Foundation 1 (Principal generalization), §4.4 (native identity / KM request signing), §4.5 (federated identity validation). Cited by §17 for the non-Keycloak authentication planes.
 - `KEYCLOAK_THEMING_GUIDE.md` (companion document).
+- `KEYCLOAK_SETUP_GUIDE.md` (operational "how" companion).
+- `KEYCLOAK_MCP_SPI_DESIGN.md` (SPI implementation).
+- `YOURAPP_WEB_MCP_ENDPOINTS.md` (YourApp web MCP endpoints).
