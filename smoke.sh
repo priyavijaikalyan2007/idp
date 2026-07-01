@@ -36,7 +36,7 @@
 #   9.  GCP Secrets Manager — expected secret names exist (§10.8)
 #   10. Microsoft Entra app registration — naming, audience, redirect URI,
 #       publisher domain, Graph permissions, secret expiry (§6.3, §11.9)
-#   11. knobby-{env}-web client configuration (§8.2)
+#   11. knobby-{env}-web client configuration + audience mapper (§8.2, §8.3, §17.7)
 #   12. knobby-{env}-admin-api client configuration (§11.13)
 #   13. PKCE enforcement (behavioral) (§8.2)
 #
@@ -854,6 +854,35 @@ else
         else
             record_skip "Web client Post-logout URIs" "WARNING: not set - logout redirects will be rejected unless 'post_logout_redirect_uri' parameter is omitted (§8.1)"
         fi
+
+        # Audience mapper: the web client's token must carry a deliberate aud claim
+        # so the .NET app's ValidateAudience check has something specific to match
+        # (§8.3, §17.7). Without this, Keycloak emits aud=account and audience
+        # validation in the app is meaningless. The mapper can live on the client
+        # directly or on its dedicated client scope; check both. Accept either an
+        # audience mapper that includes the client id, or one setting a custom
+        # audience (e.g. a future shared knobby-api resource audience per §17.5).
+        WEB_INTERNAL_ID=$(echo "$WEB_CLIENT_JSON" | jq -r '.id')
+        # Mappers defined directly on the client:
+        WEB_CLIENT_MAPPERS=$(echo "$WEB_CLIENT_JSON" | jq -r '.protocolMappers[]? | select(.protocolMapper == "oidc-audience-mapper") | (.config["included.client.audience"] // .config["included.custom.audience"] // "")' 2>/dev/null || true)
+        # Mappers inherited from the client's assigned (default) client scopes:
+        WEB_SCOPE_AUD=""
+        if [[ -n "$WEB_INTERNAL_ID" && "$WEB_INTERNAL_ID" != "null" ]]; then
+            WEB_DEFAULT_SCOPES=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                "${KC_URL}/admin/realms/${REALM}/clients/${WEB_INTERNAL_ID}/default-client-scopes" 2>/dev/null | jq -r '.[].id' || true)
+            for sid in $WEB_DEFAULT_SCOPES; do
+                SCOPE_AUD=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/client-scopes/${sid}/protocol-mappers/models" 2>/dev/null \
+                    | jq -r '.[]? | select(.protocolMapper == "oidc-audience-mapper") | (.config["included.client.audience"] // .config["included.custom.audience"] // "")' 2>/dev/null || true)
+                if [[ -n "$SCOPE_AUD" ]]; then WEB_SCOPE_AUD="$SCOPE_AUD"; break; fi
+            done
+        fi
+        if [[ -n "$WEB_CLIENT_MAPPERS" || -n "$WEB_SCOPE_AUD" ]]; then
+            FOUND_AUD="${WEB_CLIENT_MAPPERS:-$WEB_SCOPE_AUD}"
+            record_pass "Web client audience mapper" "aud claim stamped as '${FOUND_AUD}' (fixes aud=account; app validates this per §8.3)"
+        else
+            record_fail "Web client audience mapper" "no oidc-audience-mapper found on the web client or its default scopes - token will carry aud=account and the app's ValidateAudience check is meaningless (§8.3, §17.7)"
+        fi
         fi
     fi
 fi
@@ -1187,7 +1216,7 @@ else
 fi
 
 # ----- test 18: mcp-dcr-policy configured -----
-section "Test 18: Client Registration Policy '${MCP_DCR_POLICY_NAME}' configured (§16.4)"
+section "Test 18: Anonymous DCR registration policies configured (setup guide D.5)"
 
 if [[ -z "$ACCESS_TOKEN" ]]; then
     record_fail "mcp-dcr-policy" "skipped - no admin access token"
@@ -1200,30 +1229,38 @@ else
     POLICIES_BODY=$(echo "$POLICIES_RESP" | sed '$d')
 
     if [[ "$POLICIES_STATUS" != "200" ]]; then
-        record_fail "mcp-dcr-policy" "Admin API returned HTTP ${POLICIES_STATUS} listing registration policies"
+        record_fail "DCR registration policies" "Admin API returned HTTP ${POLICIES_STATUS} listing registration policies"
     else
-        # Look for anonymous-DCR-scope-relevant policies. Keycloak's built-in policies have specific names:
-        # allowed-client-scopes-anon, allowed-protocol-mappers-anon, consent-required-anon, trusted-hosts-anon, etc.
+        # Anonymous Client Registration Policies (Clients → Client Registration → Anonymous).
+        # Provider IDs as they appear in the components API.
         ANON_POLICIES=$(echo "$POLICIES_BODY" | jq -r '.[] | select(.subType == "anonymous") | .providerId' 2>/dev/null || true)
         ANON_POLICY_COUNT=$(echo "$ANON_POLICIES" | grep -c . 2>/dev/null || echo 0)
 
-        EXPECTED_POLICIES=("allowed-client-scopes" "allowed-protocol-mappers" "consent-required" "trusted-hosts" "client-registration-max-clients" "pkce-enforcer" "allowed-client-templates" "allowed-redirect-uris")
+        # Minimal required set per the setup guide D.5. We intentionally do NOT
+        # require trusted-hosts (no-op when permissive) or allowed-protocol-mapper-types
+        # (optional belt-and-suspenders). The two that materially matter:
+        #   - allowed-client-scopes: whitelist gating what scopes DCR clients can get
+        #   - consent-required:      forces consentRequired=true on DCR clients
+        # Note: Keycloak seeds some anonymous policies by default (e.g. a default
+        # allowed-client-scopes, max-clients, trusted-hosts). This test checks the
+        # two we depend on and treats the rest as bonus.
+        REQUIRED_POLICIES=("allowed-client-scopes" "consent-required")
         MISSING_POLICIES=()
-        for expected in "${EXPECTED_POLICIES[@]}"; do
+        for expected in "${REQUIRED_POLICIES[@]}"; do
             if ! echo "$ANON_POLICIES" | grep -qx "$expected"; then
                 MISSING_POLICIES+=("$expected")
             fi
         done
 
         if [[ "$ANON_POLICY_COUNT" -eq 0 ]]; then
-            record_fail "mcp-dcr-policy" "no anonymous Client Registration Policies configured - configure '${MCP_DCR_POLICY_NAME}' per §16.4 / §16.11 step 11"
+            record_fail "DCR registration policies" "no anonymous Client Registration Policies found - configure per setup guide D.5 (Clients → Client Registration → Anonymous Access Policies)"
         elif [[ ${#MISSING_POLICIES[@]} -gt 0 ]]; then
-            record_fail "mcp-dcr-policy" "anonymous policies partially configured (${ANON_POLICY_COUNT} present) - missing: ${MISSING_POLICIES[*]} (§16.4)"
+            record_fail "DCR registration policies" "missing required anonymous policies: ${MISSING_POLICIES[*]} (setup guide D.5). Present: $(echo "$ANON_POLICIES" | tr '\n' ' ')"
         else
-            record_pass "mcp-dcr-policy" "${ANON_POLICY_COUNT} anonymous registration policies configured covering required entries"
+            record_pass "DCR registration policies" "required anonymous policies present (allowed-client-scopes, consent-required); ${ANON_POLICY_COUNT} total"
         fi
 
-        # Sub-check: allowed-client-scopes whitelist includes the knobby:* scopes
+        # Sub-check: allowed-client-scopes whitelist includes the knobby:* scopes + mcp-default
         ALLOWED_SCOPES_POLICY=$(echo "$POLICIES_BODY" | jq -r '.[] | select(.subType == "anonymous" and .providerId == "allowed-client-scopes") | .config["allowed-client-scopes"][]?' 2>/dev/null || true)
         if [[ -n "$ALLOWED_SCOPES_POLICY" ]]; then
             MISSING_FROM_WHITELIST=()
@@ -1233,10 +1270,12 @@ else
                 fi
             done
             if [[ ${#MISSING_FROM_WHITELIST[@]} -eq 0 ]]; then
-                record_pass "mcp-dcr-policy scope whitelist" "all knobby:* and mcp-default present in allowed-client-scopes"
+                record_pass "DCR scope whitelist" "all knobby:* and mcp-default present in allowed-client-scopes"
             else
-                record_fail "mcp-dcr-policy scope whitelist" "missing from allowed-client-scopes: ${MISSING_FROM_WHITELIST[*]}"
+                record_fail "DCR scope whitelist" "missing from allowed-client-scopes whitelist: ${MISSING_FROM_WHITELIST[*]}"
             fi
+        else
+            record_fail "DCR scope whitelist" "allowed-client-scopes policy has no whitelist configured, or policy absent (setup guide D.5)"
         fi
     fi
 fi
