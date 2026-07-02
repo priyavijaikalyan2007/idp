@@ -455,6 +455,59 @@ if (claims.TryGetValue("microsoftTenantId", out var tenantId))
 - Use `idp` + application policy to gate joining enterprise-tier organizations (e.g., reject `idp=github` from joining an enterprise tier).
 - Operations that are inherently Microsoft-scoped by their entry point (e.g., the admin consent callback flow — §12.4) can safely use `microsoftTenantId` without the `idp` check, since the entry point guarantees the session is Microsoft. Document this assumption at every such call site.
 
+#### 8.3.1 Implementation requirement — cross-IdP claim contamination (app team action)
+
+> **Status:** Confirmed observed in production (knobby-prod, 2026-07-01). This is not a theoretical risk — a real token exhibits it. The app team must implement and test the guard below.
+
+**Observed evidence.** A production ID token for a user who authenticated via **Google** carried a **Microsoft** user attribute:
+
+```
+idp: "google"                     ← session fact: this session is Google
+microsoftTenantId: "9188040d-6c67-4c5b-b112-36a304b66dad"   ← user fact: from a PRIOR Microsoft federation
+email: "…@gmail.com"
+aud: "knobby-prod-web"
+```
+
+The user had previously signed in via Microsoft (a personal MSA, hence the well-known personal-MSA tenant constant) with the same email; the auto-linking flow (§11.4) attached both identities to one Keycloak user, and `microsoftTenantId` now persists on that record and rides along in **every** session including Google ones. This is the session-fact-vs-user-fact hazard made concrete.
+
+**Required behavior.** Every backend code path that reads `microsoftTenantId`, `microsoftObjectId`, or `googleHd` for a session-scoped authorization decision MUST first confirm the current session's `idp` matches the claim's origin IdP:
+
+| Claim | May be trusted for session-scoped authorization only when |
+|---|---|
+| `microsoftTenantId` | `idp == "microsoft-oidc"` |
+| `microsoftObjectId` | `idp == "microsoft-oidc"` |
+| `googleHd` | `idp == "google"` |
+
+The AND-condition is mandatory. Reading the claim without the paired `idp` check is an authorization bug: it lets a Google (or GitHub) session inherit privileges tied to the user's Microsoft (or Google Workspace) association.
+
+**Recommended implementation — centralize, don't scatter.** Rather than repeating the `idp` check at every call site (error-prone), expose the origin-checked values through a single accessor so the raw attribute claims are never read directly for authorization:
+
+```csharp
+// Single source of truth. Returns the Microsoft tenant ID ONLY for a Microsoft session.
+public string? SessionMicrosoftTenantId(ClaimsPrincipal user) =>
+    user.FindFirst("idp")?.Value == "microsoft-oidc"
+        ? user.FindFirst("microsoftTenantId")?.Value
+        : null;
+
+// Returns the Google Workspace hosted domain ONLY for a Google session.
+public string? SessionGoogleHd(ClaimsPrincipal user) =>
+    user.FindFirst("idp")?.Value == "google"
+        ? user.FindFirst("googleHd")?.Value
+        : null;
+```
+
+Authorization code calls `SessionMicrosoftTenantId(...)` / `SessionGoogleHd(...)` and never touches the raw `microsoftTenantId` / `googleHd` claims. A `null` return means "not applicable to this session" — the caller treats it identically to "no tenant association," which is the correct, safe default. This makes the trust rule structurally enforced rather than dependent on every developer remembering to write the AND-condition.
+
+**Exception (document at each site):** entry points that are inherently Microsoft-scoped (e.g. the admin-consent callback, §12.4) may read `microsoftTenantId` directly because the entry point itself guarantees a Microsoft session. Any such direct read must carry a comment explaining why the `idp` check is unnecessary there.
+
+**Test cases the app team must add:**
+1. A token with `idp=google` + `microsoftTenantId=<any>` → `SessionMicrosoftTenantId` returns `null`; no Microsoft-tenant-scoped authorization is granted.
+2. A token with `idp=microsoft-oidc` + `microsoftTenantId=<org uuid>` → `SessionMicrosoftTenantId` returns the UUID; Microsoft-tenant authorization proceeds.
+3. Symmetric pair for `googleHd` with `idp=google` vs `idp=github`.
+4. The personal-MSA case: `idp=microsoft-oidc` + `microsoftTenantId=9188040d-6c67-4c5b-b112-36a304b66dad` → treated as "no enterprise tenant" per §12's personal-MSA handling (the AND-condition passes, but personal MSAs are rejected from enterprise Organizations at the authorization layer — a separate, additional check).
+
+This requirement is a prerequisite for the directory-binding tenancy model (§15), which resolves tenant context by matching the current session's `(idp, tenant-identifier)` tuple against active bindings — that matching is only correct if the tenant-identifier is read with the origin-IdP guard specified here.
+
 ### 8.4 ASP.NET Core 10 Integration Pattern
 
 knobby.io's backend integrates with Keycloak via the standard OpenID Connect middleware.
