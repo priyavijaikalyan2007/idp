@@ -824,6 +824,19 @@ else
         [[ "$W_PKCE" == "S256" ]] && record_pass "Web client PKCE method" "S256 required" || \
             record_fail "Web client PKCE method" "is '${W_PKCE:-(not set)}', expected 'S256' - federation will fail without PKCE enforcement (§8.2)"
 
+        # Consent Required: a first-party client must NOT show Keycloak's built-in
+        # OAuth consent screen. If this is true, regular users get a "Grant Access
+        # to <app>?" prompt on login. This can be set inadvertently by a Client
+        # Policy 'consent-required' executor (auto-configure) if the mcp-anonymous-dcr
+        # policy condition is broader than client-updater-context=ByAnonymous and
+        # matches the web client on update (setup guide D.6b / D.8).
+        W_CONSENT=$(echo "$WEB_CLIENT_JSON" | jq -r '.consentRequired // false')
+        if [[ "$W_CONSENT" == "false" ]]; then
+            record_pass "Web client Consent Required" "disabled (first-party client; no consent screen on login)"
+        else
+            record_fail "Web client Consent Required" "consentRequired=true - regular users will see Keycloak's 'Grant Access' consent screen on login. Turn OFF (Clients → web client → Settings → Consent Required). If it keeps returning, check the mcp-anonymous-dcr Client Policy condition is scoped to ByAnonymous so its consent-required executor doesn't fire on the web client (setup guide D.6b)."
+        fi
+
         # Logout configuration: back-channel only (front-channel disabled because
         # browser third-party cookie policies make iframe-based logout unreliable;
         # see §8.2 and §11.3 step 5)

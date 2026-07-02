@@ -386,13 +386,34 @@ Run `./smoke.sh`. Look at Test 14.
 
 **Path:** Authentication → Flows
 
-1. Find `browser-federated-only` → row action menu → **Duplicate**.
-2. Name the copy: `browser-mcp-tenant-pick`. Open it.
-3. At the bottom of the flow, **Add step** [?]. In the picker, find **Knobby MCP Tenant Picker** [?] (or whatever display name your SPI's `AuthenticatorFactory.getDisplayType()` returns — search "knobby" or "mcp").
-4. Set the new step's requirement to **Required**.
+⚠️ **Flow structure matters — a naive "add the step at the bottom" produces a broken flow that returns HTTP 400 on every login it governs.** Keycloak forbids mixing **Required** and **Alternative** executions at the same level. The SPI picker must run *after* authentication as a Required step, which means the authentication executions have to be wrapped in their own Required sub-flow. Target structure:
+
+```
+browser-mcp-tenant-pick:
+  ├── Authentication              [Required]  (sub-flow)
+  │     ├── Cookie                       [Alternative]
+  │     ├── Identity Provider Redirector [Alternative]
+  │     └── Forms                        [Alternative] (sub-flow)
+  │           └── Username Password Form [Required]
+  └── Knobby MCP Tenant Picker    [Required]  (top level, AFTER the sub-flow)
+```
+
+The wrong structure (picker as a top-level Required sibling to the Alternative auth steps) makes Keycloak treat the alternatives as invalid, so no authentication path runs and `/auth` returns 400 before any IdP redirect.
+
+**Build it:**
+1. Find `browser-federated-only` → row action menu → **Duplicate**. Name the copy `browser-mcp-tenant-pick`. Open it.
+2. The duplicate has Cookie / Identity Provider Redirector / Forms at the **top level** as Alternatives. Wrap these in a Required sub-flow:
+   - Add a sub-flow at the top level (**Add sub-flow** [?]), name it `Authentication`, set it **Required**.
+   - Move the existing Cookie, Identity Provider Redirector, and Forms executions **into** the `Authentication` sub-flow (drag-and-drop in the flow editor, keeping each as **Alternative**). If drag-and-drop is unreliable in your version, it may be easier to delete the duplicated executions and re-add them inside the sub-flow.
+3. At the **top level** (a sibling of the `Authentication` sub-flow, positioned **after** it), **Add step** → find **Knobby MCP Tenant Picker** [?] (search "knobby" or "mcp"). Set it **Required**.
+4. Confirm the final tree matches the target structure above: `Authentication` [Required sub-flow] with the three Alternatives inside it, then `Knobby MCP Tenant Picker` [Required] at the top level.
 5. Save.
 
-**Verify:** `./smoke.sh` → Test 15 green.
+**Verify:**
+- `./smoke.sh` → Test 15 green (SPI step present in the flow).
+- **Do not bind this flow realm-wide to test it** — that is Option A and it is not recommended (see D.8). Test it via a per-client binding on a DCR'd MCP client instead.
+
+**Verify the structure is not broken:** temporarily bind this flow to a *throwaway test client* (not the realm default, not the web client) and attempt a login. If you get HTTP 400 at `/auth`, the Required/Alternative structure is still wrong — recheck that the auth executions are inside the Required sub-flow, not siblings of the picker.
 
 ## D.3 Create the six atomic `knobby:*` Client Scopes
 
@@ -545,7 +566,9 @@ Policies tab → **Create policy** [?]:
 - **Description:** "Apply mcp-hardening to anonymously DCR'd clients"
 - **Enabled:** **On**
 
-Add condition: **Condition type:** `client-updater-context`. **Update Client Source:** `ByAnonymous`. (Other values like `ByAuthenticatedUser` exist for non-MCP clients — `ByAnonymous` matches DCR'd ones.)
+Add condition: **Condition type:** `client-updater-context`. **Update Client Source:** select **`ByAnonymous` ONLY**.
+
+⚠️ **Select only `ByAnonymous`. Do NOT also select `ByAuthenticatedUser`.** The source is a multi-select, and it's easy to leave `ByAuthenticatedUser` checked. But `ByAuthenticatedUser` matches any client created or updated **by an authenticated user — including an admin editing a client in the console.** With it selected, this policy matches your first-party clients (`knobby-{env}-web`, `knobby-{env}-admin-api`) every time you edit them, and the `mcp-hardening` profile's executors get force-applied to them. The most visible symptom: the `consent-required` executor (auto-configure) sets `consentRequired = true` on the web client, so regular users start seeing Keycloak's "Grant Access to …" consent screen on login. `ByAnonymous` alone matches only anonymously-registered DCR clients (your MCP clients), which is the entire intent.
 
 Add profile reference: `mcp-hardening`.
 
@@ -559,48 +582,39 @@ Save.
 
 There is no "Client scopes" panel inside Realm settings in 26.x. Realm-default assignment happens in the top-level **Client Scopes** list via each scope's **Assigned type** (`Default` / `Optional` / `None`). Setting a scope to `Default` here is what makes it auto-assign to new clients realm-wide.
 
-Set the **Assigned type** for each scope (via the inline control in the list's "Assigned type" column, or by opening the scope — verify which your UI exposes):
+## D.7 Assign MCP scopes to DCR'd clients
 
-| Scope | Assigned type |
-|---|---|
-| `mcp-default` | **Default** |
-| `knobby:read` | **Default** |
-| `knobby:comment` | **Default** |
-| `knobby:curate` | **Default** |
-| `knobby:write` | **Default** |
-| `knobby:share` | **Default** |
-| `knobby:admin` | **Optional** |
+**⚠️ Under the recommended Option B (see D.8), do NOT set these as realm-default scopes.** Doing so assigns `mcp-default` to *every* client including `knobby-{env}-web`, which (a) pollutes non-MCP clients and (b) breaks the SPI short-circuit's MCP-client detection, since the guard identifies MCP clients precisely by the presence of `mcp-default`. If the web client has `mcp-default`, the short-circuit can't distinguish it from a real MCP client.
 
-⚠️ **Realm-wide, not MCP-only:** Keycloak has no "default only for DCR clients" scoping. A scope set to `Default` auto-assigns to **every new client in the realm**, not just DCR'd MCP clients. Implications:
-- Your existing `knobby-{env}-web` and `knobby-{env}-admin-api` clients are unaffected (their assignments are already set) — *unless* you delete and recreate them, in which case they'd inherit these MCP scopes and you'd remove them manually.
-- Any future non-MCP client created in this realm will also inherit `mcp-default` + the Author bundle. Remove manually if unwanted.
+**Recommended (Option B): per-client assignment, not realm-default.**
+Leave `mcp-default` and the `knobby:*` scopes as **`None`** assigned type (not auto-attached to any client). Knobby web's post-DCR processing assigns them to each DCR'd MCP client specifically — the same place it sets the flow binding (D.8 Option B, `KNOBBY_WEB_MCP_ENDPOINTS.md` §7.2). Target per-client assignment:
+- **Default** on the DCR'd client: `mcp-default`, `knobby:read`, `knobby:comment`, `knobby:curate`, `knobby:write`, `knobby:share`
+- **Optional** on the DCR'd client: `knobby:admin`
 
-**Alternative (more surgical, more moving parts):** leave the `knobby:*` scopes as `None` (not auto-assigned to anyone) and attach them to MCP clients specifically via post-DCR processing in Knobby web (same place that sets the flow binding in D.8 Option B). For v1, realm-`Default` is simpler and the "recreated client inherits extra scopes" risk is low since clients are rarely recreated. Choose based on how much you want to isolate MCP scopes from other clients.
+For **manual testing** before Knobby web's post-processing exists, assign these to your throwaway test client by hand (client → Client scopes tab → Add).
+
+**Only if you deliberately choose Option A** (realm-wide browser flow binding — not recommended, see D.8): you would set these as realm-default scopes so DCR'd clients inherit them. But then the SPI short-circuit cannot use `mcp-default` for MCP-client detection (the web client would have it too), and you'd need a different detection signal. This conflict is the main reason Option A is not recommended.
 
 ## D.8 Bind the browser flow to MCP clients
 
-**The problem this solves:** DCR'd MCP clients must authenticate through `browser-mcp-tenant-pick` (the flow with your SPI step) so the consent handoff fires. Something must bind that flow to those clients. Two ways — **pick one**.
+**The problem this solves:** DCR'd MCP clients must authenticate through `browser-mcp-tenant-pick` (the flow with your SPI step) so the consent handoff fires. Something must bind that flow to those clients. Two ways — **pick one.**
 
-### Decision: Option A (recommended) vs Option B
+### ⚠️ Recommendation: Option B (per-client binding)
 
-**Option A — realm-level browser flow binding. Console action, no app code.**
+Earlier drafts recommended Option A. **That recommendation is reversed** after Option A took down all logins in testing (a malformed MCP flow bound realm-wide returns HTTP 400 for *every* login, including the web client). Option B confines any MCP-flow problem to MCP clients, which aren't in production use.
 
-- **Action (yours, now):** Authentication → Bindings → **Browser Flow** → set to `browser-mcp-tenant-pick`. Save.
-- **Consequence:** ALL clients in the realm now run this flow, including `knobby-{env}-web`.
-- **Hard dependency:** this is only safe if the SPI Authenticator **short-circuits for non-MCP clients** — i.e. when a non-MCP client (like your web client) authenticates, the SPI step calls `context.success()` and passes through instead of redirecting to `/mcp/consent`. This guard is specified in `KEYCLOAK_MCP_SPI_DESIGN.md` §5.1 step 0 (identifies MCP clients by presence of the `mcp-default` client scope). **If your deployed SPI JAR doesn't implement that guard yet, do NOT use Option A — it will break web login.**
-- **Verify after setting:** sign in to `https://prod.knobby.io` in a fresh incognito window. Web login must still work (no redirect to `/mcp/consent`). Then the D.12 DCR test confirms MCP clients DO get the picker flow.
+**Option B — per-client binding. Realm browser flow unchanged; Knobby web owns the binding.**
 
-**Option B — per-client binding via app code. No realm change; Knobby web owns it.**
+- Realm default browser flow **stays `browser-federated-only`** — web login is never affected by MCP flow issues.
+- Knobby web's `/mcp/consent` backend calls the Keycloak Admin API to set `authenticationFlowBindingOverrides.browser = <browser-mcp-tenant-pick flow id>` on each DCR'd client at first-use. See `KNOBBY_WEB_MCP_ENDPOINTS.md` §7.2.1.
+- Pairs with D.7 per-client scope assignment (same post-DCR processing step): no realm-default scopes, so the SPI short-circuit's `mcp-default` detection stays meaningful and the short-circuit remains a pure safety net.
+- **For manual testing** before Knobby web's post-processing exists: on a throwaway test client, set `authenticationFlowBindingOverrides.browser` to `browser-mcp-tenant-pick` via the client's **Advanced** tab (Authentication flow overrides → Browser Flow), and assign the MCP scopes per D.7. Never bind the MCP flow realm-wide.
 
-- Realm default browser flow stays `browser-federated-only` (web client untouched, no SPI short-circuit dependency).
-- Knobby web's `/mcp/consent` backend calls the Keycloak Admin API to set `authenticationFlowBindingOverrides.browser = <browser-mcp-tenant-pick flow id>` on each DCR'd client, at first-use.
-- **Action:** this must be specced and built in Knobby web. See `KNOBBY_WEB_MCP_ENDPOINTS.md` §7.2 (`KeycloakAdminClient`) — the per-client flow-binding method is documented there. This is app work, not a console action.
+**Option A — realm-level browser flow binding. NOT recommended.**
 
-### Recommendation
-
-**Use Option A, but first confirm the SPI short-circuit guard is in your deployed JAR.** A short-circuiting SPI is more robust regardless (it's defensive against the step ever running in the wrong context), and Option A avoids per-client binding code entirely. Since your realm is effectively MCP-dedicated right now (only web + admin-api as non-MCP clients), the blast radius is small and the incognito web-login check catches any problem immediately.
-
-Fall back to Option B only if you later add non-MCP clients you don't want touching the MCP flow at all, or if you can't modify the SPI.
+- Action would be: Authentication → Bindings → Browser Flow → `browser-mcp-tenant-pick`.
+- **Why not:** (1) blast radius — any MCP-flow bug breaks *all* logins, as observed. (2) It conflicts with D.7 realm-default scopes: the SPI short-circuit detects MCP clients by `mcp-default`, but realm-default scoping gives `mcp-default` to every client, so the short-circuit can't tell web from MCP. Making Option A work would require a *different* MCP-detection signal in the SPI (e.g. a client attribute set at DCR time) — extra complexity for no benefit over Option B.
+- Only consider Option A if you cannot modify Knobby web to do per-client binding, and even then, fix the detection-signal conflict first.
 
 **Do not do both.** They're alternatives.
 
@@ -621,6 +635,7 @@ Fall back to Option B only if you later add non-MCP clients you don't want touch
 - **Direct Grant Flow:** unbind, or set to a flow that always fails. Save.
 
 This prevents any client (including DCR'd ones) from using the password grant even if they request it.
+
 
 **Verify:** `./smoke.sh` → Test 23 green.
 

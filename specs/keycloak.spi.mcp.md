@@ -317,6 +317,19 @@ authenticate(context):
        //
        // An MCP client is identified by having the 'mcp-default' client scope
        // assigned (default or optional). Non-MCP clients don't have it.
+       //
+       // ⚠️ DETECTION-SIGNAL CAVEAT: this check is only valid if 'mcp-default'
+       // is NOT a realm-default client scope. If 'mcp-default' is assigned
+       // realm-wide (setup guide D.7 done the wrong way), EVERY client has it,
+       // including the web client, and this guard can no longer distinguish MCP
+       // from non-MCP clients. The recommended deployment (Option B, per-client
+       // binding + per-client scope assignment) keeps 'mcp-default' off the
+       // realm defaults, so this signal stays meaningful. Under Option B the
+       // guard is a pure safety net (the MCP flow is only ever bound to real MCP
+       // clients), so even if detection were imperfect it would not misroute web
+       // users. If you must use Option A, switch this guard to a detection signal
+       // that the web client cannot accidentally acquire — e.g. a client
+       // attribute set at DCR time (client.getAttribute("knobby.mcp") == "true").
        client = context.getAuthenticationSession().getClient()
        isMcpClient = client.getClientScopes(true).containsKey("mcp-default")
                      || client.getClientScopes(false).containsKey("mcp-default")
