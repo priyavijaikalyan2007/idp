@@ -231,3 +231,54 @@ Estimated effort: ~30 minutes.
 
 - Next production incident suspected to be image-related.
 - Any change to the Dockerfile build stage or `kc.sh build` flags.
+
+---
+
+## TD-009: MCP-client detection has no signal robust to realm-default scoping
+
+**Status:** Deferred
+**Priority:** Low (Medium if Option A is ever adopted)
+**Created:** 2026-07-03
+**Current location:** `src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java` (`isMcpClient`)
+
+### What we have now
+
+The short-circuit guard identifies an MCP client by the presence of the
+`mcp-default` client scope (default or optional). This is correct **only while
+`mcp-default` is not a realm-default scope** — i.e. under the recommended
+per-client binding (setup guide D.8 Option B). The detection signal and the
+thing that can be handed out realm-wide are the same object (`mcp-default`), so
+the guard is one misconfiguration away from breaking: assign `mcp-default` as a
+realm default and every client — including `yourapp-{env}-web` — is seen as an
+MCP client and pushed into the consent wizard.
+
+### Why deferred
+
+Under Option B (the recommended and current path) the scope signal is correct
+and the guard is a pure safety net, so nothing is broken. The hardening only
+earns its keep if someone adopts Option A (realm-wide flow binding) or wants
+defence-in-depth against the realm-default footgun. Adding it now is YAGNI.
+
+### Implementation plan
+
+Add a dedicated detection signal the web client cannot accidentally acquire — a
+DCR-time client attribute — and OR it into the guard (non-breaking):
+
+```java
+return client.getClientScopes(true).containsKey(MCP_CLIENT_SCOPE)
+        || client.getClientScopes(false).containsKey(MCP_CLIENT_SCOPE)
+        || "true".equals(client.getAttribute("yourapp.mcp"));
+```
+
+`ClientModel.getAttribute(String)` is verified present in 26.6.0. YourApp web
+sets `yourapp.mcp = "true"` on each DCR'd MCP client during post-registration
+processing (the same step that assigns scopes / binds the flow). Add unit tests
+mirroring the scope cases (attribute present → MCP; absent → passthrough). See
+SPI design §5.1 DETECTION-SIGNAL CAVEAT and ADR-010.
+
+### Triggers to revisit
+
+- A decision to adopt Option A (realm-wide binding).
+- Any incident where a non-MCP client is misrouted into the MCP consent flow.
+- Introduction of client types (PRD §17: mobile, browser plugins) where the
+  scope-only signal proves insufficient.

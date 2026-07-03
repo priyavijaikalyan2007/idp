@@ -271,6 +271,39 @@ section()
     echo -e "${BOLD}${BLUE}=== $1 ===${RESET}"
 }
 
+# Fetch the realm representation and validate it's actually JSON. A proxy in
+# front of Keycloak (e.g. Cloudflare) may return an HTML 429/challenge page
+# instead of JSON when rate-limiting the admin API — which otherwise surfaces
+# as confusing raw `jq: parse error: Invalid numeric literal` noise. Sets the
+# global REALM_JSON on success; on failure sets REALM_JSON="" and returns 1 with
+# a human-readable reason in REALM_FETCH_ERR.
+REALM_JSON=""
+REALM_FETCH_ERR=""
+fetch_realm_json()
+{
+    REALM_JSON=""
+    REALM_FETCH_ERR=""
+    local raw status body
+    raw=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "${KC_URL}/admin/realms/${REALM}" 2>/dev/null)
+    status=$(echo "$raw" | grep "HTTP_STATUS:" | cut -d: -f2)
+    body=$(echo "$raw" | sed '/HTTP_STATUS:/d')
+
+    if [[ "$status" == "429" ]]; then
+        REALM_FETCH_ERR="admin API returned HTTP 429 (rate-limited). A proxy in front of Keycloak (Cloudflare?) is throttling /admin/* - scope rate-limit rules away from /admin/* and /resources/*, and disable Rocket Loader on auth.yourapp.com (setup guide §A.11)."
+        return 1
+    fi
+    if ! echo "$body" | jq -e . >/dev/null 2>&1; then
+        # Not valid JSON - almost always an HTML error/challenge page from a proxy.
+        local snippet
+        snippet=$(echo "$body" | head -c 60 | tr '\n' ' ')
+        REALM_FETCH_ERR="admin API returned non-JSON (HTTP ${status:-?}). Likely an HTML error/challenge page from a proxy (Cloudflare rate-limit/Bot Fight). First bytes: '${snippet}'. See setup guide §A.11 (Keycloak behind Cloudflare)."
+        return 1
+    fi
+    REALM_JSON="$body"
+    return 0
+}
+
 # Cross-platform epoch parser for ISO 8601 timestamps from Azure CLI.
 # Returns 0 if parsing fails.
 parse_iso_to_epoch()
@@ -364,13 +397,50 @@ ACCESS_TOKEN=""
 if [[ "$TOKEN_STATUS" != "200" ]]; then
     ERROR=$(echo "$TOKEN_BODY" | jq -r '.error // "unknown"' 2>/dev/null)
     ERROR_DESC=$(echo "$TOKEN_BODY" | jq -r '.error_description // "no description"' 2>/dev/null)
-    record_fail "Admin API token grant" "HTTP ${TOKEN_STATUS}: ${ERROR} - ${ERROR_DESC}"
+    if [[ "$TOKEN_STATUS" == "500" ]]; then
+        record_fail "Admin API token grant" "HTTP 500: ${ERROR} - ${ERROR_DESC}. A 500 on the token endpoint often means Keycloak's DB backend is misbehaving. If running on Supabase/PgBouncer, check for 'prepared statement does not exist' in the Keycloak log — that's the transaction-pooler incompatibility. Fix: add ?prepareThreshold=0 to KC_DB_URL or use a session-mode/direct connection (see KEYCLOAK_SETUP_GUIDE.md §A.2.3)."
+    else
+        record_fail "Admin API token grant" "HTTP ${TOKEN_STATUS}: ${ERROR} - ${ERROR_DESC}"
+    fi
 else
     ACCESS_TOKEN=$(echo "$TOKEN_BODY" | jq -r '.access_token')
     if [[ -z "$ACCESS_TOKEN" || "$ACCESS_TOKEN" == "null" ]]; then
         record_fail "Admin API token grant" "200 OK but no access_token"
     else
         record_pass "Admin API token grant" "access_token acquired"
+    fi
+fi
+
+# ----- test 4b: token endpoint stability under repetition (pooler prepared-statement detector) -----
+# The Supabase transaction-pooler / prepared-statement bug is INTERMITTENT: it only
+# fires when a server-side prepared statement is executed on a different pooled
+# connection than it was prepared on. A single token call (Test 4) can pass while
+# the endpoint is still unstable. Hammer it N times and flag ANY 500 - one 500 in
+# the batch is enough to indicate the pooler incompatibility (or another backend
+# instability). See KEYCLOAK_SETUP_GUIDE.md §A.2.3.
+if [[ -n "$TOKEN_ENDPOINT" && -n "${ADMIN_CLIENT_SECRET:-}" ]]; then
+    HAMMER_N=15
+    HAMMER_500=0
+    HAMMER_OTHER_FAIL=0
+    for _i in $(seq 1 "$HAMMER_N"); do
+        HS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${TOKEN_ENDPOINT}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${ADMIN_CLIENT_ID}" \
+            -d "client_secret=${ADMIN_CLIENT_SECRET}")
+        if [[ "$HS" == "500" ]]; then
+            HAMMER_500=$((HAMMER_500+1))
+        elif [[ "$HS" != "200" ]]; then
+            HAMMER_OTHER_FAIL=$((HAMMER_OTHER_FAIL+1))
+        fi
+    done
+    if [[ "$HAMMER_500" -gt 0 ]]; then
+        record_fail "Token endpoint stability" "${HAMMER_500}/${HAMMER_N} token requests returned HTTP 500 - intermittent backend failure. On Supabase this is almost certainly the transaction-pooler prepared-statement bug: add ?prepareThreshold=0 to KC_DB_URL or use a session-mode/direct DB connection (KEYCLOAK_SETUP_GUIDE.md §A.2.3). Check the Keycloak log for 'prepared statement does not exist'."
+    elif [[ "$HAMMER_OTHER_FAIL" -gt 0 ]]; then
+        record_fail "Token endpoint stability" "${HAMMER_OTHER_FAIL}/${HAMMER_N} token requests failed with non-200, non-500 status"
+    else
+        record_pass "Token endpoint stability" "${HAMMER_N}/${HAMMER_N} token requests returned 200 (no intermittent 500s)"
     fi
 fi
 
@@ -493,6 +563,61 @@ else
                 record_pass "IdP '${ALIAS}' First Login Flow" "${FLOW}"
             else
                 record_fail "IdP '${ALIAS}' First Login Flow" "is '${FLOW}', expected 'first-broker-login-no-prompt' (PRD §6.1)"
+            fi
+
+            # Sync mode check (PRD §11.7a). 'FORCE' keeps mapped attributes current
+            # on every login; 'IMPORT' (first-login-only) lets googleHd/microsoftTenantId
+            # go stale. Keycloak stores this in config.syncMode.
+            SYNC_MODE=$(echo "$IDP_BODY" | jq -r ".[$i].config.syncMode // \"LEGACY\"")
+            if [[ "$SYNC_MODE" == "FORCE" ]]; then
+                record_pass "IdP '${ALIAS}' Sync mode" "FORCE (attributes re-synced every login)"
+            else
+                record_skip "IdP '${ALIAS}' Sync mode" "WARNING: syncMode='${SYNC_MODE}', PRD §11.7a expects FORCE. With IMPORT/LEGACY, googleHd/microsoftTenantId can go stale if the user's tenant/domain changes."
+            fi
+
+            # Attribute-importer mapper check for Google/Microsoft (PRD §11.7a / §8.3.1).
+            # These are what populate googleHd / microsoftTenantId; if missing, those
+            # claims silently never appear and §8.3.1 gating has nothing to gate on.
+            #
+            # ROBUSTNESS NOTE: the config KEY names vary by provider variant. The
+            # generic-OIDC importer uses config["user.attribute"] + config["claim"];
+            # Google's built-in variant uses a different target key and stores the
+            # source under "jsonField"/"Social Profile JSON Field Path". Rather than
+            # guess key names, we (a) match the mapper TYPE loosely (any importer that
+            # writes a user attribute), and (b) confirm the expected TARGET attribute
+            # value appears among ANY of the mapper's config VALUES. Matching on the
+            # value sidesteps every provider-specific key-name difference.
+            if [[ "$IDP_KIND" == "google" || "$IDP_KIND" == "microsoft" ]]; then
+                if [[ "$IDP_KIND" == "google" ]]; then EXPECT_CLAIM="hd"; EXPECT_ATTR="googleHd"; else EXPECT_CLAIM="tid"; EXPECT_ATTR="microsoftTenantId"; fi
+                MAPPERS=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/identity-provider/instances/${ALIAS}/mappers" 2>/dev/null)
+                if echo "$MAPPERS" | jq -e . >/dev/null 2>&1; then
+                    # A mapper qualifies if it's an attribute-writing importer AND the
+                    # expected target attribute appears anywhere in its config values.
+                    FOUND_ATTR_MAPPER=$(echo "$MAPPERS" | jq -r --arg attr "$EXPECT_ATTR" '
+                        [ .[]
+                          | select(.identityProviderMapper
+                                   | test("attribute|user-attribute|attribute-importer"; "i"))
+                          | select( [ .config // {} | to_entries[] | .value ]
+                                    | map(ascii_downcase) | index(($attr | ascii_downcase)) != null )
+                        ] | length' 2>/dev/null || echo 0)
+                    # Fallback: also accept a match by mapper NAME containing the attr or
+                    # the claim (e.g. "google-hd"), in case config isn't returned verbatim.
+                    if [[ "$FOUND_ATTR_MAPPER" -lt 1 ]]; then
+                        FOUND_ATTR_MAPPER=$(echo "$MAPPERS" | jq -r --arg attr "$EXPECT_ATTR" --arg claim "$EXPECT_CLAIM" '
+                            [ .[] | select( ((.name // "") | ascii_downcase) as $n
+                                            | ($n | contains($attr | ascii_downcase))
+                                              or ($n | contains($claim | ascii_downcase)) )
+                            ] | length' 2>/dev/null || echo 0)
+                    fi
+                    if [[ "$FOUND_ATTR_MAPPER" -ge 1 ]]; then
+                        record_pass "IdP '${ALIAS}' attribute mapper" "importer targeting user attribute '${EXPECT_ATTR}' present"
+                    else
+                        record_fail "IdP '${ALIAS}' attribute mapper" "no attribute-importer targeting user attribute '${EXPECT_ATTR}' found (PRD §11.8/§11.9). Expected a mapper importing the '${EXPECT_CLAIM}' field into '${EXPECT_ATTR}'. If you DO see one in the console, paste its JSON (Admin REST: /identity-provider/instances/${ALIAS}/mappers) — the detector may need another config-key variant."
+                    fi
+                else
+                    record_skip "IdP '${ALIAS}' attribute mapper" "could not read IdP mappers (HTTP/non-JSON) - verify manually that '${EXPECT_CLAIM}'→'${EXPECT_ATTR}' importer exists"
+                fi
             fi
         done
     fi
@@ -835,6 +960,23 @@ else
             record_pass "Web client Consent Required" "disabled (first-party client; no consent screen on login)"
         else
             record_fail "Web client Consent Required" "consentRequired=true - regular users will see Keycloak's 'Grant Access' consent screen on login. Turn OFF (Clients → web client → Settings → Consent Required). If it keeps returning, check the mcp-anonymous-dcr Client Policy condition is scoped to ByAnonymous so its consent-required executor doesn't fire on the web client (setup guide D.6b)."
+        fi
+
+        # Full Scope Allowed: if OFF, the web client's tokens carry only roles from
+        # its assigned client scopes, not the user's full role set. If the app
+        # depends on realm/client roles in the token for session validation or
+        # authorization, turning this off silently breaks it (symptom: login
+        # succeeds, then the app reports "not logged in" seconds later). This can
+        # be set inadvertently by the mcp-hardening 'full-scope-disabled' executor
+        # if the mcp-anonymous-dcr policy condition matched the web client (same
+        # mechanism as the consent-required leak). We WARN rather than hard-fail,
+        # since full-scope-disabled is a legitimate least-privilege choice IF the
+        # app doesn't rely on token roles — but flag it so it's a conscious decision.
+        W_FULLSCOPE=$(echo "$WEB_CLIENT_JSON" | jq -r '.fullScopeAllowed // true')
+        if [[ "$W_FULLSCOPE" == "true" ]]; then
+            record_pass "Web client Full Scope Allowed" "on (tokens carry the user's full role set)"
+        else
+            record_skip "Web client Full Scope Allowed" "WARNING: fullScopeAllowed=false on the web client. If the app relies on realm/client roles in the token, this strips them and can cause 'logged in then immediately logged out'. Likely set inadvertently by the mcp-hardening full-scope-disabled executor when the mcp-anonymous-dcr condition was broader than ByAnonymous. Turn ON (Clients → web client → Settings → Full Scope Allowed) unless you deliberately want least-privilege here and the app doesn't need token roles."
         fi
 
         # Logout configuration: back-channel only (front-channel disabled because
@@ -1327,19 +1469,130 @@ else
 fi
 
 # ----- test 19: refresh token rotation enabled -----
-section "Test 19: OAuth 2.1 refresh token rotation enabled (§16.5)"
+section "Test 19: OAuth 2.1 refresh token rotation (§16.5 / §8.6.1)"
 
 if [[ -z "$ACCESS_TOKEN" ]]; then
     record_fail "refresh token rotation" "skipped - no admin access token"
 else
-    REALM_DATA=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" "${KC_URL}/admin/realms/${REALM}")
+    if ! fetch_realm_json; then
+        record_fail "refresh token rotation" "$REALM_FETCH_ERR"
+    else
+    REALM_DATA="$REALM_JSON"
     REVOKE_REFRESH=$(echo "$REALM_DATA" | jq -r '.revokeRefreshToken // false')
     REFRESH_MAX_REUSE=$(echo "$REALM_DATA" | jq -r '.refreshTokenMaxReuse // 0')
 
+    # Strict rotation (revoke=true, maxReuse=0) is the OAuth 2.1 target, but it is
+    # only SAFE once the app implements single-flight token refresh per session
+    # (§8.6.1). Enabling it before that causes concurrent-refresh races that
+    # invalidate sessions. So we recognize three states:
+    #   - strict (revoke=true, reuse=0): target. Pass — but remind that the app
+    #     must have single-flight refresh, else this WILL break logins.
+    #   - grace  (revoke=true, reuse>0): acceptable interim. Pass with a note.
+    #   - off    (revoke=false):         not yet enabled. Fail (soft) — expected
+    #     until the app is ready; do not enable strict until §8.6.1 is done.
     if [[ "$REVOKE_REFRESH" == "true" && "$REFRESH_MAX_REUSE" == "0" ]]; then
-        record_pass "refresh token rotation" "revokeRefreshToken=true, refreshTokenMaxReuse=0"
+        record_pass "refresh token rotation" "strict (revokeRefreshToken=true, maxReuse=0). ⚠ Requires app single-flight refresh (§8.6.1) or concurrent requests will invalidate sessions."
+    elif [[ "$REVOKE_REFRESH" == "true" && "$REFRESH_MAX_REUSE" -gt 0 ]]; then
+        record_pass "refresh token rotation" "grace window (revokeRefreshToken=true, maxReuse=${REFRESH_MAX_REUSE}) - interim setting tolerating concurrent refreshes. Tighten to maxReuse=0 after app single-flight refresh ships (§8.6.1)."
     else
-        record_fail "refresh token rotation" "revokeRefreshToken=${REVOKE_REFRESH} (need true), refreshTokenMaxReuse=${REFRESH_MAX_REUSE} (need 0) - enable per §16.11 step 13"
+        record_fail "refresh token rotation" "not enabled (revokeRefreshToken=${REVOKE_REFRESH}, maxReuse=${REFRESH_MAX_REUSE}). Target is strict rotation for MCP clients (§16.5), but do NOT enable it until the app implements single-flight refresh (§8.6.1) - enabling it first breaks logins via concurrent-refresh races. Interim: set a small maxReuse grace instead."
+    fi
+    fi
+fi
+
+# ----- test 19b: token & session lifespans (§8.6) -----
+section "Test 19b: Token & session lifespans (§8.6)"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    record_fail "token lifespans" "skipped - no admin access token"
+else
+    if ! fetch_realm_json; then
+        record_fail "token lifespans" "$REALM_FETCH_ERR"
+    else
+    REALM_DATA="$REALM_JSON"
+    ACCESS_LIFESPAN=$(echo "$REALM_DATA" | jq -r '.accessTokenLifespan // 0')
+    SSO_IDLE=$(echo "$REALM_DATA" | jq -r '.ssoSessionIdleTimeout // 0')
+    SSO_MAX=$(echo "$REALM_DATA" | jq -r '.ssoSessionMaxLifespan // 0')
+    CLIENT_SESSION_IDLE=$(echo "$REALM_DATA" | jq -r '.clientSessionIdleTimeout // 0')
+    CLIENT_SESSION_MAX=$(echo "$REALM_DATA" | jq -r '.clientSessionMaxLifespan // 0')
+
+    # Report actual values so a "why am I logged out so fast?" question can be
+    # answered directly. Targets per §8.6: access 300s (5m), SSO idle 1800s (30m),
+    # SSO max 36000s (10h). We PASS on reasonable values and WARN on suspiciously
+    # short ones that would cause premature logout. clientSession* = 0 means
+    # "inherit SSO session timeouts" which is normal.
+    fmt_dur() { local s=$1; if [[ "$s" -ge 3600 ]]; then echo "$((s/3600))h"; elif [[ "$s" -ge 60 ]]; then echo "$((s/60))m"; else echo "${s}s"; fi; }
+
+    # Access token lifespan
+    if [[ "$ACCESS_LIFESPAN" -lt 60 ]]; then
+        record_fail "Access token lifespan" "$(fmt_dur $ACCESS_LIFESPAN) (${ACCESS_LIFESPAN}s) - suspiciously short; causes near-constant refresh. §8.6 target is 300s (5m)."
+    elif [[ "$ACCESS_LIFESPAN" -lt 120 ]]; then
+        record_skip "Access token lifespan" "WARNING: $(fmt_dur $ACCESS_LIFESPAN) (${ACCESS_LIFESPAN}s) - shorter than §8.6 target of 300s (5m); increases refresh frequency."
+    else
+        record_pass "Access token lifespan" "$(fmt_dur $ACCESS_LIFESPAN) (${ACCESS_LIFESPAN}s)"
+    fi
+
+    # SSO session idle — the big one for "logged out after inactivity"
+    if [[ "$SSO_IDLE" -lt 300 ]]; then
+        record_fail "SSO session idle" "$(fmt_dur $SSO_IDLE) (${SSO_IDLE}s) - very short; users get logged out after brief inactivity. §8.6 target is 1800s (30m)."
+    else
+        record_pass "SSO session idle" "$(fmt_dur $SSO_IDLE) (${SSO_IDLE}s)"
+    fi
+
+    # SSO session max
+    if [[ "$SSO_MAX" -lt 1800 ]]; then
+        record_skip "SSO session max" "WARNING: $(fmt_dur $SSO_MAX) (${SSO_MAX}s) - shorter than §8.6 target of 36000s (10h)."
+    else
+        record_pass "SSO session max" "$(fmt_dur $SSO_MAX) (${SSO_MAX}s)"
+    fi
+
+    # Client session overrides (0 = inherit SSO, which is expected)
+    if [[ "$CLIENT_SESSION_IDLE" != "0" && "$CLIENT_SESSION_IDLE" -lt 300 ]]; then
+        record_fail "Client session idle override" "$(fmt_dur $CLIENT_SESSION_IDLE) (${CLIENT_SESSION_IDLE}s) - a short realm-level client-session-idle override will log users out fast regardless of SSO idle. Set to 0 to inherit SSO idle unless you specifically need it."
+    else
+        record_pass "Client session idle override" "$([ "$CLIENT_SESSION_IDLE" == "0" ] && echo "0 (inherits SSO idle)" || fmt_dur $CLIENT_SESSION_IDLE)"
+    fi
+
+    # Client session max override (same hazard as idle)
+    if [[ "$CLIENT_SESSION_MAX" != "0" && "$CLIENT_SESSION_MAX" -lt 1800 ]]; then
+        record_skip "Client session max override" "WARNING: $(fmt_dur $CLIENT_SESSION_MAX) (${CLIENT_SESSION_MAX}s) - short client-session-max override; forces re-auth sooner than SSO max. Set to 0 to inherit unless intended (§11.2)."
+    else
+        record_pass "Client session max override" "$([ "$CLIENT_SESSION_MAX" == "0" ] && echo "0 (inherits SSO max)" || fmt_dur $CLIENT_SESSION_MAX)"
+    fi
+    fi
+fi
+
+# ----- test 19c: security defenses (§11.2) -----
+section "Test 19c: Security defenses (§11.2)"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    record_fail "security defenses" "skipped - no admin access token"
+else
+    if ! fetch_realm_json; then
+        record_fail "security defenses" "$REALM_FETCH_ERR"
+    else
+    REALM_DATA="$REALM_JSON"
+
+    # Brute force detection. Note: near-inert for federated-only login (no local
+    # passwords), but expected ON to protect admin console / future local accounts.
+    BRUTE=$(echo "$REALM_DATA" | jq -r '.bruteForceProtected // false')
+    if [[ "$BRUTE" == "true" ]]; then
+        FAILURE_FACTOR=$(echo "$REALM_DATA" | jq -r '.failureFactor // "?"')
+        record_pass "Brute force detection" "enabled (failureFactor=${FAILURE_FACTOR})"
+    else
+        record_fail "Brute force detection" "disabled - enable with explicit values per §11.2 (protects admin console / local accounts; federated login is unaffected either way)"
+    fi
+
+    # X-Frame-Options: expect SAMEORIGIN (the deliberate default; NOT forced DENY).
+    # This governs framing of Keycloak's own pages, not the yourapp.com app.
+    XFO=$(echo "$REALM_DATA" | jq -r '.browserSecurityHeaders.xFrameOptions // "unset"')
+    if [[ "$XFO" == "SAMEORIGIN" ]]; then
+        record_pass "X-Frame-Options (Keycloak pages)" "SAMEORIGIN (default; governs Keycloak pages, not the app)"
+    elif [[ "$XFO" == "DENY" ]]; then
+        record_skip "X-Frame-Options (Keycloak pages)" "NOTE: DENY. Safe for yourapp.com (back-channel logout, no check-session iframe), but §11.2 prefers the SAMEORIGIN default for compatibility. Does not affect whether the app can be iframed - that's the app server's frame-ancestors."
+    else
+        record_skip "X-Frame-Options (Keycloak pages)" "NOTE: '${XFO}' - §11.2 expects SAMEORIGIN. Governs Keycloak pages only."
+    fi
     fi
 fi
 
@@ -1612,7 +1865,10 @@ section "Test 28: Realm SSL requirement (§16.5)"
 if [[ -z "$ACCESS_TOKEN" ]]; then
     record_fail "realm SSL requirement" "skipped - no admin access token"
 else
-    REALM_DATA=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" "${KC_URL}/admin/realms/${REALM}")
+    if ! fetch_realm_json; then
+        record_fail "realm SSL requirement" "$REALM_FETCH_ERR"
+    else
+    REALM_DATA="$REALM_JSON"
     SSL_REQUIRED=$(echo "$REALM_DATA" | jq -r '.sslRequired // "external"')
     if [[ "$YOURAPP_ENV" == "test" ]]; then
         record_pass "realm SSL requirement" "skipped for test env (HTTP permitted for local dev; sslRequired=${SSL_REQUIRED})"
@@ -1622,6 +1878,7 @@ else
         record_fail "realm SSL requirement" "sslRequired='external' - HTTPS only enforced for non-loopback; for prod/dev should be 'all' (§16.11 step 13)"
     else
         record_fail "realm SSL requirement" "sslRequired='${SSL_REQUIRED}' - should be 'all' (§16.11 step 13)"
+    fi
     fi
 fi
 

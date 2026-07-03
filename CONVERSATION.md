@@ -111,3 +111,16 @@ Implemented via TDD (V-V-P-T-I-R-V-C): verified `ClientModel.getClientScopes(boo
 **Configuration implication surfaced for the user:** `mcp-default` is now the single on/off switch for the whole handoff. The flow can be bound realm-wide safely, but MCP clients must have the `mcp-default` scope assigned (default or optional) for the picker to fire.
 
 Documentation swept (concepts, decisions ADR-009, history, status log, changelog), committed, and a new image built + pushed for the user to redeploy after finishing realm configuration.
+
+---
+
+## Session: 2026-07-03 — Reconcile SPI with post-July-1 spec updates
+
+The user asked to double-check all SPI-spec updates since the July-1 implementation and map required changes. Findings:
+
+- **`keycloak.spi.mcp.md` §5.1** gained one change: a DETECTION-SIGNAL CAVEAT. The pseudocode is unchanged; the implementation still matches. The caveat warns that `mcp-default`-scope detection only holds while `mcp-default` is not a realm-default scope, and offers an escape hatch (a DCR-time `yourapp.mcp` client attribute) for anyone forced onto Option A.
+- **Driving context (commit 1e67e13):** setup guide D.8 reversed the flow-binding recommendation from Option A to **Option B** after Option A took down all logins in testing (a malformed MCP flow bound realm-wide returns HTTP 400 for every login). PRD §17's new client taxonomy (mobile, browser plugins, user-context CLI) leans on the SPI short-circuit to pass non-MCP interactive clients through — matching the current code with no contract change.
+
+**Conclusion: no SPI source change required.** Under the recommended Option B, `mcp-default` is never a realm default, so the current `isMcpClient` guard is correct and acts as a pure safety net.
+
+**The required work was documentation drift from July 1** (all mine): `keycloak.web.mcp.md §7.2.1` still recommended Option A. Fixed it to recommend Option B and align with setup guide D.8. Recorded ADR-010 correcting ADR-009's "bound realm-wide safely" framing, updated the `McpTenantPickerAuthenticator` concept, added a CHANGELOG correction entry, and filed **TD-009** for the deferred `yourapp.mcp`-attribute hardening (YAGNI under Option B; revisit if Option A is ever adopted).
