@@ -86,6 +86,38 @@ Cost ~$10/mo at `db-f1-micro`. Bump if login latency suffers.
 
 **On VPC/network isolation:** For Cloud Run → Cloud SQL, the native socket factory handles isolation; nothing more needed. For Cloud Run → Neon/Supabase, the connection goes over the public internet with TLS. This is **acceptable pre-PMF** given TLS-required connections, credentials in Secret Manager, and DB-side RLS/least-privilege. Add IP allowlisting (restricting DB to Cloud Run's egress IPs) as a Phase 4 hardening task. Full VPC peering / PrivateLink is overkill at this scale; defer until a real trigger (enterprise compliance, measurable latency problem, or a paid DB tier that bundles it).
 
+### A.2.3 ⚠️ Supabase connection mode for Keycloak (critical — read before deploying)
+
+> **This bit us in production (knobby-prod, 2026-07-03) and cost a long debugging session.** Getting it wrong produces *intermittent* HTTP 500s on the token endpoint that cascade into user logouts, session-timing weirdness, and flaky admin pages — all of which look like app or realm bugs but are actually a DB connection-mode problem.
+
+**Root cause.** Keycloak (via the PostgreSQL JDBC driver) uses **server-side named prepared statements** (`S_849`, `S_2`, …). A named prepared statement lives on **one physical Postgres connection**. Supabase's **transaction-mode pooler** (PgBouncer, pooler host on port **6543**) hands each statement a *different* backend connection, so Keycloak prepares a statement on connection A and executes it on connection B → `ERROR: prepared statement "S_849" does not exist` → `XA_RBROLLBACK` → **HTTP 500 on `/token`**. It's intermittent (only fails when the pool routes the execute elsewhere), which is what makes it so confusing.
+
+**Supabase connection options and how they interact with Cloud Run:**
+
+| Endpoint | Port | Prepared statements | Cloud Run reachable? |
+|---|---|---|---|
+| Transaction pooler | 6543 | **Broken** (per-statement pooling) | Yes (IPv4) — but breaks Keycloak |
+| **Session pooler** | **5432** | **OK** (one conn per session) | **Yes (IPv4) — use this on Cloud Run** |
+| Direct (`db.<ref>.supabase.co`) | 5432 | OK | **No** — IPv6-only; Cloud Run has no native outbound IPv6 |
+
+**Required `KC_DB_URL` on Cloud Run (session-mode pooler + prepared statements disabled):**
+```
+jdbc:postgresql://<region>.pooler.supabase.com:5432/postgres?sslmode=require&prepareThreshold=0
+```
+- **Port 5432 on the pooler host** = session mode (prepared statements survive). Do **not** use 6543.
+- **`&prepareThreshold=0`** = belt-and-suspenders; tells PgJDBC to never use server-side named prepared statements, so nothing can go missing even under pooling surprises. Safe to keep permanently; negligible overhead on a low-traffic IdP DB.
+- Note the **`&`** (not `?`) joining the second param, since `?sslmode=require` is already present.
+- The correct param is **`prepareThreshold`**, not `prepareMode` (the latter is silently ignored).
+- Keep DB credentials in `KC_DB_USERNAME` / `KC_DB_PASSWORD` (env var / Secret Manager). Do **not** put `user=`/`password=` in the URL query string, even though Supabase's copy-paste URL does.
+
+⚠️ **Do not use the direct connection on Cloud Run.** `db.<ref>.supabase.co` is IPv6-only unless you buy Supabase's IPv4 add-on, and Cloud Run egresses IPv4-only unless you build Direct VPC egress on a dual-stack subnet (custom VPC + dual-stack subnet + egress routing + elevated cold-start latency — far too much for a low-traffic IdP). The session-mode pooler exists precisely to give you IPv4 reachability; use it.
+
+**Verify after deploy:** watch the Keycloak log during a login + a few minutes of clicking — no `prepared statement ... does not exist`, no `XA_RBROLLBACK`, no `500` on `/token`. Then `./smoke.sh` → the **Token endpoint stability** check (Test 4b) hammers `/token` 15× and passes only if there are zero intermittent 500s.
+
+**Dev/staging:** apply the identical `KC_DB_URL` (session pooler 5432 + `prepareThreshold=0`) when standing up `knobby-dev` / `knobby-staging`.
+
+**Future Hetzner migration:** when Keycloak moves to the Hetzner VM (planned, §Option B), the IPv6 limitation disappears — a VM can egress IPv6 — so the Supabase **direct** connection becomes viable there and bypasses the pooler entirely. Keep `prepareThreshold=0` regardless, and re-verify with the Token endpoint stability check after the move.
+
 ## A.3 Secrets
 
 ```bash
@@ -128,7 +160,7 @@ gcloud run deploy keycloak \
   --set-secrets="KC_DB_PASSWORD=keycloak-db-password:latest,KC_BOOTSTRAP_ADMIN_PASSWORD=keycloak-bootstrap-password:latest"
 ```
 
-For Neon/Supabase, swap the JDBC URL: `jdbc:postgresql://HOST:5432/keycloak?sslmode=require`, drop `--add-cloudsql-instances`.
+For Neon/Supabase, swap the JDBC URL and drop `--add-cloudsql-instances`. **For Supabase specifically, use the session-mode pooler + `prepareThreshold=0` per §A.2.3** — e.g. `jdbc:postgresql://<region>.pooler.supabase.com:5432/postgres?sslmode=require&prepareThreshold=0` (Neon: `jdbc:postgresql://HOST:5432/keycloak?sslmode=require`).
 
 **`--min-instances=0`** is the pre-PMF default. Saves ~$15/mo at the cost of cold starts. Flip to `1` when users complain, first paying customer onboards, or cold-start frequency crosses what you can tolerate.
 
@@ -285,7 +317,11 @@ services:
     env_file: [.env]
     environment:
       KC_DB: postgres
-      KC_DB_URL: "jdbc:postgresql://${KC_DB_HOST}:5432/keycloak?sslmode=require"
+      # Supabase: session-mode pooler + prepareThreshold=0 (see §A.2.3). On the
+      # Hetzner VM (unlike Cloud Run) outbound IPv6 is available, so the Supabase
+      # DIRECT connection (db.<ref>.supabase.co:5432) is also viable here and
+      # bypasses the pooler. Keep prepareThreshold=0 regardless.
+      KC_DB_URL: "jdbc:postgresql://${KC_DB_HOST}:5432/keycloak?sslmode=require&prepareThreshold=0"
       KC_DB_USERNAME: keycloak
       KC_HOSTNAME: auth.knobby.io
       KC_HOSTNAME_STRICT: "true"
@@ -393,20 +429,28 @@ browser-mcp-tenant-pick:
   ├── Authentication              [Required]  (sub-flow)
   │     ├── Cookie                       [Alternative]
   │     ├── Identity Provider Redirector [Alternative]
-  │     └── Forms                        [Alternative] (sub-flow)
-  │           └── Username Password Form [Required]
+  │     └── Username Password Form       [Alternative]  (execution — NOT a nested Forms sub-flow)
   └── Knobby MCP Tenant Picker    [Required]  (top level, AFTER the sub-flow)
 ```
 
-The wrong structure (picker as a top-level Required sibling to the Alternative auth steps) makes Keycloak treat the alternatives as invalid, so no authentication path runs and `/auth` returns 400 before any IdP redirect.
+The wrong structure (picker as a top-level Required sibling to the Alternative auth steps) makes Keycloak treat the alternatives as invalid, so no authentication path runs and `/auth` returns 400 before any IdP redirect. Note also that a *nested* sub-flow (e.g. moving the `Forms` sub-flow inside `Authentication`) cannot be set to Alternative in 26.6.0 — only Required/Disabled — so use the `Username Password Form` **execution** directly instead (see build steps).
 
 **Build it:**
 1. Find `browser-federated-only` → row action menu → **Duplicate**. Name the copy `browser-mcp-tenant-pick`. Open it.
-2. The duplicate has Cookie / Identity Provider Redirector / Forms at the **top level** as Alternatives. Wrap these in a Required sub-flow:
-   - Add a sub-flow at the top level (**Add sub-flow** [?]), name it `Authentication`, set it **Required**.
-   - Move the existing Cookie, Identity Provider Redirector, and Forms executions **into** the `Authentication` sub-flow (drag-and-drop in the flow editor, keeping each as **Alternative**). If drag-and-drop is unreliable in your version, it may be easier to delete the duplicated executions and re-add them inside the sub-flow.
-3. At the **top level** (a sibling of the `Authentication` sub-flow, positioned **after** it), **Add step** → find **Knobby MCP Tenant Picker** [?] (search "knobby" or "mcp"). Set it **Required**.
-4. Confirm the final tree matches the target structure above: `Authentication` [Required sub-flow] with the three Alternatives inside it, then `Knobby MCP Tenant Picker` [Required] at the top level.
+2. The duplicate has Cookie / Identity Provider Redirector / Forms at the **top level** as Alternatives. Wrap the authentication executions in a Required sub-flow:
+   - Add a sub-flow at the top level (**Add sub-flow**), name it `Authentication`, set it **Required**.
+   - Move **Cookie** and **Identity Provider Redirector** into `Authentication` (drag-and-drop), keeping each **Alternative**.
+   - ⚠️ **Do not move the `Forms` sub-flow inside `Authentication`.** A *nested* sub-flow can only be set to Required or Disabled, never Alternative (confirmed in 26.6.0) — and Required Forms would force the password path on every login, breaking federated-only auth. Instead, **delete the `Forms` sub-flow** and replace it with the `Username Password Form` **execution** directly inside `Authentication`: on the `Authentication` row click **`+` → Add step → Username Password Form**, then set it **Alternative** (executions, unlike nested sub-flows, allow Alternative). This execution still renders the login page with the IdP buttons for users who have neither an existing session nor a `kc_idp_hint`. Dropping the OTP conditional that lived inside Forms is fine — per Invariant 2, MFA is authoritative at the upstream IdP.
+3. At the **top level** (a sibling of the `Authentication` sub-flow, positioned **after** it), **Add step** → find **Knobby MCP Tenant Picker** [?]. Set it **Required**.
+4. Confirm the final tree:
+   ```
+   browser-mcp-tenant-pick:
+     ├── Authentication [Required] (sub-flow)
+     │     ├── Cookie                       [Alternative]
+     │     ├── Identity Provider Redirector [Alternative]
+     │     └── Username Password Form       [Alternative]  (execution, NOT a nested Forms sub-flow)
+     └── Knobby MCP Tenant Picker           [Required]
+   ```
 5. Save.
 
 **Verify:**
@@ -618,15 +662,22 @@ Earlier drafts recommended Option A. **That recommendation is reversed** after O
 
 **Do not do both.** They're alternatives.
 
-## D.9 OAuth 2.1 token settings
+## D.9 OAuth 2.1 token settings (refresh token rotation)
 
 **Path:** Realm settings → Tokens
 
-- **Revoke Refresh Token:** **On**
-- **Refresh Token Max Reuse:** `0`
+⚠️ **Do not enable strict rotation until the app implements single-flight token refresh (PRD §8.6.1).** Refresh-token rotation is realm-wide, so it applies to the confidential web client too. If the app fires concurrent authenticated requests that each independently refresh the same session's token (the default SPA behavior), strict rotation (`Max Reuse = 0`) causes the losing requests to hit "Maximum allowed refresh token reuse exceeded," which triggers session revocation and logs users out. This was observed in production on 2026-07-02.
+
+**Sequencing:**
+- **Interim (until the app ships single-flight refresh): leave `Revoke Refresh Token` Off.** A `Refresh Token Max Reuse` grace window is **not reliable** here — it only tolerates the "reuse exceeded" error, while concurrent rotation also triggers a separate "Session doesn't have required client" error that the reuse counter doesn't govern. Observed in production: `Max Reuse = 5` did not stop the logouts; only turning rotation off did. Also note the setting applies to newly issued tokens, so testing a grace change requires a fresh login.
+- **Target (after PRD §8.6.1 is implemented and verified):** `Revoke Refresh Token` **On**, `Refresh Token Max Reuse` = `0`. Strict rotation matters most for the MCP clients (public, tokens on the user's machine); the confidential web client tolerates it once single-flight refresh is in place.
+
+Settings:
+- **Revoke Refresh Token:** On (target) — but see sequencing above before enabling with maxReuse=0.
+- **Refresh Token Max Reuse:** `0` (target) / small grace value (interim).
 - Save.
 
-**Verify:** `./smoke.sh` → Test 19 green.
+**Verify:** `./smoke.sh` → Test 19. It now recognizes three states (strict / grace / off) and reminds you of the §8.6.1 app prerequisite rather than pushing you straight to strict.
 
 ## D.10 Disable Direct Grant flow (optional hardening)
 

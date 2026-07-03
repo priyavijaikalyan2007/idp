@@ -143,3 +143,33 @@
   files:
     - "src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
     - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-010"
+  title: "Per-client flow binding (Option B) is the recommended MCP binding; the SPI short-circuit is a safety net, not a realm-wide-binding enabler"
+  date: "2026-07-03"
+  status: "Accepted"
+  supersedes_note: "Clarifies and corrects framing in ADR-009."
+  context: >-
+    ADR-009 introduced the non-MCP short-circuit and described it as letting the
+    browser-mcp-tenant-pick flow be "bound realm-wide safely". Real-world testing
+    (setup guide D.8, commit 1e67e13) disproved that framing: Option A (realm-wide
+    browser-flow binding) took down ALL logins — a malformed MCP flow bound
+    realm-wide returns HTTP 400 for every login, including the web client — and it
+    also breaks the SPI's MCP-client detection, because realm-default assignment of
+    the mcp-default scope gives that scope to every client, so the guard can no
+    longer distinguish the web client from a real MCP client. The recommendation is
+    therefore REVERSED to Option B (per-client binding): the realm default browser
+    flow stays browser-federated-only, Knobby web sets
+    authenticationFlowBindingOverrides.browser per DCR'd client, and mcp-default is
+    assigned per-client (never realm-default). Under Option B the current SPI guard
+    (isMcpClient via mcp-default scope) is correct and functions purely as a safety
+    net — no code change is required. SPI design §5.1 carries a DETECTION-SIGNAL
+    CAVEAT documenting an escape hatch for anyone forced onto Option A: switch the
+    guard to a DCR-time client attribute (client.getAttribute("knobby.mcp") ==
+    "true") that the web client cannot accidentally acquire. That hardening is
+    deferred (YAGNI under Option B) and tracked as tech debt. No SPI source change
+    was made for this ADR; it corrects documentation only.
+  files:
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak.web.mcp.md"
+    - "specs/keycloak-setup-guide.md"

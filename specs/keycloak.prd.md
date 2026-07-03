@@ -664,6 +664,46 @@ knobby.io's backend must expose:
 | SSO session max | 10 hours | Force re-authentication. |
 | knobby.io session cookie | 10 hours | Matches SSO Session Max. |
 
+#### 8.6.1 Implementation requirement — session/token concurrency (app team action)
+
+> **Status:** Confirmed in production (knobby-prod, 2026-07-02/03). Two independent concurrency bugs surfaced during Keycloak cutover: (1) a token-refresh race and refresh storm, and (2) a session-row update race that invalidates sessions. **Important context:** the *primary* production trigger of the logout cascade turned out to be an infrastructure misconfiguration — Keycloak's DB backend behind the Supabase transaction pooler returning HTTP 500 on the token endpoint ("prepared statement does not exist"; see KEYCLOAK_SETUP_GUIDE.md §A.2.3). Fixing the pooler removes the trigger. The two app bugs below are real amplifiers that made a transient IdP 500 fatal to the session, and should still be fixed so the app is resilient to IdP hiccups — but they are not the root cause of the original incident.
+
+**Background.** When the realm has refresh-token rotation on (`Revoke Refresh Token = true`, `Refresh Token Max Reuse = 0`, §16.5 / setup guide D.9), each use of a refresh token issues a new one and invalidates the old. This is required for the MCP clients (public, tokens on the user's machine). It applies realm-wide, so the confidential web client is subject to it too.
+
+**Observed failure.** After login, the SPA fires several authenticated calls near-simultaneously (`/auth/profile`, `/users/me/settings`, `/users/me/ui-state`, `/auth/me`). With an expired access token, each request independently refreshes using the *same* stored refresh token. The cascade:
+
+1. First request wins → Keycloak 200, rotates the refresh token.
+2. Concurrent requests send the now-rotated token → `400 invalid_grant: Maximum allowed refresh token reuse exceeded`.
+3. Reuse detection (Revoke Refresh Token) revokes the session's client binding → subsequent refreshes get `400 invalid_grant: Session doesn't have required client`.
+4. Concurrent session-row writes collide in Postgres → `DbUpdateConcurrencyException` (one flow invalidated the row while another updated it).
+5. Net: session invalidated → `401 "invalid session"` on every in-flight request.
+
+**Required behavior.** Token refresh MUST be single-flight per session:
+
+- When a session's access token needs refreshing, exactly **one** refresh executes. Concurrent requests for the same session must **await the in-flight refresh and reuse its result**, not each issue their own refresh call.
+- Implement with a per-session async lock / mutex (keyed by session id), or a single-flight/coalescing primitive (e.g. a per-session `Lazy<Task<Tokens>>` / `SemaphoreSlim`, or a distributed lock if the app is multi-instance — knobby.io already uses Redis, which can back this).
+- After a successful refresh, **persist the rotated refresh token atomically** and make it the value all waiters read.
+- A `Maximum allowed refresh token reuse exceeded` response must **not** immediately invalidate the session — first re-read the stored refresh token (a concurrent flow may have just rotated it) and retry once with the current value before giving up.
+
+**Second failure mode — session-row update concurrency (independent of rotation).** Distinct from the refresh race above, and confirmed to persist even with refresh-token rotation turned *off*: `UpdateSessionAccessAsync` (and `GetSessionAsync`) write the session row on every authenticated request under EF Core optimistic concurrency. When the initial page load fires its burst of authenticated calls for one session, they race on that single row — one wins and bumps the concurrency token, the others' `UPDATE ... WHERE id=@id AND version=@stale` matches 0 rows and throws `DbUpdateConcurrencyException` ("expected to affect 1 row(s), but actually affected 0"). The app treats this as a session failure and invalidates → `401 "invalid session"` within seconds of login. **This is a separate bug from the refresh race and must be fixed independently — turning off rotation does not address it.** Fix: update last-access-time via a non-tracked, non-optimistic-concurrency write (e.g. a direct `UPDATE ... SET last_access = now() WHERE id = @id`), or throttle it to at most once per N seconds per session, or drop the write entirely on read-only requests. Last-access is advisory; it does not need optimistic-concurrency protection, and the session's *validity* must not depend on that write succeeding. More broadly: a failed last-access bookkeeping write must never invalidate an otherwise-valid session.
+
+**Multi-instance note.** If knobby.io runs more than one API instance, the single-flight lock must be **distributed** (Redis), since an in-memory per-session lock only coalesces within one process. Two instances refreshing the same session concurrently would reproduce the race across the cluster.
+
+**Sequencing.** Until single-flight refresh ships, keep the realm with **`Revoke Refresh Token = Off`**. A `Refresh Token Max Reuse` grace window is **not a reliable mitigation** for this problem: it only addresses the "Maximum allowed refresh token reuse exceeded" error, but concurrent rotation *also* triggers a separate "Session doesn't have required client" error from Keycloak's own client-session handling under concurrency, which the reuse counter does not govern. Observed in production: setting `Max Reuse = 5` did not stop the logouts; only turning rotation off did. Re-enable strict rotation (`Revoke Refresh Token = On`, `Max Reuse = 0`) only after single-flight refresh is deployed and verified. Smoke Test 19 checks for strict rotation; treat its failure as "not yet safe to enable" until this requirement is met, rather than a gap to close immediately.
+
+**Test cases the app team must add:**
+1. Fire N concurrent authenticated requests on a session with an expired access token → exactly one Keycloak refresh call is made; all N requests succeed; the session remains valid.
+2. Simulate a rotated-token response on a losing flow → the flow re-reads the stored token and retries rather than invalidating the session.
+3. (Multi-instance) two instances, concurrent requests on the same session → still one refresh, session stays valid.
+
+#### 8.6.2 Deployment constraint — Keycloak DB connection mode (infra)
+
+The *primary* trigger of the 2026-07-03 logout incident was not app or realm configuration — it was Keycloak's database connection mode. Keycloak uses **server-side named prepared statements**, which require statement-affinity to a single physical Postgres connection. Behind a **transaction-mode connection pooler** (Supabase's PgBouncer on port 6543, or any equivalent), each statement can land on a different backend connection, producing intermittent `prepared statement "S_NNN" does not exist` → transaction rollback → **HTTP 500 on the token endpoint** → app-side session invalidation and logout. The failure is intermittent and easily misattributed to rotation, session timeouts, or app code (all of which were investigated and cleared).
+
+**Requirement:** Keycloak's `KC_DB_URL` MUST use a connection mode that preserves prepared statements — a **session-mode pooler** or a **direct connection** — and SHOULD additionally set **`prepareThreshold=0`** to disable server-side prepared statements as defense-in-depth. It MUST NOT point at a transaction-mode pooler without `prepareThreshold=0`.
+
+This is a "how" detail owned by the setup guide (§A.2.3, including the Cloud Run IPv6 constraint that dictates *which* endpoint to use) and verified by the smoke suite's **Token endpoint stability** check (hammers `/token` and fails on any intermittent 500). It is recorded here because it is an architectural deployment invariant, not a one-time setup step: it must hold for every environment (prod, dev, staging) and survive the future Cloud Run → Hetzner migration.
+
 ### 8.7 Keycloak Admin REST API — knobby.io Usage Reference
 
 knobby.io's backend authenticates via client credentials grant on `knobby-{env}-admin-api`. Acquire token per request batch (cache for ~4 minutes).
@@ -859,11 +899,27 @@ Execute in **dev first**, then **prod**. Test setup per §11.15 on each develope
 
 **Realm settings → Themes tab:** Login `keycloak` for now (will switch to `knobby` after theme is built per §11.14). Admin `keycloak.v2`.
 
-**Realm settings → Tokens tab:** Access Token 5 min; SSO Idle 30 min; SSO Max 10 hrs; Revoke Refresh Token On; Refresh Token Max Reuse 0.
+**Realm settings → Sessions tab** (⚠️ **not** the Tokens tab — SSO/session timeouts moved to their own Sessions tab in 26.x): SSO Session Idle **30 min**; SSO Session Max **10 hrs**. **Leave Client Session Idle and Client Session Max at `0`** (unset) so they inherit the SSO values — setting them shorter than the SSO timeouts causes premature client-session expiry and the "logged out after a short time" class of bug. Leave the offline-session and login-timeout fields at defaults.
 
-**Realm settings → Security defenses:** Brute Force Detection On; X-Frame-Options DENY; HSTS Max Age 31536000 (skip HSTS for test).
+**Realm settings → Tokens tab:** Access Token Lifespan **5 min**. Refresh-token rotation (Revoke Refresh Token / Refresh Token Max Reuse) is configured per §16.5 / setup guide D.9 — **keep rotation OFF until the app implements single-flight refresh (§8.6.1)**; do not enable it here as part of baseline realm setup.
 
-**Organizations:** leave **Off** (per Invariant 8). The realm does not use Keycloak Organizations.
+**Realm settings → Security defenses → Brute force detection:** enable, strategy **Lockout temporarily**, with explicit values (do not rely on defaults):
+- Max login failures: **30**
+- Wait increment: **1 minute**
+- Max wait: **15 minutes**
+- Failure reset time: **12 hours**
+- Quick login check milliseconds: **1000**
+- Minimum quick login wait: **1 minute**
+- Max temporary lockouts: default
+
+Note: brute-force detection only protects **Keycloak-local password authentication**. knobby.io is federated-only (no local user passwords — auth happens at Google/Microsoft/GitHub), so this is near-inert for the normal login path. Enable it anyway to protect the admin console and any future local accounts, but it is not load-bearing for federated users.
+
+**Realm settings → Security defenses → Headers:**
+- **X-Frame-Options: `SAMEORIGIN`** (the default — do **not** force `DENY`). ⚠️ **This header governs framing of *Keycloak's own* login/consent pages, NOT the knobby.io app.** Whether the knobby.io app can be embedded in an iframe (relevant to the future browser-plugin work) is controlled entirely by the **app server's** `Content-Security-Policy: frame-ancestors` / `X-Frame-Options`, set in the .NET app — not here. `SAMEORIGIN` is chosen over `DENY` because it is the more compatible default and avoids breaking any Keycloak-hosted iframe mechanism (e.g. the OIDC check-session iframe), while still preventing cross-origin embedding of Keycloak pages, which have no legitimate reason to be framed. knobby.io uses back-channel logout, not the check-session iframe, so either value is functionally safe — default `SAMEORIGIN` is the deliberate choice.
+- **Content-Security-Policy:** leave Keycloak's default (`frame-src 'self'; frame-ancestors 'self'; object-src 'none';`).
+- HSTS (`Strict-Transport-Security`): Max Age **31536000** in prod; skip for local/test.
+
+**Organizations:** the realm does not use Keycloak Organizations (per Invariant 8). If created without Organizations enabled, there is **no Organizations toggle in Realm settings — that absence is expected, not a misconfiguration.** ⚠️ **26.6.0 caveat:** the 26.6.0 migration may auto-inject a `Conditional Organization` sub-flow into custom browser flows. Confirm this sub-flow is set to **Disabled** (not Conditional) in `browser-federated-only` and any other custom flow — see §11.6 flow structure. Leaving it Conditional while Organizations is unused can add an unwanted step to the login flow.
 
 ### 11.3 Create OIDC Web Client
 
@@ -884,6 +940,8 @@ Execute in **dev first**, then **prod**. Test setup per §11.15 on each develope
 Keycloak's default token output doesn't include the claims §8.3 specifies. Three mappers must be added to the client's dedicated client scope (`knobby-{env}-web-dedicated`) to produce the expected token shape.
 
 **Navigation:** Clients → `knobby-{env}-web` → Client scopes tab → click `knobby-{env}-web-dedicated` → Mappers tab → Add mapper → By configuration.
+
+**On the "Add to lightweight access token" toggle (all mappers): leave OFF.** The lightweight access token is a Keycloak feature (per-client, off by default) that strips most claims from the access token to keep it small. The web client does **not** use lightweight access tokens, so this toggle is inert — Off is correct. You would only turn it On for these mappers *if* you deliberately switched the client to lightweight tokens; otherwise the `idp` / `microsoftTenantId` / `googleHd` / audience claims the app depends on would be dropped from the token. Every mapper below uses **Add to access token = On, Add to lightweight access token = Off.**
 
 **Mapper 1 — Audience** (fixes `aud=account` quirk; without this, the access_token's audience won't include the client and ASP.NET Core JWT validation will reject it):
 
@@ -1035,6 +1093,24 @@ Open `browser-federated-only` → Action menu → Bind flow → Browser flow →
 ### 11.7 Configure Required Actions
 
 All actions → Default Action Off (Configure OTP, Update Password, Update Profile, Verify Email, Verify Profile, Terms and Conditions, Delete Account, etc.).
+
+### 11.7a IdP settings page — what to change vs. leave at defaults
+
+Each IdP's **Settings** page (Google §11.8, Microsoft §11.9, GitHub §11.10, SAML §11.11) exposes ~20 toggles. **Leave the vast majority at their defaults.** Only the following are load-bearing for knobby.io's design — several already default to the right value, and are called out here so they aren't flipped off by accident:
+
+| Setting | Value | Why it matters |
+|---|---|---|
+| **First login flow override** | `first-broker-login-no-prompt` | The custom auto-linking flow (§11.4). Must be set on **every** IdP, or a returning federated user hits the default review-profile prompts. Smoke-verified per IdP. |
+| **Sync mode** | `Force` | Re-syncs mapped attributes (`hd`→`googleHd`, `tid`→`microsoftTenantId`, profile fields) from the IdP on **every** login, keeping them current. `Import` (first-login-only) would let `microsoftTenantId`/`googleHd` go stale if a user's tenant/domain ever changed. The IdP is the source of truth (thin-broker model), so `Force` is correct — with the implication that manual edits to those user attributes in Keycloak are overwritten on next login. |
+| **Trust Email** | `On` (Google, Microsoft) | Trusts the IdP's `email_verified` and skips Keycloak-side verification. This is what makes email-based auto-linking (§11.4) work without a verification round-trip. **Deliberately On for Google/Microsoft** (authoritative for their users' email). Reconsider per-IdP only for a *low-trust* generic OIDC provider. |
+| **Accepts `prompt=none` forward from client** | `On` | Lets the silent-SSO check pass through to the upstream IdP. The MCP consent flow and the app's `prompt=none` re-auth in the callback depend on it. |
+| **Send `id_token_hint` in logout requests** | `On` | Correct logout behavior against the upstream IdP. |
+
+**Leave at defaults (do not change):** Store tokens / Stored tokens readable (Off), Access Token is JWT (Off), Disable user info / Disable nonce / Disable type claim check (Off), Account linking only (Off), Hide on login page (Off), Case-sensitive username (Off), Verify essential claim (Off), Supports client assertions (Off), Post login flow (None), Pass login_hint / max_age (Off), Allowed clock skew (0 unless you observe time-sync issues).
+
+⚠️ **The two things that silently break claims if wrong** — verify both on each IdP:
+1. **Sync mode = Force** (above), and
+2. the **attribute-importer mappers on the Mappers tab** (`hd`→`googleHd` §11.8, `tid`→`microsoftTenantId` §11.9). These live on a *separate* Mappers tab from the Settings page. If either the mapper is missing or sync mode isn't Force, the `googleHd`/`microsoftTenantId` claims never populate — and then the §8.3.1 cross-IdP gating has nothing to gate on. Fails silently (no error, just absent claims).
 
 ### 11.8 Add Google as IdP
 
