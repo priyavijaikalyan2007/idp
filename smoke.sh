@@ -41,7 +41,7 @@
 #   13. PKCE enforcement (behavioral) (§8.2)
 #
 #   MCP-readiness (Tests 14-29): designed to go from red→green progressively
-#   as you complete the §16.11 setup phases:
+#   as you complete the MCP setup (SETUP GUIDE Section D; design rationale in PRD §16):
 #   14. MCP Authenticator SPI loaded (§16.8)
 #   15. browser-mcp-tenant-pick auth flow exists (§16.8.1)
 #   16. Six atomic knobby:* Client Scopes exist (§16.3.6)
@@ -161,6 +161,16 @@ REALM="${REALM:-knobby-${KNOBBY_ENV}}"
 ADMIN_CLIENT_ID="${ADMIN_CLIENT_ID:-knobby-${KNOBBY_ENV}-admin-api}"
 WEB_CLIENT_ID="${WEB_CLIENT_ID:-knobby-${KNOBBY_ENV}-web}"
 WEB_REDIRECT_URI="${WEB_REDIRECT_URI:-$DEFAULT_WEB_REDIRECT_URI}"
+# Guard: a WEB_REDIRECT_URI override that differs from the env's default is a
+# common footgun - it leaks into BOTH the "Web client redirect URI" check and the
+# PKCE-enforcement probe, producing confusing 'invalid_redirect_uri' failures that
+# look like a realm misconfiguration but are just a bad env var. Flag it early.
+if [[ "$WEB_REDIRECT_URI" != "$DEFAULT_WEB_REDIRECT_URI" ]]; then
+    echo -e "  ${YELLOW}NOTE:${RESET} WEB_REDIRECT_URI is overridden to '${WEB_REDIRECT_URI}'"
+    echo -e "        (default for env '${KNOBBY_ENV}' is '${DEFAULT_WEB_REDIRECT_URI}')."
+    echo -e "        If the redirect-URI or PKCE tests fail with 'invalid_redirect_uri',"
+    echo -e "        run 'unset WEB_REDIRECT_URI' - the realm is likely fine."
+fi
 
 # ----- MCP-related defaults (per PRD §16) -----
 # These are constants in §10.8 — exposed as overridable in case the user has
@@ -222,6 +232,10 @@ echo -e "  ${DIM}WEB_REDIRECT_URI:${RESET}    ${WEB_REDIRECT_URI}"
 echo -e "  ${DIM}ADMIN_CLIENT_SECRET:${RESET} ${ADMIN_CLIENT_SECRET:0:6}... (truncated)"
 if [[ "$KNOBBY_ENV" != "test" && -n "${GCP_PROJECT:-}" ]]; then
     echo -e "  ${DIM}GCP_PROJECT:${RESET}         ${GCP_PROJECT}"
+fi
+# Optional observability flags (Test 19d - informational only, never fails):
+if [[ "${OBSERVABILITY_EXPECTED:-false}" == "true" || -n "${KC_MGMT_URL:-}" ]]; then
+    echo -e "  ${DIM}OBSERVABILITY_EXPECTED:${RESET} ${OBSERVABILITY_EXPECTED:-false}   ${DIM}KC_MGMT_URL:${RESET} ${KC_MGMT_URL:-unset}"
 fi
 
 # ----- print authentication mechanism summary -----
@@ -1298,7 +1312,7 @@ else
     else
         MCP_FLOW_ID=$(echo "$FLOWS_BODY" | jq -r --arg name "$MCP_FLOW_NAME" '.[] | select(.alias == $name) | .id' 2>/dev/null || true)
         if [[ -z "$MCP_FLOW_ID" ]]; then
-            record_fail "MCP auth flow exists" "flow '${MCP_FLOW_NAME}' not found - create it by duplicating browser-federated-only and appending the SPI Authenticator (§16.11 step 8)"
+            record_fail "MCP auth flow exists" "flow '${MCP_FLOW_NAME}' not found - create it per SETUP GUIDE D.2 (design: PRD §16.11)"
         else
             # Check the flow has the SPI Authenticator as a step
             FLOW_EXECS=$(curl -s \
@@ -1348,7 +1362,7 @@ else
         if [[ ${#MISSING_SCOPES[@]} -eq 0 && ${#MISCONFIGURED_SCOPES[@]} -eq 0 ]]; then
             record_pass "MCP atomic scopes" "all 6 scopes present and correctly configured"
         elif [[ ${#MISSING_SCOPES[@]} -gt 0 ]]; then
-            record_fail "MCP atomic scopes" "missing: ${MISSING_SCOPES[*]} - create per §16.11 step 9"
+            record_fail "MCP atomic scopes" "missing: ${MISSING_SCOPES[*]} - create per SETUP GUIDE D.3 (design: PRD §16.11)"
         else
             record_fail "MCP atomic scopes" "misconfigured: ${MISCONFIGURED_SCOPES[*]}"
         fi
@@ -1366,13 +1380,13 @@ else
         jq -r --arg name "$MCP_DEFAULT_SCOPE" '.[] | select(.name == $name)' 2>/dev/null || true)
 
     if [[ -z "$MCP_DEFAULT_DATA" ]]; then
-        record_fail "mcp-default scope" "Client Scope '${MCP_DEFAULT_SCOPE}' not found - create per §16.11 step 10"
+        record_fail "mcp-default scope" "Client Scope '${MCP_DEFAULT_SCOPE}' not found - create per SETUP GUIDE D.4 (design: PRD §16.11)"
     else
         MCP_DEFAULT_ID=$(echo "$MCP_DEFAULT_DATA" | jq -r '.id')
         AUDIENCE_MAPPER=$(echo "$MCP_DEFAULT_DATA" | jq -r --arg aud "$MCP_AUDIENCE" \
             '.protocolMappers[]? | select(.protocolMapper == "oidc-audience-mapper") | select(.config["included.custom.audience"] == $aud) | .id' 2>/dev/null || true)
         if [[ -z "$AUDIENCE_MAPPER" ]]; then
-            record_fail "mcp-default scope" "scope exists but no Audience mapper sets aud='${MCP_AUDIENCE}' - add per §16.11 step 10"
+            record_fail "mcp-default scope" "scope exists but no Audience mapper sets aud='${MCP_AUDIENCE}' - add the audience mapper on the mcp-default scope per SETUP GUIDE D.4 (design: PRD §16.6)"
         else
             record_pass "mcp-default scope" "Client Scope present with audience mapper for ${MCP_AUDIENCE}"
         fi
@@ -1382,7 +1396,7 @@ else
         if [[ -n "$TENANT_MAPPER" ]]; then
             record_pass "mcp-default tenant claim mapper" "User Session Note mapper for tenant claim present"
         else
-            record_fail "mcp-default tenant claim mapper" "no User Session Note mapper for 'knobby_tenant_id' → 'tenant' claim - add per §16.8.4 table"
+            record_fail "mcp-default tenant claim mapper" "no User Session Note mapper for 'knobby_tenant_id' → 'tenant' claim - add per SETUP GUIDE D.4 (design: PRD §16.8.4)"
         fi
     fi
 fi
@@ -1596,6 +1610,65 @@ else
     fi
 fi
 
+# ----- test 19d: observability posture (INFORMATIONAL - never hard-fails) -----
+# Observability (setup guide §A.12) is optional operational hardening, not a
+# correctness requirement, so this section only ever emits PASS or SKIP, never
+# FAIL. Set OBSERVABILITY_EXPECTED=true once you've wired telemetry to turn the
+# "not configured" notes from neutral skips into louder reminders.
+#
+# IMPORTANT LIMITATION: /metrics lives on the management port (9000), which is
+# NOT reachable from where this smoke test runs (Cloud Run doesn't map it; see
+# §A.12.0). So this test CANNOT scrape metrics to prove they flow - that
+# verification only happens in Grafana Cloud (§A.12.2.3). What it can check is
+# (a) configuration intent surfaced via the Admin API / env, and (b) that the
+# token endpoint - the thing whose 500s the pool/prepared-statement metrics
+# would have caught - is currently stable (already covered by Test 4b).
+section "Test 19d: Observability posture (informational, §A.12)"
+
+OBSERVABILITY_EXPECTED="${OBSERVABILITY_EXPECTED:-false}"
+
+# (a) Health/metrics enablement intent. These are build/runtime flags on the
+# container (KC_HEALTH_ENABLED / KC_METRICS_ENABLED), not realm settings, so we
+# can only read them if they were passed into this test's environment. Report
+# what we can see; never fail.
+if [[ -n "${KC_METRICS_ENABLED:-}" || -n "${KC_HEALTH_ENABLED:-}" ]]; then
+    record_pass "Metrics/health flags (env-visible)" "KC_METRICS_ENABLED=${KC_METRICS_ENABLED:-unset}, KC_HEALTH_ENABLED=${KC_HEALTH_ENABLED:-unset}"
+else
+    record_skip "Metrics/health flags" "not visible in this test's env (they live on the Keycloak container). Confirm KC_METRICS_ENABLED=true / KC_HEALTH_ENABLED=true on the deployment. /metrics is on port 9000 and not reachable from here by design (§A.12.0) - verify data flow in Grafana Cloud (§A.12.2.3), not here."
+fi
+
+# (b) Optional: if a management URL is reachable from where the test runs (e.g.
+# post-Hetzner with a localhost/private scrape), probe /health/ready. Skipped by
+# default because on Cloud Run port 9000 is unreachable.
+if [[ -n "${KC_MGMT_URL:-}" ]]; then
+    MGMT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${KC_MGMT_URL%/}/health/ready" 2>/dev/null || echo "000")
+    if [[ "$MGMT_STATUS" == "200" ]]; then
+        record_pass "Management /health/ready" "200 (reachable at KC_MGMT_URL)"
+        METRICS_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${KC_MGMT_URL%/}/metrics" 2>/dev/null || echo "000")
+        [[ "$METRICS_STATUS" == "200" ]] \
+            && record_pass "Management /metrics" "200 (Prometheus metrics exposed)" \
+            || record_skip "Management /metrics" "returned ${METRICS_STATUS} at KC_MGMT_URL - enable KC_METRICS_ENABLED=true if you expect metrics"
+    else
+        record_skip "Management /health/ready" "KC_MGMT_URL set but /health/ready returned ${MGMT_STATUS} - check the URL/port"
+    fi
+else
+    record_skip "Management endpoint probe" "KC_MGMT_URL not set (expected on Cloud Run - port 9000 isn't externally reachable). Set KC_MGMT_URL to a reachable management base (e.g. http://localhost:9000) on a VM/VPC to enable this probe."
+fi
+
+# (c) Grafana Cloud wiring reminder - purely a checklist nudge, driven by the
+# OBSERVABILITY_EXPECTED flag. We can't see the container's telemetry env from
+# here, so this is a reminder, not a verification.
+if [[ "$OBSERVABILITY_EXPECTED" == "true" ]]; then
+    record_skip "Telemetry export (Grafana Cloud)" "OBSERVABILITY_EXPECTED=true - confirm the telemetry env is set on the container (KC_TELEMETRY_ENDPOINT / protocol / metrics header per §A.12.2.2) and that data appears in Grafana Explore (§A.12.2.3). This test can't see the container's telemetry env or scrape :9000, so verify in Grafana, not here."
+else
+    record_skip "Telemetry export (Grafana Cloud)" "not expected yet (OBSERVABILITY_EXPECTED unset). When you wire Grafana Cloud per §A.12, set OBSERVABILITY_EXPECTED=true to turn this into a live reminder. Actual data-flow is verified in Grafana Explore (§A.12.2.3), not in this suite."
+fi
+
+# (d) Reinforce the one thing this suite CAN meaningfully assert about
+# observability health: token-endpoint stability (Test 4b) is the live proxy for
+# the pool/prepared-statement issues that metrics would surface.
+record_skip "Observability note" "The pool-exhaustion / prepared-statement incidents that motivated metrics are caught live by Test 4b (Token endpoint stability). If 4b is green, the specific failure that observability would have alerted on is currently absent."
+
 # ----- test 20: HMAC handoff key in Secret Manager (prod/dev only) -----
 section "Test 20: HMAC handoff key in GCP Secret Manager (§16.8.5)"
 
@@ -1612,7 +1685,7 @@ else
             record_fail "HMAC handoff key" "secret '${MCP_HANDOFF_KEY_SECRET}' exists but no readable version"
         fi
     else
-        record_fail "HMAC handoff key" "secret '${MCP_HANDOFF_KEY_SECRET}' not found - create per §16.11 step 12: openssl rand -base64 32 | gcloud secrets create ${MCP_HANDOFF_KEY_SECRET} --data-file=-"
+        record_fail "HMAC handoff key" "secret '${MCP_HANDOFF_KEY_SECRET}' not found - create per SETUP GUIDE D.11 (design: PRD §16.11): openssl rand -base64 32 | gcloud secrets create ${MCP_HANDOFF_KEY_SECRET} --data-file=-"
     fi
 fi
 
@@ -1654,7 +1727,7 @@ DCRBODY
         fi
     else
         DCR_ERROR=$(echo "$DCR_BODY" | jq -r '.error_description // .error // .' 2>/dev/null | head -c 200)
-        record_fail "DCR endpoint success" "HTTP ${DCR_STATUS} - ${DCR_ERROR} (configure mcp-dcr-policy + scopes per §16.11)"
+        record_fail "DCR endpoint success" "HTTP ${DCR_STATUS} - ${DCR_ERROR} (configure per SETUP GUIDE D.5/D.6 client policies; design: PRD §16.11)"
     fi
 fi
 
@@ -1684,7 +1757,7 @@ else
         if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
             curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
         fi
-        record_fail "DCR rejects HTTP redirect" "non-HTTPS redirect was ACCEPTED (HTTP 201) - configure allowed-redirect-uris policy to require HTTPS (§16.4)"
+        record_fail "DCR rejects HTTP redirect" "non-HTTPS redirect was ACCEPTED (HTTP 201) - fix the mcp-hardening client policy per SETUP GUIDE D.6 (design: PRD §16.4)"
     else
         record_fail "DCR rejects HTTP redirect" "unexpected HTTP ${HTTP_REDIRECT_STATUS}"
     fi
@@ -1713,7 +1786,7 @@ else
         if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
             curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
         fi
-        record_fail "DCR rejects bad grants" "password grant was ACCEPTED (HTTP 201) - configure allowed grant types policy to disallow password/implicit (§16.4)"
+        record_fail "DCR rejects bad grants" "password grant was ACCEPTED (HTTP 201) - the mcp-hardening client policy is not restricting DCR grant types. Fix in SETUP GUIDE D.6 (client policies), not a realm flow (design: PRD §16.4)"
     else
         record_fail "DCR rejects bad grants" "unexpected HTTP ${BAD_GRANT_STATUS}"
     fi
@@ -1743,7 +1816,7 @@ else
         if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
             curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
         fi
-        record_fail "DCR rejects bad scopes" "realm-admin scope was ACCEPTED (HTTP 201) - configure allowed-client-scopes policy to whitelist only knobby:* + openid + offline_access (§16.4)"
+        record_fail "DCR rejects bad scopes" "realm-admin scope was ACCEPTED (HTTP 201) - configure the Allowed Client Scopes policy per SETUP GUIDE D.5 (design: PRD §16.4)"
     else
         record_fail "DCR rejects bad scopes" "unexpected HTTP ${BAD_SCOPE_STATUS}"
     fi
@@ -1780,9 +1853,9 @@ else
 
         # Check knobby:admin is NOT in default scopes (must be optional / explicit)
         if echo "$DEFAULT_SCOPES" | grep -qx "knobby:admin"; then
-            record_fail "DCR'd client shape" "knobby:admin is incorrectly assigned as default scope - it must be optional (§16.4 default scopes column)"
+            record_fail "DCR'd client shape" "knobby:admin is incorrectly assigned as default scope - it must be optional (SETUP GUIDE D.7 / KNOBBY_WEB_MCP_ENDPOINTS.md §7.2.2; design: PRD §16.4)"
         elif [[ ${#MISSING_DEFAULTS[@]} -gt 0 ]]; then
-            record_fail "DCR'd client shape" "default scopes missing: ${MISSING_DEFAULTS[*]} - configure mcp-dcr-policy default scopes (§16.4)"
+            record_fail "DCR'd client shape" "default scopes missing: ${MISSING_DEFAULTS[*]} - EXPECTED until Knobby web runs assignMcpScopes() per KNOBBY_WEB_MCP_ENDPOINTS.md §7.2.2 (Option B: scopes assigned per-client by the app, NOT realm-default). Not a console fix."
         else
             record_pass "DCR'd client shape - default scopes" "Author bundle + mcp-default present; knobby:admin correctly optional"
         fi
@@ -1873,11 +1946,11 @@ else
     if [[ "$KNOBBY_ENV" == "test" ]]; then
         record_pass "realm SSL requirement" "skipped for test env (HTTP permitted for local dev; sslRequired=${SSL_REQUIRED})"
     elif [[ "$SSL_REQUIRED" == "all" ]]; then
-        record_pass "realm SSL requirement" "sslRequired=all (per §16.11 step 13)"
+        record_pass "realm SSL requirement" "sslRequired=all"
     elif [[ "$SSL_REQUIRED" == "external" ]]; then
-        record_fail "realm SSL requirement" "sslRequired='external' - HTTPS only enforced for non-loopback; for prod/dev should be 'all' (§16.11 step 13)"
+        record_fail "realm SSL requirement" "sslRequired='external' - HTTPS only enforced for non-loopback; for prod/dev should be 'all' (Realm settings → General → Require SSL; SETUP GUIDE §C)"
     else
-        record_fail "realm SSL requirement" "sslRequired='${SSL_REQUIRED}' - should be 'all' (§16.11 step 13)"
+        record_fail "realm SSL requirement" "sslRequired='${SSL_REQUIRED}' - should be 'all' (Realm settings → General → Require SSL; SETUP GUIDE §C)"
     fi
     fi
 fi
