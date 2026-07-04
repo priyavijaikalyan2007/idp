@@ -1207,6 +1207,7 @@ Clients → `account-console` Enabled Off; `account` Enabled Off. Verify URLs re
    manage-users
    view-realm
    view-clients
+   manage-clients
    query-users
    query-groups
    view-identity-providers
@@ -1216,11 +1217,12 @@ Clients → `account-console` Enabled Off; `account` Enabled Off. Verify URLs re
 3. **Credentials tab:** copy secret to `yourapp-keycloak-admin-api-client-secret-{env}`.
 
 **Notes on the role list:**
-- This list has evolved across PRD revisions. If updating an existing service account from an earlier PRD version, re-check that all the above roles are assigned (in particular `view-identity-providers`, `manage-identity-providers`, and `view-clients` were added in later revisions).
-- `view-clients` is read-only and is needed for: (a) the smoke test's client configuration validation (Tests 11–12), (b) future OpenTofu drift detection (`tofu plan` needs to read current client state), (c) general realm administration via the Admin API. It does not grant write access; the corresponding write role `manage-clients` is intentionally not assigned because yourapp.com's backend does not manage clients at runtime — clients are static IaC.
+- This list has evolved across PRD revisions. If updating an existing service account from an earlier PRD version, re-check that all the above roles are assigned (in particular `view-identity-providers`, `manage-identity-providers`, `view-clients`, and — as of the Option B decision — `manage-clients` were added in later revisions).
+- `view-clients` (read-only) is needed for the smoke test's client-configuration validation (Tests 11–12), OpenTofu drift detection, and general realm administration.
+- ⚠️ **`manage-clients` IS required — this reverses an earlier PRD stance.** Earlier revisions said yourapp.com "does not manage clients at runtime — clients are static IaC" and forbade `manage-clients`. **The Option B decision changed that premise:** yourapp.com's `/mcp/consent` backend now performs runtime client writes on DCR'd MCP clients — assigning scopes (`assignMcpScopes`) and binding the browser flow (`bindBrowserFlow`), per `YOURAPP_WEB_MCP_ENDPOINTS.md` §7.5. Those Admin API calls require `manage-clients` or they 403. It is scoped to client writes only — still far narrower than `realm-admin`. The static-IaC clients (web, admin-api) remain IaC-managed; `manage-clients` exists for the *DCR'd* clients, which are inherently runtime-created and cannot be IaC.
 - **Do not assign** `view-organizations` or `manage-organizations` — these role names do not exist as standalone client roles in current Keycloak 26.x. Earlier PRD revisions listed them in error.
 - **Do not assign** `manage-realm` — not needed without Keycloak Organizations (which we don't use per §5.1 / Invariant 8). If a 403 surfaces from any Admin API call yourapp.com makes, the fix is to identify the specific missing role from the realm-management role list, not to escalate to `manage-realm`.
-- **Do not assign** `manage-clients`, `create-client`, or `realm-admin` — over-privileged for our use case; the smoke test Test 12 will warn if any of these are present.
+- **Do not assign** `create-client` or `realm-admin` — over-privileged. `create-client` isn't needed (DCR clients self-register via the registration endpoint, not via the admin API); `realm-admin` is the full composite superuser role. Smoke Test 12 warns if either is present.
 
 ### 11.14 Apply the yourapp Theme
 
@@ -1337,7 +1339,7 @@ Automated coverage:
 - Test 9: GCP Secrets Manager — every expected secret name from §10.8 exists; warning on misnamed orphans
 - Test 10: Microsoft Entra app registration — displayName matches convention, signInAudience is multi-tenant + MSA, redirect URI registered, publisherDomain is `yourapp.com`, Graph API permissions present, client secret not expired (warn within 30 days), secret description follows convention
 - Test 11: `yourapp-{env}-web` client configuration — protocol/confidentiality/flow flags per §8.2, PKCE method = S256, front-channel + back-channel logout configured, expected redirect URI registered
-- Test 12: `yourapp-{env}-admin-api` client configuration — flow flags (service accounts on; all interactive flows off), service-account user present, exact realm-management role list assigned per §11.13 (no missing roles, no over-privileged roles like `realm-admin`/`manage-realm`/`manage-clients`/`create-client`)
+- Test 12: `yourapp-{env}-admin-api` client configuration — flow flags (service accounts on; all interactive flows off), service-account user present, exact realm-management role list assigned per §11.13 (all required roles including `manage-clients` for Option B §7.5; no over-privileged roles like `realm-admin`/`manage-realm`/`create-client`)
 - Test 13: PKCE enforcement (behavioral) — sends auth request without `code_challenge`, verifies Keycloak rejects it with the expected `error=invalid_request` referencing `code_challenge_method`; catches the case where the PKCE attribute is set in config but not actually enforced
 
 Manual coverage:
