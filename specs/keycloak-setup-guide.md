@@ -857,11 +857,15 @@ Settings:
 **The real control — per-client "Direct access grants" capability:**
 - **Clients → `yourapp-{env}-web` → Settings → Capability config → "Direct access grants" → Off.** (Already off — smoke Test 11 verifies `directAccessGrantsEnabled=false`.)
 - **Clients → `yourapp-{env}-admin-api` → same → Off.** (Already off — service account uses client-credentials, not ROPC.)
-- **DCR'd MCP clients:** prevented from enabling ROPC by the `mcp-hardening` client policy (secure-response-type / grant restrictions), **not** by any realm flow. This is what smoke **Test 23 ("DCR rejects bad grants")** exercises — a DCR registration requesting the password grant should be rejected. If Test 23 fails ("password grant ACCEPTED"), fix the **client policy** (D.6), not a realm flow.
 
-**Optional belt-and-suspenders (realm-wide):** if you want a hard guarantee that *no* client anywhere can ever use ROPC, you can neuter the realm's `direct grant` flow — Authentication → Flows → `direct grant` → set its steps to **Disabled**, or delete the flow's executions so it can never succeed. This is heavier-handed and would block any future service client that legitimately needs direct grants, so it's not recommended unless you have a specific reason. The per-client toggles above are the correct primary control.
+⚠️ **DCR'd MCP clients — important nuance.** There is **no standard Keycloak client-policy executor that rejects a DCR registration for requesting `grant_types:["password"]`.** The `mcp-hardening` executors (pkce-enforcer, secure-response-type, secure-redirect-uri, etc.) constrain the authorize/response-type behavior, **not** which grant types a client may register with. So a DCR registration asking for the password grant will typically return **201** — that is *not* a misconfiguration of your profile; there is simply no built-in rule it violates. **Do not expect the client policy to reject it.**
 
-**Verify:** `./smoke.sh` → `Web client Direct Access Grants` and `Admin API Direct Access Grants` both `disabled` (Test 11); `DCR rejects bad grants` green (Test 23). If Test 23 is red, the fix is in the client policy (D.6), not here.
+The enforceable protection for DCR clients is to **neuter the realm's Direct Grant flow**, so that even a client registered with the password grant cannot use it to obtain a token:
+
+**Neuter the Direct Grant flow (the real ROPC control for federated-only realms):**
+- **Authentication → Flows → `direct grant`** → set its executions to **Disabled** (or delete them) so the flow can never succeed. Since yourapp.com is federated-only (no local passwords — Invariant 1), ROPC has no legitimate use for *any* client, so disabling it realm-wide is correct here, not just belt-and-suspenders. (The earlier caution about blocking "future service clients that need direct grants" doesn't apply to a federated-only realm — there are no passwords to grant against.)
+
+**Verify:** `./smoke.sh` → `Web client Direct Access Grants` / `Admin API Direct Access Grants` both `disabled` (Test 11); **`Password grant unusable (DCR)` green (Test 23)**. Test 23 registers a DCR client requesting the password grant (expects 201 — see nuance above) and then confirms `grant_type=password` **yields no token**. If Test 23 fails ("a DCR client OBTAINED an access token via password"), the fix is here — neuter the Direct Grant flow — **not** the client policy (which cannot enforce this).
 
 ## D.11 Verify HMAC handoff key is mounted
 
@@ -971,7 +975,22 @@ All §E.1 + §E.2 checked → realm-side MCP setup complete. Proceed to Auth0 �
 
 # SECTION F: Deferred DCR Hardening
 
-These two anonymous Client Registration Policies were removed (or never added) during initial v1 setup to unblock development. Neither is a launch-blocker at friends-of-founders scale where you control the whole surface. Both should be revisited before the MCP surface is exposed to untrusted third-party clients (roughly: before public GA, or before anyone you don't know registers clients against prod).
+> **Source of truth for all deferrals:** `DEFERRED_ITEMS.md` — the consolidated register with triggers and blast-radius for every consciously-postponed item across all the auth docs. Review it before public GA. This section covers the *how* for the DCR-specific rows (B1–B3); the register says *whether/when/what-if-forgotten*.
+
+These Client Registration Policies were removed (or never added) during initial v1 setup to unblock development. None is a launch-blocker at friends-of-founders scale where you control the whole surface. All should be revisited before the MCP surface is exposed to untrusted third-party clients (roughly: before public GA, or before anyone you don't know registers clients against prod). Build them as **one hardening pass**, not piecemeal.
+
+**The set (register rows B1–B3):**
+- **F.1 Trusted Hosts** (register B2) — constrain redirect-URI hosts.
+- **F.2 Allowed Protocol Mapper Types** (register B3) — constrain self-attached mappers.
+- **F.3 Custom `AllowedGrantTypesPolicy` SPI** (register B1) — reject disallowed grant types at registration. See below.
+
+## F.0 Custom grant-types registration policy (register B1)
+
+**What:** a custom `ClientRegistrationPolicy` SPI provider that rejects a DCR registration requesting disallowed grant types (password/implicit/client_credentials on public clients) with a 400 — *fail-at-registration* instead of the current *fail-at-token-time*. Full spec in `KEYCLOAK_MCP_SPI_DESIGN.md` §13a.1 (interface, packaging, allowed-grants set).
+
+**Important — this is NOT currently a security gap.** ROPC is already blocked by the disabled Direct Grant flow (D.10, verified by smoke Test 23). This SPI adds cleaner rejection ergonomics and broader registration-time enforcement (auth method, response types), and is the right home for the whole registration-time grant posture. It's deferred because (a) the existing control already provides the security property, and (b) it's a second SPI, doubling Keycloak-version-coupling maintenance.
+
+**Trigger:** the DCR-hardening milestone — build it alongside F.1 and F.2. When deployed, smoke Test 23 will flip from "registered 201 but ROPC unusable" to "registration rejected outright" automatically (no test change needed).
 
 ## F.1 Trusted Hosts — when and how to re-add
 
