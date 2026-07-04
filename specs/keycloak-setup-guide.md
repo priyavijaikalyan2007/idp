@@ -112,9 +112,57 @@ jdbc:postgresql://<region>.pooler.supabase.com:5432/postgres?sslmode=require&pre
 
 ⚠️ **Do not use the direct connection on Cloud Run.** `db.<ref>.supabase.co` is IPv6-only unless you buy Supabase's IPv4 add-on, and Cloud Run egresses IPv4-only unless you build Direct VPC egress on a dual-stack subnet (custom VPC + dual-stack subnet + egress routing + elevated cold-start latency — far too much for a low-traffic IdP). The session-mode pooler exists precisely to give you IPv4 reachability; use it.
 
-**Verify after deploy:** watch the Keycloak log during a login + a few minutes of clicking — no `prepared statement ... does not exist`, no `XA_RBROLLBACK`, no `500` on `/token`. Then `./smoke.sh` → the **Token endpoint stability** check (Test 4b) hammers `/token` 15× and passes only if there are zero intermittent 500s.
+### A.2.3.1 Connection pool sizing (the second half of the Supabase gotcha)
 
-**Dev/staging:** apply the identical `KC_DB_URL` (session pooler 5432 + `prepareThreshold=0`) when standing up `yourapp-dev` / `yourapp-staging`.
+> **Also observed in production (2026-07-04):** after switching to the session-mode pooler, Keycloak became **unusually slow** and scheduled tasks failed with `Acquisition timeout while waiting for new connection` (Agroal pool exhaustion). This is the *counterpart* to the prepared-statement issue — same root theme (Keycloak's pooling assumptions vs. Supabase's pooler), different symptom.
+
+**Why it happens.** Session-mode pooling holds one Supabase backend connection per Keycloak connection for the connection's whole lifetime. Keycloak's Agroal pool defaults to a **max size of 100**. Supabase's session pooler grants far fewer connections per project (tier-dependent, often ~15–30). So Agroal tries to open more connections than Supabase will grant; the excess block until they time out → `Acquisition timeout` → every request queues behind connection acquisition → slowness and failing scheduled tasks (`ClearExpiredEvents`, session purge).
+
+**Fix — cap Agroal below Supabase's pooler limit.** A single-instance IdP needs very few connections:
+```yaml
+- name: KC_DB_POOL_INITIAL_SIZE
+  value: "2"
+- name: KC_DB_POOL_MIN_SIZE
+  value: "2"
+- name: KC_DB_POOL_MAX_SIZE
+  value: "8"      # nano tier (Supabase pool size 15); leave ~half as headroom
+```
+
+**Supabase gives two limits — know which one binds.** *Pool size* (nano: **15**) = the pooler's connections to Postgres backends, **shared across everything through the pooler**. *Max client connections* (nano: **200**) = how many clients may connect to the pooler — generous, you won't hit it. **Keycloak is constrained by pool size (15), not max client connections.**
+
+⚠️ **Shared vs. dedicated project.** If yourapp.com's app and Keycloak use the **same** Supabase project, they **share** the 15 backend connections — budget both under 15 combined (give Keycloak ~5, the app the rest). If they're **separate** projects, Keycloak has its own 15 and can use ~8.
+
+> **yourapp-prod topology (confirmed):** the app and Keycloak are **separate Supabase projects** in the same account — app in **Mumbai (ap-south-1)**, Keycloak DB in **Singapore (asia-southeast-1)**. They therefore have **independent poolers and independent 15-connection budgets** — no sharing. `KC_DB_POOL_MAX_SIZE = 8` is correct for Keycloak's dedicated project; the app's connection budget is a separate concern against its own pooler. (Note the cross-region hop: Keycloak on Cloud Run reaching a Singapore DB adds some latency vs. co-locating them; fine at current scale, worth revisiting if DB latency ever shows up in login timing.)
+
+**Budget invariant (re-check whenever any variable changes):**
+> **(Keycloak instances) × `KC_DB_POOL_MAX_SIZE`  +  (app's total connections)  <  Supabase pool size**
+
+Violating it either way reproduces the failures you've seen: pool too big → `Acquisition timeout`; overcorrected → starvation under load. Re-check this inequality whenever you scale Keycloak horizontally, resize the Supabase tier, or migrate Keycloak off the pooler.
+
+**Scaling reference (so future resizing isn't a guessing game):**
+
+| Supabase tier | Pool size | KC instances | `KC_DB_POOL_MAX_SIZE` / instance | Notes |
+|---|---|---|---|---|
+| **Nano (current)** | 15 | 1 | **8** (5 if shared with app) | You are here |
+| Small | ~15–30 | 1 | 10–15 | Raise with pool size |
+| Medium | ~30–60 | 1–2 | 15–20 | 2 instances → each ≤ pool/2 + headroom |
+| Large / Pro | 60–200 | 2–3 | 20–30 | Σ(instances × max) < pool size |
+
+Rule of thumb: `KC_DB_POOL_MAX_SIZE` ≈ **50–66% of Supabase pool size** for a dedicated single-instance project; **divide the budget across instances** when scaling horizontally (each instance has its own independent pool).
+
+**After the Hetzner migration (direct connection):** this pooler-budget math changes entirely. A direct connection bypasses the pooler and counts against Postgres's raw `max_connections` (nano default ~60), not the pooler's 15 — so the caps become more generous, but you then budget against `max_connections`. Keep `KC_DB_POOL_MAX_SIZE` explicit regardless (don't fall back to Agroal's default of 100).
+
+**Symptom-to-cause quick reference for Keycloak-on-Supabase:**
+| Log signature | Cause | Fix |
+|---|---|---|
+| `prepared statement "S_NNN" does not exist` / `XA_RBROLLBACK` / 500 on `/token` | transaction-mode pooler (6543) | session pooler (5432) + `prepareThreshold=0` |
+| `Acquisition timeout while waiting for new connection` / slow responses / failing scheduled tasks | Agroal max pool > Supabase pooler cap | cap `KC_DB_POOL_MAX_SIZE` (~10) |
+
+**Verify after deploy:** watch the Keycloak log during a login + a few minutes of clicking — no `prepared statement ... does not exist`, no `XA_RBROLLBACK`, no `500` on `/token`, **and no `Acquisition timeout while waiting for new connection`**. Then `./smoke.sh` → the **Token endpoint stability** check (Test 4b) hammers `/token` 15× and passes only if there are zero intermittent 500s.
+
+**Events cleanup (related):** if event logging is enabled, set an **event expiration** (Realm settings → Events config, e.g. 7–14 days) so the events table doesn't grow unbounded. The `ClearExpiredEvents` scheduled task prunes it; if that task keeps failing (e.g. during pool starvation) the table grows and queries slow further — a compounding loop. Event logging itself does **not** cause pool-acquisition timeouts, but an unbounded events table adds avoidable DB load.
+
+**Dev/staging:** apply the identical `KC_DB_URL` (session pooler 5432 + `prepareThreshold=0`) **and** the Agroal pool caps when standing up `yourapp-dev` / `yourapp-staging`.
 
 **Future Hetzner migration:** when Keycloak moves to the Hetzner VM (planned, §Option B), the IPv6 limitation disappears — a VM can egress IPv6 — so the Supabase **direct** connection becomes viable there and bypasses the pooler entirely. Keep `prepareThreshold=0` regardless, and re-verify with the Token endpoint stability check after the move.
 
@@ -220,6 +268,133 @@ Triggers for Option B:
 - You add Elasticsearch or another service that doesn't fit Cloud Run.
 
 Migration when needed: export realms, stand up VM per Option B, import realms, repoint DNS. A couple of hours.
+
+## A.11 Keycloak behind Cloudflare (proxy gotchas)
+
+> **Observed in production (2026-07-04):** with `auth.yourapp.com` proxied through Cloudflare, the admin console spun forever on load and the smoke tests' admin-API calls returned HTML `429` pages (surfacing as `jq: parse error: Invalid numeric literal`). Same class of issue as the Supabase pooler — infrastructure *in front of* Keycloak breaking it in non-obvious ways.
+
+**Symptoms:**
+- Admin console (`keycloak.v2` SPA) hangs on load; browser console shows `rocket-loader.min.js` errors like *"preload ... credentials mode does not match"*.
+- Asset/API requests to `/resources/*` and `/admin/*` return **429**.
+- Smoke tests fail with non-JSON parse errors (an HTML 429/challenge page instead of realm JSON).
+
+**Causes and fixes** (Cloudflare dashboard, scoped to `auth.yourapp.com`):
+1. **Rocket Loader mangles the admin SPA.** Turn it **off** for `auth.yourapp.com` (Speed → Optimization, or a Configuration Rule scoped to the hostname). Rocket Loader rewrites/defers JS and breaks the module-preload the console relies on.
+2. **Rate-limit / Bot Fight rules 429 the console.** The admin console legitimately fires dozens of asset + API requests per second on load; a blanket per-IP rule throttles it. **Scope rate-limit rules away from `/admin/*` and `/resources/*`**, or raise the threshold, or restrict rules to the abuse-prone endpoints only (`/realms/*/clients-registrations/*`, `/realms/*/protocol/openid-connect/token`).
+3. **Auto Minify / other "optimizations"** — off for this hostname; Keycloak serves its own optimized assets.
+
+**Fastest confirmation:** set `auth.yourapp.com` to **DNS-only (grey cloud)** or enable Cloudflare **Development Mode**. If the console loads cleanly, Cloudflare is confirmed; re-enable the proxy with Rocket Loader off and rate-limits scoped.
+
+**Recommended posture for an IdP behind Cloudflare:** thin proxy — DNS proxy on (DDoS/TLS) but **Rocket Loader, Auto Minify, aggressive Bot Fight Mode OFF**, and rate-limits scoped narrowly to abuse-prone endpoints rather than blanket. Keycloak's admin console and asset pipeline don't tolerate Cloudflare's content optimizations. (yourapp-prod currently runs `auth.yourapp.com` **DNS-only** after this incident — the simplest safe posture pre-PMF.)
+
+## A.12 Observability — metrics into Grafana Cloud (or GCP)
+
+> **Status:** operational hardening, not launch-blocking. But the DB-pool metric alone would have turned two multi-session debugging incidents (prepared-statement 500s, pool exhaustion) into a single glance at a graph — so it earns its place early.
+
+### A.12.0 What Keycloak exposes, and the security model
+
+Enable via build/runtime flags (already set in the A.5 deploy: `KC_HEALTH_ENABLED=true`, `KC_METRICS_ENABLED=true`):
+- **`/metrics`** (Prometheus/Micrometer format) and **`/health/*`** are served on a **separate management port — 9000 by default**, NOT the main app port 8080. This isolation is deliberate (Keycloak docs: exposing metrics on the main port is "not recommended for security reasons").
+- To also break down user-event metrics, add **`--event-metrics-user-enabled=true`** (fully supported since 26.2), optionally **`--event-metrics-user-tags=realm,idp,clientId`** to tag by client/IdP (only for low client/IdP counts — it increases memory + monitoring cardinality).
+- For HTTP latency heatmaps, add **`http-metrics-histograms-enabled=true`**.
+
+**🔒 Security of `/metrics` — your instinct is correct.** On **Cloud Run, port 9000 is not mapped** (Cloud Run routes only the single `--port=8080` you configure), so `/metrics` and `/health` are **unreachable from the internet** — no auth needed on them because nothing external can route to them. This is why:
+- **You do NOT expose 9000 publicly.** Leave it unmapped. Never put `auth.yourapp.com/metrics` on the public hostname.
+- **On Cloud Run's single-exposed-port model, a pull/scrape from outside the container can't reach port 9000** — so scrape-based options (sidecar, cron-scrape) either run *inside* the container's network namespace (sidecar) or don't work (external cron). Only **push** (Keycloak dials out) works cleanly on Cloud Run without a co-located scraper. This is a *current-platform* constraint, not an architectural verdict.
+- **Target-state (VPC) note:** the intended future architecture — all containers, DBs, and sidecars inside a VPC with only load-balancer ports internet-routable — makes a **private scrape the *right* model**: a collector on the private network scrapes `:9000` over private networking, nothing is public, and the LB exposes only what you choose. So the scrape/sidecar paths below aren't wrong; they're simply not reachable on Cloud Run's single-port model *today*. Plan for private scrape once the VPC exists.
+- **Post-Hetzner (interim):** on the VM, bind 9000 to `localhost` only (`http-management-host=127.0.0.1`) or firewall it, so a local scraper (Alloy/OTel collector) can reach it but the internet cannot.
+
+### A.12.1 Three export paths — pick by where you run and what you'll pay
+
+| Path | How | Cost | Works on Cloud Run? | Best when |
+|---|---|---|---|---|
+| **Direct OTLP push** | Keycloak → Grafana Cloud OTLP endpoint, no collector | $0 extra | ✅ Yes (push, dials out) | **Recommended now** — single container, free Grafana Cloud |
+| **Sidecar collector** | Alloy/OTel sidecar scrapes `:9000`, remote-writes | ~$15–20/mo (always-on sidecar) | ✅ Yes | Later — when you run several containers and one collector serves all |
+| **Cron-scrape** | Scheduled job scrapes `/metrics`, remote-writes | ~$0 (ephemeral) | ❌ **Not on Cloud Run** (can't reach 9000 externally) | Only on a VM/host where 9000 is locally reachable |
+
+### A.12.2 Path 1 — Direct OTLP push to Grafana Cloud (recommended)
+
+Keycloak 26.x exports metrics over OTLP via the Micrometer→OTel bridge. ⚠️ **This is an *experimental* feature in 26.5/26.6** (`opentelemetry-metrics`). **Traces** and **event metrics** are more mature; if you want zero experimental surface on a production IdP, start with traces + event metrics and add app-metrics-over-OTLP once you've validated it on your build.
+
+#### A.12.2.1 Grafana Cloud setup — get your endpoint, instance ID, and token
+
+Do this first; it produces the three values Keycloak needs. (Grafana Cloud's Free tier includes the OTLP gateway.)
+
+1. **Create/sign in to a Grafana Cloud account** at `grafana.com` → you land on the Cloud Portal (`https://grafana.com/orgs/<org>`). A new account has one **organization** with one **stack** (a stack = your hosted Grafana + Mimir/Loki/Tempo backends). Free tier is fine.
+2. From the Portal, select your **stack**. Under **"Manage your Grafana Cloud Stack,"** find the **OpenTelemetry** tile → click **Configure**.
+3. On the OpenTelemetry configuration page you'll see:
+   - **OTLP Endpoint URL** — pattern `https://otlp-gateway-<zone>.grafana.net/otlp` (e.g. `otlp-gateway-prod-ap-south-1...` — the zone matches where your stack lives). This is your `OTEL_EXPORTER_OTLP_ENDPOINT`.
+   - **Instance ID** — a numeric ID shown on this card. This is the **basic-auth username** for OTLP.
+4. In the **Password / API Token** section on that same page, click **Generate now** to create a token. ⚠️ **The token is shown only once — copy it immediately into Secret Manager.** (Under the hood this creates an **Access Policy** with `metrics:write` / `traces:write` / `logs:write` scopes and issues a token; you can also manage these under **Security → Access Policies** in the Portal. Note: Grafana Cloud replaced the older "API Keys" flow with Access Policies + tokens — if a tutorial mentions "MetricsPublisher API key," that's the legacy path.)
+5. **The page generates the exact env-var values for you** — including a ready-made `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64(instanceID:token)>`. **Copy that pre-encoded header rather than base64-ing by hand** (fewer mistakes). Keep `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_HEADERS` from this page.
+
+What you now have:
+- `OTLP endpoint` → `https://otlp-gateway-<zone>.grafana.net/otlp`
+- `instance ID` (numeric, the basic-auth username)
+- `token` (the basic-auth password; store in Secret Manager — shown once)
+- a pre-built `Authorization: Basic <base64(instanceID:token)>` header value
+
+#### A.12.2.2 Keycloak-side configuration
+
+Grafana Cloud's endpoint is **OTLP/HTTP**, so point Keycloak's telemetry endpoint straight at it — no collector:
+
+```
+# Feature + enablement (build-time features may require rebuilding the optimized image)
+--features=opentelemetry-metrics
+--telemetry-metrics-enabled=true
+--metrics-enabled=true
+# (optional, mature) traces:
+--tracing-enabled=true --features=opentelemetry
+
+# Global telemetry endpoint (Grafana Cloud OTLP gateway; HTTP, not the gRPC default)
+--telemetry-endpoint=https://otlp-gateway-<zone>.grafana.net/otlp
+--telemetry-protocol=http/protobuf
+--telemetry-service-name=keycloak-yourapp-prod
+
+# Auth header for metrics export — the Basic value from A.12.2.1 step 5
+--telemetry-metrics-header-Authorization=Basic <BASE64_INSTANCEID_TOKEN>
+```
+
+As env vars on Cloud Run, these map to `KC_*` forms (e.g. `KC_TELEMETRY_ENDPOINT`, `KC_TELEMETRY_PROTOCOL`, `KC_TELEMETRY_SERVICE_NAME`, `KC_TRACING_ENABLED`). ⚠️ **Verify the exact env-var spellings and the experimental-feature flag names against the 26.6.0 docs for your build before deploying** — the `telemetry-*` CLI ↔ `KC_TELEMETRY_*` env mapping and the `opentelemetry-metrics` feature name are version-sensitive and have been changing release-to-release. **Put the `Authorization` header value in Secret Manager** (`--set-secrets`), not inline in `--set-env-vars`.
+
+#### A.12.2.3 Verify it's flowing
+
+1. Redeploy Keycloak, generate some activity (a few logins).
+2. In Grafana Cloud → **Explore** → select the Prometheus/Mimir data source (usually `grafanacloud-<stack>-prom`) → query for a Keycloak metric (e.g. a JVM or `http_server_*` metric, or a `keycloak_*` event metric). Allow 1–2 minutes for first data.
+3. If nothing arrives: check the Keycloak log for OTLP export errors (401 = bad/expired token or wrong instance ID in the header; 404 = wrong endpoint zone), and confirm the endpoint zone matches your stack.
+4. Import a prebuilt **Keycloak Grafana dashboard** (Grafana.com dashboards library) as a starting visualization.
+
+### A.12.3 Path 2 — Sidecar collector (defer until multi-container)
+
+Run **Grafana Alloy** (or an OTel collector) as a Cloud Run **sidecar container**; it scrapes `http://localhost:9000/metrics` (reachable within the container network) and remote-writes to Grafana Cloud's Prometheus endpoint. This is the standard Grafana pattern and avoids Keycloak's experimental OTLP-metrics path (it uses the stable `/metrics` pull). The downside is an always-on sidecar (~$15–20/mo). **Revisit when you run Keycloak + app + worker etc. and one Alloy can serve them all** — at that point the per-service cost amortizes and this becomes the cleanest option.
+
+### A.12.4 Path 3 — Cron-scrape / private scrape (VM or VPC, NOT single-port Cloud Run)
+
+A scheduled job (or a persistent collector) scrapes `/metrics` and remote-writes to Grafana Cloud. **This does not work on Cloud Run's single-exposed-port model** — port 9000 isn't externally reachable and there's no persistent localhost to scrape between requests. It becomes the natural low-cost choice wherever 9000 *is* reachable on a private network: after the Hetzner migration (bind 9000 to localhost, run Alloy/a cron scraper on the same host), or in the **target VPC architecture** (a collector on the private network scrapes `:9000` over private networking; nothing public). In the VPC end-state this is arguably the cleanest model — private scrape, no experimental push feature, LB exposes only chosen ports.
+
+### A.12.5 Metrics to watch, and starter alert thresholds
+
+**Performance (Keycloak health):**
+| Metric (approx. name — verify) | Signal | Starter alert |
+|---|---|---|
+| Agroal `*active*` / `*available*` connections | DB pool saturation (your recent incident) | available ≤ 1 for > 2 min |
+| Agroal acquisition-timeout counter | pool exhaustion | any increase over 5 min |
+| HTTP request duration p95/p99 (`/token`, `/auth`) | login latency | p99 > 1s for > 5 min |
+| JVM heap used / max, GC pause time | memory pressure on small instance | heap > 85% sustained |
+
+**Abuse / attack (event metrics):**
+| Metric | Signal | Starter alert |
+|---|---|---|
+| `LOGIN_ERROR` rate (tag: realm, client) | credential stuffing / probing | > N failures/min, or error:success ratio spike |
+| Token refresh rate per client | runaway client / refresh storm (see §8.6.1) | sharp per-client spike |
+| DCR registration rate (`/clients-registrations/*`) | abuse of anonymous DCR endpoint | > N registrations/min from one source |
+| 429 rate (once a rate-limiter is back in front) | throttling activity / attack | sustained non-zero |
+
+Red Hat/Keycloak ship **prebuilt Grafana dashboards** for Keycloak metrics — import those as a starting point rather than building from scratch.
+
+### A.12.6 Recommendation for now
+
+Given pre-PMF cost/effort constraints and a production IdP: **do Path 1 (direct OTLP push) with event metrics + traces first** (both mature), and treat full app-metrics-over-OTLP as opt-in after validating the experimental flag on 26.6.0. This gives the abuse signals (login failures, DCR rate) and, via the stable `/metrics` if you later add a scraper, the pool/JVM/HTTP performance metrics — at ~$0. Move to Path 2 (shared Alloy sidecar) when you have several containers, and Path 3/localhost-Alloy after the Hetzner migration. **Never expose port 9000 publicly** regardless of path.
 
 ---
 
@@ -620,12 +795,6 @@ Save.
 
 **Verify:** Smoke tests 22, 23, 24 (DCR rejects bad inputs) exercise this indirectly after §D.12.
 
-## D.7 Set realm-default Client Scopes
-
-**Path:** Client Scopes (top-level sidebar section — **not** inside Realm settings)
-
-There is no "Client scopes" panel inside Realm settings in 26.x. Realm-default assignment happens in the top-level **Client Scopes** list via each scope's **Assigned type** (`Default` / `Optional` / `None`). Setting a scope to `Default` here is what makes it auto-assign to new clients realm-wide.
-
 ## D.7 Assign MCP scopes to DCR'd clients
 
 **⚠️ Under the recommended Option B (see D.8), do NOT set these as realm-default scopes.** Doing so assigns `mcp-default` to *every* client including `yourapp-{env}-web`, which (a) pollutes non-MCP clients and (b) breaks the SPI short-circuit's MCP-client detection, since the guard identifies MCP clients precisely by the presence of `mcp-default`. If the web client has `mcp-default`, the short-circuit can't distinguish it from a real MCP client.
@@ -679,16 +848,20 @@ Settings:
 
 **Verify:** `./smoke.sh` → Test 19. It now recognizes three states (strict / grace / off) and reminds you of the §8.6.1 app prerequisite rather than pushing you straight to strict.
 
-## D.10 Disable Direct Grant flow (optional hardening)
+## D.10 Ensure the password grant (ROPC) is disabled where it shouldn't be
 
-**Path:** Authentication → Bindings
+**Goal:** no client should be able to use the Resource Owner Password Credentials grant (`grant_type=password`). yourapp.com is federated-only — there are no local passwords to grant against, so ROPC has no legitimate use (Invariant 1).
 
-- **Direct Grant Flow:** unbind, or set to a flow that always fails. Save.
+⚠️ **The old "Authentication → Bindings" tab does not exist in 26.x**, and the `direct grant` **flow** (Authentication → Flows → `direct grant`) is *not* the right lever — that flow only defines *how* a direct-grant request is authenticated *if a client is allowed to make one*. The actual on/off control is **per client**:
 
-This prevents any client (including DCR'd ones) from using the password grant even if they request it.
+**The real control — per-client "Direct access grants" capability:**
+- **Clients → `yourapp-{env}-web` → Settings → Capability config → "Direct access grants" → Off.** (Already off — smoke Test 11 verifies `directAccessGrantsEnabled=false`.)
+- **Clients → `yourapp-{env}-admin-api` → same → Off.** (Already off — service account uses client-credentials, not ROPC.)
+- **DCR'd MCP clients:** prevented from enabling ROPC by the `mcp-hardening` client policy (secure-response-type / grant restrictions), **not** by any realm flow. This is what smoke **Test 23 ("DCR rejects bad grants")** exercises — a DCR registration requesting the password grant should be rejected. If Test 23 fails ("password grant ACCEPTED"), fix the **client policy** (D.6), not a realm flow.
 
+**Optional belt-and-suspenders (realm-wide):** if you want a hard guarantee that *no* client anywhere can ever use ROPC, you can neuter the realm's `direct grant` flow — Authentication → Flows → `direct grant` → set its steps to **Disabled**, or delete the flow's executions so it can never succeed. This is heavier-handed and would block any future service client that legitimately needs direct grants, so it's not recommended unless you have a specific reason. The per-client toggles above are the correct primary control.
 
-**Verify:** `./smoke.sh` → Test 23 green.
+**Verify:** `./smoke.sh` → `Web client Direct Access Grants` and `Admin API Direct Access Grants` both `disabled` (Test 11); `DCR rejects bad grants` green (Test 23). If Test 23 is red, the fix is in the client policy (D.6), not here.
 
 ## D.11 Verify HMAC handoff key is mounted
 
