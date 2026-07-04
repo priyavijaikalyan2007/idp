@@ -1204,6 +1204,77 @@ Code review checklist for SPI PRs:
 
 ---
 
+## 13a. Planned providers (deferred — spec-level, not yet built)
+
+Additional SPI providers that belong in this same Maven module / JAR but are **deferred** to the DCR-hardening phase (see `DEFERRED_ITEMS.md` B1). Documented here at spec level so they're a known design element, not a future rediscovery. They reuse the exact packaging and build pipeline as the tenant-picker authenticator (§11) — a factory + provider + `META-INF/services` entry in the existing module; no new infrastructure.
+
+### 13a.1 `AllowedGrantTypesPolicy` (Client Registration Policy SPI)
+
+**Status:** deferred to DCR-hardening phase. **Not currently a security gap** — ROPC is already blocked by the disabled realm Direct Grant flow (setup guide D.10), verified by smoke Test 23. This provider adds *fail-at-registration ergonomics* and broader grant/auth-method enforcement over that already-working control.
+
+**Problem it solves.** Standard Keycloak client policies have **no executor that rejects a DCR registration for its requested `grant_types`.** The `mcp-hardening` executors constrain authorize/response-type behavior, not registration grant types. So a DCR registration requesting `password` returns 201 (the client just can't *use* ROPC once the Direct Grant flow is disabled). A custom `ClientRegistrationPolicy` closes this by rejecting the registration outright with a 400.
+
+**Why the CRP SPI (not a Client Policies executor).** The `ClientRegistrationPolicy` SPI is registration-specific and is the same family as the built-in `allowed-client-scopes` / `trusted-hosts` policies already in use for MCP DCR. "Allowed grant types at registration" is exactly what CRPs are for. (A custom `ClientPolicyExecutorProvider` on the `REGISTER`/`UPDATE` events is the alternative; the CRP is the cleaner fit and packages identically to the existing MCP CRPs.)
+
+**Interface shape:**
+```java
+public class AllowedGrantTypesPolicy implements ClientRegistrationPolicy {
+    // MCP clients: authorization_code + refresh_token only. No ROPC, implicit,
+    // or client_credentials for anonymous public DCR clients.
+    private static final Set<String> ALLOWED_GRANTS =
+        Set.of("authorization_code", "refresh_token");
+
+    @Override
+    public void beforeRegister(ClientRegistrationContext ctx)
+            throws ClientRegistrationPolicyException {
+        ClientRepresentation client = ctx.getClient();
+        rejectDisallowed(client);
+    }
+
+    @Override
+    public void beforeUpdate(ClientRegistrationContext ctx, ClientModel existing)
+            throws ClientRegistrationPolicyException {
+        rejectDisallowed(ctx.getClient());   // same guard on update
+    }
+
+    private void rejectDisallowed(ClientRepresentation client)
+            throws ClientRegistrationPolicyException {
+        if (Boolean.TRUE.equals(client.isDirectAccessGrantsEnabled())) {
+            throw new ClientRegistrationPolicyException(
+                "Direct access grants (password/ROPC) not permitted for DCR clients");
+        }
+        if (Boolean.TRUE.equals(client.isImplicitFlowEnabled())) {
+            throw new ClientRegistrationPolicyException(
+                "Implicit flow not permitted for DCR clients");
+        }
+        if (Boolean.TRUE.equals(client.isServiceAccountsEnabled())) {
+            throw new ClientRegistrationPolicyException(
+                "Client credentials / service accounts not permitted for public DCR clients");
+        }
+        // OIDC DCR also carries grant_types in the registration payload; if present,
+        // reject any not in ALLOWED_GRANTS. (Read via the OIDC client-registration
+        // context / client attributes as exposed by the Keycloak version.)
+    }
+
+    // afterRegister / afterUpdate: no-op.
+}
+```
+Plus `AllowedGrantTypesPolicyFactory implements ClientRegistrationPolicyFactory` (providerId e.g. `knobby-allowed-grant-types`) and a `META-INF/services/org.keycloak.services.clientregistration.policy.ClientRegistrationPolicyFactory` entry. Wired as an **anonymous** Client Registration Policy (same subType as `allowed-client-scopes`), so it only governs anonymous DCR — never first-party clients.
+
+**Scope creep it should absorb (build once, enforce broadly).** When built, this is the natural home for the *whole* registration-time grant/auth posture, not just password:
+- forbid `implicit`, `client_credentials` on public clients (above);
+- enforce `token_endpoint_auth_method=none` (public + PKCE) for MCP DCR clients;
+- optionally pin `response_types` to `code`.
+Consolidating these here keeps registration-time policy in one provider rather than scattered.
+
+**Maintenance cost (the reason it's deferred).** This is a *second* SPI, doubling the Keycloak-version-coupling surface (every major Keycloak upgrade is a "does it still compile against the API" checkpoint — a cost already felt with the tenant-picker SPI). The `ClientRegistrationPolicy` API is relatively stable, but it's still surface. Deferring is correct while the disabled Direct Grant flow already provides the security property and MCP clients (code+PKCE) trip neither mechanism.
+
+**Trigger to build:** the DCR-hardening milestone — same as re-adding Trusted Hosts (§F.1) and Allowed Protocol Mapper Types (§F.2), before untrusted third-party DCR / public GA. Build it alongside those as one hardening pass. Tracked in `DEFERRED_ITEMS.md` B1.
+
+**Verification when built:** smoke Test 23 already accepts a registration-outright-rejection (400/403) as the *strongest* pass state — so once this provider is deployed, Test 23 should flip from "registered 201 but ROPC unusable" to "registration rejected outright," with no test change needed.
+
+---
+
 ## 14. Open questions for the implementer
 
 These came up during design but need code-level decisions:

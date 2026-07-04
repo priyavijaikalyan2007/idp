@@ -1260,7 +1260,7 @@ fi  # closes the "if AUTH_ENDPOINT empty / else" block from Test 13 top
 #   DCR behavioral (Phase 3 + Phase 2):
 #     Test 21: DCR success path   ← requires Test 18 + scopes from Tests 16-17
 #     Test 22: DCR rejects HTTP   ← requires Test 18
-#     Test 23: DCR rejects bad grants  ← requires Test 18
+#     Test 23: Password grant (ROPC) unusable by DCR clients  ← requires Test 18
 #     Test 24: DCR rejects bad scopes  ← requires Test 18
 #     Test 25: DCR'd client shape ← requires Test 21 success
 #     Test 26: cleanup            ← runs even if earlier MCP tests failed
@@ -1763,32 +1763,87 @@ else
     fi
 fi
 
-# ----- test 23: DCR rejects disallowed grant types -----
-section "Test 23: DCR rejects disallowed grant types (§16.4)"
+# ----- test 23: password grant (ROPC) must not yield a token for DCR clients -----
+section "Test 23: Password grant (ROPC) unusable by DCR clients (§16.4 / setup guide D.10)"
 
-if [[ -z "$AUTH_ENDPOINT" ]]; then
-    record_fail "DCR rejects bad grants" "skipped - no AUTH_ENDPOINT"
+# IMPORTANT (test design): standard Keycloak client policies have NO executor that
+# rejects a DCR *registration* merely for requesting grant_types:["password"].
+# The mcp-hardening executors (pkce-enforcer, secure-response-type, secure-redirect-uri,
+# etc.) constrain the authorize/response-type behavior, not which grant_types a client
+# may register. So a registration requesting "password" will typically return 201 -
+# that is NOT a misconfiguration of your profile; there simply is no built-in rule it
+# violates. Therefore we do NOT assert "registration rejected". Instead we assert the
+# real, enforceable security property: a DCR'd client CANNOT actually obtain a token
+# via grant_type=password. That property is enforced by neutering the realm Direct
+# Grant flow (setup guide D.10) and/or the client not genuinely having the capability.
+
+if [[ -z "$AUTH_ENDPOINT" || -z "$TOKEN_ENDPOINT" ]]; then
+    record_fail "Password grant unusable (DCR)" "skipped - no AUTH_ENDPOINT/TOKEN_ENDPOINT"
 else
     DCR_ENDPOINT="${REALM_BASE}/clients-registrations/openid-connect"
-    BAD_GRANT_BODY='{"client_name":"smoke-test-bad-grant","redirect_uris":["https://example.com/callback"],"grant_types":["password","authorization_code"],"token_endpoint_auth_method":"none","scope":"openid knobby:read"}'
+    # Register a public client that requests the password grant. We expect this to
+    # SUCCEED (201) - see note above - and then prove the grant is unusable.
+    ROPC_BODY='{"client_name":"smoke-test-ropc","redirect_uris":["https://example.com/callback"],"grant_types":["password","authorization_code"],"token_endpoint_auth_method":"none","scope":"openid knobby:read"}'
 
-    BAD_GRANT_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-        -X POST "$DCR_ENDPOINT" \
-        -H "Content-Type: application/json" \
-        -d "$BAD_GRANT_BODY")
-    BAD_GRANT_STATUS=$(echo "$BAD_GRANT_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
-
-    if [[ "$BAD_GRANT_STATUS" == "400" || "$BAD_GRANT_STATUS" == "403" ]]; then
-        record_pass "DCR rejects bad grants" "HTTP ${BAD_GRANT_STATUS} as expected"
-    elif [[ "$BAD_GRANT_STATUS" == "201" ]]; then
-        ACCIDENTAL_CLIENT_ID=$(echo "$BAD_GRANT_RESP" | sed '$d' | jq -r '.client_id // empty')
-        ACCIDENTAL_RAT=$(echo "$BAD_GRANT_RESP" | sed '$d' | jq -r '.registration_access_token // empty')
-        if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
-            curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
+    # Retry on transient 5xx. A 503/502 here is NOT a policy result - it's Keycloak
+    # or its DB being momentarily unavailable (e.g. connection-pool starvation under
+    # the smoke suite's own load - Test 4b hammers /token 15x just before this - or a
+    # Cloud Run cold start / scale-from-zero). Retry a few times with backoff before
+    # treating it as a real failure, so a blip doesn't masquerade as a test failure.
+    ROPC_STATUS=""
+    ROPC_JSON=""
+    for _attempt in 1 2 3; do
+        ROPC_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$DCR_ENDPOINT" \
+            -H "Content-Type: application/json" -d "$ROPC_BODY")
+        ROPC_STATUS=$(echo "$ROPC_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+        ROPC_JSON=$(echo "$ROPC_RESP" | sed '$d')
+        # 5xx (or a curl failure → empty status) is transient; back off and retry.
+        if [[ "$ROPC_STATUS" =~ ^5[0-9][0-9]$ || -z "$ROPC_STATUS" ]]; then
+            sleep $((_attempt * 2))
+            continue
         fi
-        record_fail "DCR rejects bad grants" "password grant was ACCEPTED (HTTP 201) - the mcp-hardening client policy is not restricting DCR grant types. Fix in SETUP GUIDE D.6 (client policies), not a realm flow (design: PRD §16.4)"
+        break
+    done
+
+    if [[ "$ROPC_STATUS" =~ ^5[0-9][0-9]$ || -z "$ROPC_STATUS" ]]; then
+        record_fail "Password grant unusable (DCR)" "registration returned HTTP ${ROPC_STATUS:-(no response)} after 3 attempts - this is a Keycloak/DB availability problem, NOT a policy result. Likely causes: (1) DB connection-pool starvation - check the Keycloak log for 'Acquisition timeout' and consider whether KC_DB_POOL_MAX_SIZE is too tight under the smoke suite's burst (Test 4b hammers /token 15x just before this); (2) Cloud Run cold start / scale-from-zero mid-request; (3) a proxy/LB in front returning 5xx. Re-run: if it's intermittent it's load/cold-start; if consistent, check /health/ready on the management port."
+    elif [[ "$ROPC_STATUS" == "400" || "$ROPC_STATUS" == "403" ]]; then
+        # If a future Keycloak/policy DOES reject the registration outright, that's
+        # even stronger - accept it as a pass.
+        record_pass "Password grant unusable (DCR)" "registration requesting the password grant was rejected outright (HTTP ${ROPC_STATUS}) - strongest posture"
+    elif [[ "$ROPC_STATUS" == "201" ]]; then
+        ROPC_CLIENT_ID=$(echo "$ROPC_JSON" | jq -r '.client_id // empty')
+        ROPC_RAT=$(echo "$ROPC_JSON" | jq -r '.registration_access_token // empty')
+
+        # Now attempt the actual password grant. It MUST fail (no token issued).
+        # We use bogus credentials; the point is that ROPC must not be a usable path
+        # at all - a properly disabled direct-grant flow returns an OAuth error, not
+        # a token, regardless of credentials.
+        ROPC_TOKEN_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$TOKEN_ENDPOINT" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=password" \
+            -d "client_id=${ROPC_CLIENT_ID}" \
+            -d "username=smoke-ropc-probe@example.com" \
+            -d "password=not-a-real-password")
+        ROPC_TOKEN_STATUS=$(echo "$ROPC_TOKEN_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+        ROPC_TOKEN_JSON=$(echo "$ROPC_TOKEN_RESP" | sed '$d')
+        GOT_TOKEN=$(echo "$ROPC_TOKEN_JSON" | jq -r '.access_token // empty' 2>/dev/null || true)
+        ROPC_ERR=$(echo "$ROPC_TOKEN_JSON" | jq -r '.error // "?"' 2>/dev/null || echo "?")
+
+        if [[ -n "$GOT_TOKEN" ]]; then
+            record_fail "Password grant unusable (DCR)" "a DCR client OBTAINED an access token via grant_type=password (HTTP ${ROPC_TOKEN_STATUS}). ROPC is live. Neuter the realm Direct Grant flow (setup guide D.10: Authentication → Flows → 'direct grant' → set steps Disabled) so the password grant cannot issue tokens. Federated-only realms have no local passwords, so ROPC should never succeed."
+        elif [[ "$ROPC_ERR" == "invalid_grant" || "$ROPC_ERR" == "unauthorized_client" || "$ROPC_ERR" == "invalid_client" || "$ROPC_ERR" == "invalid_request" ]]; then
+            record_pass "Password grant unusable (DCR)" "registration returned 201 (expected - no policy rejects grant_types at registration), but the password grant yields no token (error='${ROPC_ERR}', HTTP ${ROPC_TOKEN_STATUS}). ROPC is not a usable path."
+        else
+            record_skip "Password grant unusable (DCR)" "password grant returned no token but with an unclassified response (error='${ROPC_ERR}', HTTP ${ROPC_TOKEN_STATUS}). No token was issued (good), but verify manually this isn't a transient error."
+        fi
+
+        # cleanup the probe client
+        if [[ -n "$ROPC_CLIENT_ID" && -n "$ROPC_RAT" ]]; then
+            curl -s -X DELETE "${DCR_ENDPOINT}/${ROPC_CLIENT_ID}" -H "Authorization: Bearer $ROPC_RAT" >/dev/null 2>&1 || true
+        fi
     else
-        record_fail "DCR rejects bad grants" "unexpected HTTP ${BAD_GRANT_STATUS}"
+        record_fail "Password grant unusable (DCR)" "unexpected registration HTTP ${ROPC_STATUS}"
     fi
 fi
 
