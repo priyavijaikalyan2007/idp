@@ -1139,6 +1139,7 @@ else
                     "manage-users"
                     "view-realm"
                     "view-clients"
+                    "manage-clients"
                     "query-users"
                     "query-groups"
                     "view-identity-providers"
@@ -1152,8 +1153,12 @@ else
                     fi
                 done
 
-                # Check for unexpected extra roles that suggest over-privileging
-                FORBIDDEN_ROLES=("realm-admin" "manage-realm" "manage-clients" "create-client")
+                # Over-privileging check. NOTE: manage-clients is NO LONGER forbidden -
+                # Option B requires it (knobby.io writes scopes/flow-bindings on DCR'd
+                # clients at runtime via assignMcpScopes/bindBrowserFlow, web spec §7.5).
+                # It reverses an earlier PRD stance ("clients are static IaC"). The
+                # genuinely over-privileged roles remain forbidden.
+                FORBIDDEN_ROLES=("realm-admin" "manage-realm" "create-client")
                 EXCESS_ROLES=()
                 for ROLE in "${FORBIDDEN_ROLES[@]}"; do
                     if echo "$ASSIGNED_ROLES" | grep -qFx "$ROLE"; then
@@ -1165,15 +1170,19 @@ else
                 echo "  ${DIM}assigned realm-management roles: ${ASSIGNED_LIST:-(none)}${RESET}"
 
                 if [[ ${#MISSING_ROLES[@]} -eq 0 ]]; then
-                    record_pass "Admin API required roles" "all 8 required realm-management roles assigned"
+                    record_pass "Admin API required roles" "all ${#REQUIRED_ROLES[@]} required realm-management roles assigned (incl. manage-clients for Option B §7.5)"
                 else
-                    record_fail "Admin API required roles" "missing: ${MISSING_ROLES[*]} (per §11.13 step 2)"
+                    EXTRA_HINT=""
+                    for M in "${MISSING_ROLES[@]}"; do
+                        [[ "$M" == "manage-clients" ]] && EXTRA_HINT=" - NOTE: manage-clients is required for Option B post-DCR provisioning (web spec §7.5); without it assignMcpScopes/bindBrowserFlow will 403"
+                    done
+                    record_fail "Admin API required roles" "missing: ${MISSING_ROLES[*]} (per §11.13 step 2)${EXTRA_HINT}"
                 fi
 
                 if [[ ${#EXCESS_ROLES[@]} -gt 0 ]]; then
-                    record_skip "Admin API role hygiene" "WARNING: over-privileged roles present: ${EXCESS_ROLES[*]} - knobby.io does not need these per §11.13 ('Note on the role list')"
+                    record_skip "Admin API role hygiene" "WARNING: over-privileged roles present: ${EXCESS_ROLES[*]} - knobby.io does not need these per §11.13. (manage-clients is NOT over-privileged - it's required for Option B §7.5.)"
                 else
-                    record_pass "Admin API role hygiene" "no over-privileged roles assigned (no realm-admin / manage-realm / manage-clients / create-client)"
+                    record_pass "Admin API role hygiene" "no over-privileged roles assigned (no realm-admin / manage-realm / create-client)"
                 fi
             fi
         fi
