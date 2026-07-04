@@ -59,15 +59,16 @@ The 3-step consent wizard entry point. The Keycloak SPI Authenticator redirects 
 3. Token is validated server-side (HMAC, expiry, jti for replay) — see §4.1.
 4. Token claims are extracted: `mcp_client_id`, `mcp_requested_scopes`, `oauth_state`, `knobby_sub`.
 5. The current Knobby web session user is fetched; their `sub` must match `knobby_sub` in the token (defense-in-depth for session fixation; see §11).
-6. The wizard state is initialized: client identity card data is built from the DCR-registered client metadata (fetched from Keycloak Admin API), user's tenant memberships are loaded, RBAC membership confirmed.
-7. The wizard component renders Step 1.
+6. **Option B post-DCR provisioning (§7.5):** if this `mcp_client_id` has not been provisioned yet, assign its MCP scopes and bind its browser flow (once per client, idempotent). On failure, render the §8 502 page and do not proceed. See §7.5 for the full contract, state table, and sequence.
+7. The wizard state is initialized: client identity card data is built from the DCR-registered client metadata (fetched from Keycloak Admin API), user's tenant memberships are loaded, RBAC membership confirmed.
+8. The wizard component renders Step 1.
 
 **Response:**
 - Full Knobby app shell with the wizard component at `/mcp/consent`
 - The picker-request token is held in server-side session state for the duration of the wizard (not exposed to client JS)
 
 **Empty-membership detection:**
-- After step 6, if the user has zero tenant memberships, branch to the empty-membership state per §2.1.1.
+- After step 7 (wizard state init), if the user has zero tenant memberships, branch to the empty-membership state per §2.1.1.
 
 **Errors:**
 - Invalid/expired/replay token → render error page: "This consent link is no longer valid. Return to your MCP client and try connecting again." HTTP 400 status.
@@ -506,18 +507,16 @@ Encapsulates Knobby's calls to Keycloak's Admin REST API:
 - `listUserConsents(userId)` → fetch grants for the Connected Agents view
 - `revokeConsent(userId, clientId)` → disconnect
 - `listClients(filter)` → for the tenant-admin aggregate view
-- `bindBrowserFlow(clientId, flowAlias)` → **only if using flow-binding Option B** (setup guide D.8). Sets `authenticationFlowBindingOverrides.browser` on a DCR'd client so it routes through `browser-mcp-tenant-pick`. See §7.2.1.
+- `bindBrowserFlow(clientId, flowAlias)` → sets `authenticationFlowBindingOverrides.browser` on a DCR'd client so it routes through `browser-mcp-tenant-pick`. See §7.2.1.
+- `assignMcpScopes(clientId)` → assigns `mcp-default` + the Author-bundle `knobby:*` scopes as **default** client scopes (and `knobby:admin` as **optional**) on a DCR'd client. See §7.2.2.
 
-Authentication: client_credentials grant as the `knobby-{env}-admin-api` service account (same as the smoke test). The service account's roles per PRD §11.13 already cover these endpoints (view-users, view-clients, manage-users).
+Authentication: client_credentials grant as the `knobby-{env}-admin-api` service account (same as the smoke test). The service account's roles per PRD §11.13 already cover these endpoints (view-users, view-clients, manage-users, manage-clients for the flow/scope writes).
 
-#### 7.2.1 `bindBrowserFlow` — conditional (Option B only)
+#### 7.2.1 `bindBrowserFlow` — post-DCR flow binding (Option B)
 
-Whether this method is needed depends on the flow-binding decision in setup guide D.8:
+> **Flow-binding decision (settled):** knobby.io uses **Option B — per-client binding.** The realm browser flow stays `browser-federated-only` (so regular web login is never affected by MCP flow issues), and Knobby web binds `browser-mcp-tenant-pick` per DCR'd client. Option A (realm-wide binding) was evaluated and **rejected** — a single malformed MCP flow bound realm-wide takes down all logins, and it conflicts with the SPI's `mcp-default`-based MCP-client detection. The SPI short-circuit (SPI design §5.1 step 0) remains as a defensive safety net, but is not relied upon for correctness under Option B.
 
-- **If Option A (realm-level browser flow binding) was chosen** — this method is NOT needed. Keycloak's realm default browser flow is `browser-mcp-tenant-pick`, and the SPI short-circuits for non-MCP clients (SPI design §5.1 step 0). Knobby web does nothing about flow binding. **This is the recommended path.**
-- **If Option B (per-client binding) was chosen** — implement this method and call it once per DCR'd client at first-use.
-
-Behavior (Option B):
+Behavior:
 ```
 bindBrowserFlow(clientId, flowAlias = "browser-mcp-tenant-pick"):
     1. Resolve the flow's internal id from its alias:
@@ -534,9 +533,34 @@ bindBrowserFlow(clientId, flowAlias = "browser-mcp-tenant-pick"):
        in Knobby web to avoid redundant Admin API calls.
 ```
 
-When to call: the natural point is the first time a given `mcp_client_id` appears at `/mcp/consent` (§2.1). Track which client_ids have been bound (a small persistent set or a per-client flag) so this runs once per client, not once per session.
+#### 7.2.2 `assignMcpScopes` — post-DCR scope assignment (Option B)
 
-**Recommendation:** prefer Option A (SPI short-circuit + realm binding) and skip this method entirely. Option B exists for the case where the realm hosts non-MCP clients that must never touch the MCP flow, or where the SPI can't be modified to short-circuit.
+Under Option B, `mcp-default` and the `knobby:*` scopes are **NOT** realm-default client scopes (setup guide D.7) — that would leak them onto every client, including `knobby-{env}-web`, and break the SPI's MCP-client detection. Instead, Knobby web assigns them to each DCR'd MCP client explicitly, in the same post-DCR step as the flow binding. This is what makes the smoke check "DCR'd client shape — default scopes" pass; until it runs, that check correctly reports the scopes as missing.
+
+Behavior:
+```
+assignMcpScopes(clientId):
+    1. Fetch the client's internal id:
+       GET /admin/realms/{realm}/clients?clientId={clientId} → take [0].id
+    2. Resolve each target Client Scope's id:
+       GET /admin/realms/{realm}/client-scopes → map name → id
+    3. Assign as DEFAULT client scopes (included in every token for this client):
+       for scope in [mcp-default, knobby:read, knobby:comment,
+                     knobby:curate, knobby:write, knobby:share]:
+         PUT /admin/realms/{realm}/clients/{internalId}/default-client-scopes/{scopeId}
+    4. Assign as OPTIONAL client scope (client must request it):
+       PUT /admin/realms/{realm}/clients/{internalId}/optional-client-scopes/{scopeId}
+         for scope in [knobby:admin]
+    5. Idempotency: assigning an already-assigned scope is a no-op / safe to repeat.
+```
+
+#### 7.2.3 Post-DCR processing — call order
+
+Both methods run once, at first-use of a newly DCR'd MCP client (the first time a given `mcp_client_id` appears at `/mcp/consent`, §2.1). Track processed client_ids (a small persistent set or per-client flag) so this runs once per client, not once per session. Order within the step:
+1. `assignMcpScopes(clientId)` — so the client carries the right scopes before any token is issued.
+2. `bindBrowserFlow(clientId)` — so the next authorize request routes through the MCP flow.
+
+Both are idempotent, so a retry or a duplicate first-use is safe.
 
 ### 7.3 `HmacKeyProvider`
 
@@ -545,6 +569,74 @@ Loads the HMAC key(s) from GCP Secret Manager on startup. Supports two-key overl
 ### 7.4 `AgentActivityRecorder`
 
 Emits audit events per §6.
+
+### 7.5 Option B post-DCR processing — consolidated implementation slice
+
+> **Hand-off note.** This section pulls the Option B work into one self-contained task for the app team. The *mechanics* live in §7.2.1 (`bindBrowserFlow`), §7.2.2 (`assignMcpScopes`), and §7.2.3 (call order). This section adds the surrounding contract an implementer needs: **when it fires, where it hooks in, what state it persists, how it fails, and how to verify it.** Tracked in `DEFERRED_ITEMS.md` C2.
+
+**Why this exists (one paragraph of context).** DCR'd MCP clients register themselves anonymously against Keycloak; a freshly-registered client has neither the MCP scopes nor the MCP browser-flow binding. Under Option B (the settled decision — §7.2.1), knobby.io does **not** solve this with realm-wide defaults (that would leak MCP config onto the first-party web client and break the SPI's client detection). Instead, Knobby web performs a small **one-time post-registration step per MCP client**: assign its scopes, then bind its browser flow. After that step, the client is a fully-formed MCP client and every subsequent auth flows normally.
+
+**7.5.1 Trigger — exactly when it runs.**
+- Fires at **`GET /mcp/consent`** (§2.1), which is the first knobby.io endpoint any MCP client's user reaches (the SPI redirects here during the client's first authorization).
+- Runs **once per `mcp_client_id`**, not once per session. The `mcp_client_id` comes from the validated picker-request token (§3.2).
+- Guarded by a persistent "already processed" check (7.5.2) so it's a no-op on every subsequent visit.
+- Must complete **before** the wizard renders, because the wizard's authorize step (§2.2) issues a picker-result that assumes the client is MCP-shaped. If processing fails, show the §8 "Service temporarily unavailable" (502) page rather than proceeding.
+
+**7.5.2 Persistent state — the processed-clients record.**
+Add a small table (or a column on an existing MCP-client record if one exists):
+
+```
+mcp_provisioned_clients
+  mcp_client_id        text primary key      -- the Keycloak client_id (DCR-assigned)
+  scopes_assigned_at   timestamptz null      -- set when assignMcpScopes succeeds
+  flow_bound_at        timestamptz null      -- set when bindBrowserFlow succeeds
+  provisioned_at       timestamptz null      -- set when BOTH succeed (the "done" flag)
+  created_at           timestamptz not null default now()
+```
+- The idempotency check is `provisioned_at IS NOT NULL` → skip.
+- Recording the two sub-steps separately (`scopes_assigned_at`, `flow_bound_at`) lets a partial failure resume correctly: on retry, skip whichever sub-step already succeeded (both underlying Admin API calls are idempotent per §7.2.x, so re-running is safe either way — the timestamps are an optimization, not a correctness requirement).
+- This table is also useful operationally: it's the authoritative list of MCP clients knobby.io has provisioned, for the tenant-admin view (§2.7) and cleanup.
+
+**7.5.3 Sequence.**
+```
+on GET /mcp/consent (after picker-request token validated, §3.2):
+    clientId = pickerRequest.mcpClientId
+    row = mcp_provisioned_clients.get(clientId)
+    if row?.provisioned_at is not null:
+        proceed to wizard            // already provisioned; no-op
+        return
+
+    try:
+        if row?.scopes_assigned_at is null:
+            KeycloakAdminClient.assignMcpScopes(clientId)     // §7.2.2
+            upsert scopes_assigned_at = now()
+        if row?.flow_bound_at is null:
+            KeycloakAdminClient.bindBrowserFlow(clientId)     // §7.2.1
+            upsert flow_bound_at = now()
+        upsert provisioned_at = now()
+    catch KeycloakAdminError:
+        log structured error (clientId, which sub-step, status)
+        render §8 502 "Service temporarily unavailable"      // do NOT proceed
+        return
+
+    proceed to wizard
+```
+
+**7.5.4 Auth for the Admin API calls.** `assignMcpScopes` and `bindBrowserFlow` use the `knobby-{env}-admin-api` service account via client-credentials (§7.2). That service account needs **`manage-clients`** (to set flow-binding overrides and scope assignments) in addition to the view roles it already has (PRD §11.13). Verify this role is present, or the calls 403.
+
+**7.5.5 Failure modes & handling.**
+| Failure | Behavior |
+|---|---|
+| Admin API 5xx / network error | Catch, log, render 502; user retries. The persistent timestamps mean the retry resumes, not restarts. |
+| Admin API 403 (missing `manage-clients`) | Same 502 to the user, but this is a **deployment misconfig** — surface loudly in logs; it will fail for *every* client until the role is granted. |
+| `assignMcpScopes` succeeds, `bindBrowserFlow` fails | `scopes_assigned_at` set, `provisioned_at` null → next visit resumes at flow binding only. |
+| Concurrent first-visits for the same new client (two browser tabs) | Both may attempt provisioning; the Admin API calls are idempotent and the upserts are last-write-wins, so the outcome is correct. Optionally guard with a per-client advisory lock to avoid duplicate Admin API calls. |
+
+**7.5.6 Verification (ties to the smoke suite).**
+After implementing, a DCR'd client that has been through `/mcp/consent` once should make these smoke checks pass:
+- **Test "DCR'd client shape — default scopes"** → green (scopes now assigned per §7.2.2). Before provisioning it's correctly red.
+- **Test "DCR'd client shape — flow binding"** → green under Option B detection (per-client `authenticationFlowBindingOverrides.browser` now set). Before provisioning it's correctly red.
+- Manual: register a test client, visit `/mcp/consent`, then inspect the client in Keycloak admin → it has `mcp-default` + author-bundle default scopes, `knobby:admin` optional, and a browser-flow override to `browser-mcp-tenant-pick`.
 
 ---
 
@@ -657,7 +749,8 @@ Suggested phased delivery:
 - `GET /mcp/consent` route handler + silent SSO bootstrap
 - `POST /api/mcp/consent/authorize`
 - `POST /api/mcp/consent/cancel`
-- KeycloakAdminClient with the needed methods
+- KeycloakAdminClient with the needed methods (`listClientByClientId`, `listUserConsents`, `revokeConsent`, `listClients`, **`assignMcpScopes`**, **`bindBrowserFlow`**)
+- **Option B post-DCR provisioning (§7.5):** the `mcp_provisioned_clients` table, the once-per-client provisioning step hooked into `GET /mcp/consent` (step 6), and its failure handling. Prerequisite: confirm the `knobby-{env}-admin-api` service account has **`manage-clients`** (§7.5.4). This is what turns the two currently-red smoke checks ("DCR'd client shape — default scopes" / "flow binding") green (§7.5.6).
 
 ### Phase 3 — Wizard UI
 
