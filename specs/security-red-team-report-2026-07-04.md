@@ -46,11 +46,22 @@ The highest-risk gaps are operational and versioning issues, not basic coding mi
 
 No plaintext production secret value was found in current tracked files or in the git-history pattern scans performed. No AWS/GCP/GitHub/OpenAI/private-key prefix hit was found.
 
+### Dedicated Scanner Follow-Up
+
+After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were installed under `/tmp/security-tools` and run locally.
+
+| Scanner | Scope | Result |
+|---|---|---|
+| Gitleaks | Git history, 29 commits | 5 redacted findings: 4 Auth0 curl `Authorization: Bearer YOUR_ACCESS_TOKEN` documentation placeholders and 1 generic API-key false positive in a config example. |
+| Gitleaks | Working tree, excluding `.git` and `target` | 3 redacted findings: the same documentation placeholders/config-example false positives. |
+| TruffleHog | Git history | 0 verified, 0 unverified secrets. |
+| TruffleHog | Working tree, excluding `.git` and `target` | 0 verified, 0 unverified secrets. |
+
 ### Important Caveats
 
-- This was a pattern-based review, not a full entropy scanner such as Gitleaks/TruffleHog.
 - I did **not** open or inspect the local database dump contents, because the file itself is sensitive enough to classify as a finding.
-- I did not access live GCP Secret Manager, Cloud Run IAM, Artifact Registry, Keycloak Admin API, or database state.
+- I did not access live GCP Secret Manager secret payloads, Artifact Registry internals, Keycloak Admin API, or database state.
+- A read-only Cloud Run service describe was performed after the initial report and confirmed the production service is inspectable with the active `gcloud` account.
 
 ### Sensitive Artifacts Found
 
@@ -101,6 +112,8 @@ No plaintext production secret value was found in current tracked files or in th
 **Affected file:** `cloudrun.yaml`  
 **Evidence:** `KC_BOOTSTRAP_ADMIN_USERNAME=admin` and `KC_BOOTSTRAP_ADMIN_PASSWORD` Secret Manager binding remain in the revision YAML. The setup guide explicitly says to remove bootstrap env vars after the real admin is created.
 
+**Live confirmation:** `gcloud run services describe knobbyauth --region=asia-southeast1 --project=stellar-zoo-478023-v4` shows both bootstrap env vars still present on the latest ready revision.
+
 **Impact:** Bootstrap credentials should not remain part of steady-state runtime. Anyone with access to that Secret Manager secret or a future clean-database scenario has an admin bootstrap path. It also increases the number of high-value secrets mounted into the IdP process.
 
 **Recommended remediation:**
@@ -115,6 +128,8 @@ No plaintext production secret value was found in current tracked files or in th
 **Severity:** High  
 **Affected file:** `cloudrun.yaml`  
 **Evidence:** Cloud Run revision uses `871965503155-compute@developer.gserviceaccount.com` rather than a dedicated `keycloak-runner` service account.
+
+**Live confirmation:** the latest Cloud Run service template still uses `871965503155-compute@developer.gserviceaccount.com`.
 
 **Impact:** Default compute service accounts are commonly over-privileged or reused across workloads. If Keycloak or its container is compromised, the attacker inherits whatever IAM that default service account has.
 
@@ -268,6 +283,8 @@ No plaintext production secret value was found in current tracked files or in th
    - GitHub Actions if workflows are added
 2. Add a scheduled job that checks Keycloak latest 26.x patch release.
 3. Treat Keycloak patch releases as security-relevant by default.
+
+**Follow-up completed:** Dependabot alerts and automated security fixes were enabled through the GitHub API. `.github/dependabot.yml` was updated to cover Docker, Maven, and GitHub Actions. CodeQL and Dependency Review workflows were added. GitHub API rejected secret scanning / push protection for this private repository with `Secret scanning is not available for this repository`; enabling that requires the relevant GitHub Code Security / Advanced Security plan or organization setting.
 
 ### RT-014 — `SECURITY.md` Describes the Wrong Project
 
