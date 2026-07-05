@@ -16,7 +16,7 @@
 # step that must be manual (the browser login + consent), and automating
 # everything around it: setup, the loopback redirect capture, the token
 # exchange, and all assertions. It uses a loopback listener as the redirect_uri
-# (http://localhost:PORT/callback) — the SAME pattern Claude Code and desktop
+# (http://127.0.0.1:PORT/callback) — the SAME pattern Claude Code and desktop
 # MCP clients use — so it also validates loopback redirect-URI handling.
 #
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,9 +49,10 @@
 #   • A reachable Keycloak with the MCP realm configured (flow, scopes, SPI, DCR)
 #   • ADMIN_CLIENT_SECRET for the admin-api service account (to inspect client)
 #   • A human able to complete federated login for the realm
-#   • The loopback redirect (http://localhost:PORT/callback) must be an allowed
-#     redirect URI for DCR clients (Trusted Hosts must permit localhost, or the
-#     policy be absent — see setup guide F.1)
+#   • The loopback redirect (http://127.0.0.1:PORT/callback) must be permitted by
+#     the secure-redirect-uris-enforcer in the mcp-hardening profile: it needs
+#     allow-ipv4-loopback-address + allow-http-scheme = true (setup guide D.6a).
+#     Use the IP literal 127.0.0.1, NOT localhost (RFC 8252 §7.3).
 #
 # Usage:
 #   KNOBBY_ENV=prod ADMIN_CLIENT_SECRET=xxxxx ./mcp-e2e-interactive.sh
@@ -98,7 +99,7 @@ MCP_AUDIENCE="${MCP_AUDIENCE:-knobby-mcp-api}"
 MCP_AUTHOR_BUNDLE_SCOPES=("knobby:read" "knobby:comment" "knobby:curate" "knobby:write" "knobby:share")
 
 CALLBACK_PORT="${CALLBACK_PORT:-53789}"
-CALLBACK_URI="http://localhost:${CALLBACK_PORT}/callback"
+CALLBACK_URI="http://127.0.0.1:${CALLBACK_PORT}/callback"
 
 # Optional: a shell command that, given $CLIENT_ID in the environment, prints the
 # mcp_provisioned_clients row (or its provisioned_at). If unset, that check skips.
@@ -144,9 +145,13 @@ pass "admin token" "acquired"
 
 # ── DCR registration (public client, loopback redirect, PKCE) ───────────────
 step "3. Register a throwaway MCP client via DCR"
-REG_BODY=$(jq -n --arg redir "$CALLBACK_URI" '{
+# Register BOTH loopback forms: the secure-redirect-uris-enforcer keys on the
+# 127.0.0.1 IP literal, but Keycloak's Trusted Hosts loopback check normalizes to
+# localhost. Subsystems disagree (setup guide D.6a), so offer both; we use the IP
+# literal as the actual redirect_uri at authorize time.
+REG_BODY=$(jq -n --arg redir "$CALLBACK_URI" --arg redir2 "http://localhost:${CALLBACK_PORT}/callback" '{
     client_name: "mcp-e2e-interactive",
-    redirect_uris: [$redir],
+    redirect_uris: [$redir, $redir2],
     grant_types: ["authorization_code","refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
@@ -159,8 +164,9 @@ REG_JSON=$(echo "$REG_RESP" | sed '/HTTP_STATUS:/d')
 if [[ "$REG_STATUS" != "201" ]]; then
     ERR=$(echo "$REG_JSON" | jq -r '.error_description // .error // "?"' 2>/dev/null)
     die "DCR registration failed (HTTP $REG_STATUS): $ERR
-     If this is about the redirect URI, the loopback URI ($CALLBACK_URI) must be
-     permitted — check Trusted Hosts (setup guide F.1) allows localhost, or is absent."
+     If this is about the redirect URI (Invalid redirectUris), the secure-redirect-uris-enforcer
+     in the mcp-hardening profile is rejecting loopback. Set allow-ipv4-loopback-address +
+     allow-http-scheme = true on that executor (setup guide D.6a), and use 127.0.0.1 not localhost."
 fi
 CLIENT_ID=$(echo "$REG_JSON" | jq -r '.client_id')
 REG_ACCESS_TOKEN=$(echo "$REG_JSON" | jq -r '.registration_access_token // empty')

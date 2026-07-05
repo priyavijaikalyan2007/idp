@@ -1736,7 +1736,16 @@ DCRBODY
         fi
     else
         DCR_ERROR=$(echo "$DCR_BODY" | jq -r '.error_description // .error // .' 2>/dev/null | head -c 200)
-        record_fail "DCR endpoint success" "HTTP ${DCR_STATUS} - ${DCR_ERROR} (configure per SETUP GUIDE D.5/D.6 client policies; design: PRD §16.11)"
+        # Distinguish the common DCR rejections - they need DIFFERENT fixes:
+        DCR_HINT=""
+        if echo "$DCR_BODY" | grep -qi "trusted host\|trusted domain"; then
+            DCR_HINT=" → Trusted Hosts CRP rejected this. NOTE: it validates the CALLER host and/or the redirect-URI host, not the localhost in your redirect. For dev this should be OFF/permissive (register B2) - it's a deferred GA hardening item, not something that should block your own testing. Remove/disable the Trusted Hosts policy (Realm → Client registration policies) or add your calling host. See DEFERRED_ITEMS.md B2 - and note Trusted Hosts may be the wrong control for localhost-redirect MCP desktop clients."
+        elif echo "$DCR_BODY" | grep -qi "invalid_client_metadata\|insufficient_scope\|not trusted in the list"; then
+            DCR_HINT=" → looks like the Allowed Client Scopes policy rejected a requested scope (e.g. knobby:read/knobby:write not in the DCR-allowed set). Fix: add those scopes to the Allowed Client Scopes CRP, or request only 'openid' at registration and assign knobby scopes via app provisioning (§7.5). This is a DIFFERENT policy from Trusted Hosts."
+        else
+            DCR_HINT=" (check Client Registration Policies: Trusted Hosts + Allowed Client Scopes; setup guide F.1/D.5)"
+        fi
+        record_fail "DCR endpoint success" "HTTP ${DCR_STATUS} - ${DCR_ERROR}${DCR_HINT}"
     fi
 fi
 
@@ -1984,7 +1993,7 @@ if [[ -z "$ACCESS_TOKEN" ]]; then
     record_skip "Provisioning capability (KC side)" "no admin access token"
 else
     VB_DCR="${REALM_BASE}/clients-registrations/openid-connect"
-    VB_BODY='{"client_name":"smoke-provision-cap","redirect_uris":["http://localhost:53999/callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none","scope":"openid"}'
+    VB_BODY='{"client_name":"smoke-provision-cap","redirect_uris":["http://127.0.0.1:53999/callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none","scope":"openid"}'
     VB_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$VB_DCR" \
         -H "Content-Type: application/json" -d "$VB_BODY")
     VB_STATUS=$(echo "$VB_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
@@ -2331,7 +2340,7 @@ ${BOLD}Test 33 — MCP path (iii) end-to-end (requires Knobby web /mcp/consent):
          -H 'Content-Type: application/json' \\
          -d '{
            "client_name": "Manual MCP smoke client",
-           "redirect_uris": ["http://localhost:9999/callback"],
+           "redirect_uris": ["http://127.0.0.1:9999/callback"],
            "grant_types": ["authorization_code", "refresh_token"],
            "token_endpoint_auth_method": "none",
            "scope": "openid knobby:read knobby:write"
@@ -2346,7 +2355,7 @@ ${BOLD}Test 33 — MCP path (iii) end-to-end (requires Knobby web /mcp/consent):
   3. In an incognito window, hit Keycloak's /authorize with PKCE:
 
        ${AUTH_ENDPOINT}?client_id=<dcr-client-id>&response_type=code\\
-         &redirect_uri=http://localhost:9999/callback\\
+         &redirect_uri=http://127.0.0.1:9999/callback\\
          &scope=openid%20knobby:read%20knobby:write\\
          &code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256\\
          &state=mcp-e2e-test
@@ -2357,7 +2366,7 @@ ${BOLD}Test 33 — MCP path (iii) end-to-end (requires Knobby web /mcp/consent):
         (You should see Knobby's standard app shell with top bar / user menu.)
      c. Step 1 wizard: confirm tenant. Step 2: bundle selection (default Author).
         Step 3: review + Authorize.
-     d. Browser should redirect to http://localhost:9999/callback?code=...&state=...
+     d. Browser should redirect to http://127.0.0.1:9999/callback?code=...&state=...
         (Your netcat listener captures the request.)
 
   5. Exchange the code (Keycloak code, not any intermediate IdP code):
@@ -2367,7 +2376,7 @@ ${BOLD}Test 33 — MCP path (iii) end-to-end (requires Knobby web /mcp/consent):
          -d 'client_id=<dcr-client-id>' \\
          -d 'code=<keycloak-code-from-callback>' \\
          -d 'code_verifier=${CODE_VERIFIER}' \\
-         -d 'redirect_uri=http://localhost:9999/callback'
+         -d 'redirect_uri=http://127.0.0.1:9999/callback'
 
   6. Decode the access_token at https://jwt.io and confirm:
      - aud = "${MCP_AUDIENCE}"
