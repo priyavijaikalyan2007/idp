@@ -260,12 +260,42 @@ echo -n "new-value" | gcloud secrets versions add SECRET --data-file=-
 
 Wire into a GitHub Actions workflow once Phase 1 of infra hardening (WIF) lands.
 
+## A.9a ⚠️ Cloud Run tuning for a JVM auth server (perf-critical)
+
+> **Observed in production (yourapp-prod, 2026-07): admin console slow, multi-second page loads, intermittent `Timeout when waiting for 3rd party check iframe message`, latency spikes to ~50s with CPU + memory pinned at 100%.** The Cloud Run dashboard showed the cause clearly. Keycloak is a JVM app, and **Cloud Run's defaults are actively hostile to the JVM.** Two settings dominate:
+
+**1. CPU allocation — the non-obvious killer. Set CPU to "always allocated" (`--no-cpu-throttling`).**
+Cloud Run has two CPU/billing modes:
+- **Request-based billing / CPU only during requests (default):** the container gets **near-zero CPU between requests.**
+- **Instance-based billing / CPU always allocated:** continuous CPU.
+
+For a stateless function the default is fine. **For a JVM it is harmful:** the JVM does critical work *between* requests — garbage collection, JIT compilation (what makes Java fast after warmup), and Keycloak's scheduled tasks. Throttled between requests, JIT never optimizes hot paths, GC falls behind then catches up in CPU-spiking bursts, and the "warm" `min-instances=1` container still behaves cold on the next request. **This, not cold starts, is usually the real cause of "warm instance but still slow."**
+
+**2. Memory floor — 512Mi is too small.** The JVM sizes its heap as a % of container memory, so 512Mi → tiny heap → constant GC pressure → CPU + latency spikes together (the classic GC-thrash signature: memory chart climbing to ~100% alongside CPU spikes). **Give Keycloak ≥1Gi (2Gi safer.)**
+
+**Apply all at once:**
+```
+gcloud run services update yourappauth --region=<region> \
+  --no-cpu-throttling --min-instances=1 --memory=2Gi --cpu=1
+```
+- `--no-cpu-throttling` → CPU always allocated (switches to instance-based billing). **The highest-value single change.**
+- `--min-instances=1` → no scale-to-zero cold starts.
+- `--memory=2Gi` (or start at 1Gi, watch the memory chart, bump to 2Gi if still tight).
+- `--cpu=1` is usually fine *once CPU is always-allocated*; go `--cpu=2` if spikes persist.
+
+**Verify:** re-watch the Cloud Run metrics for a day — instance-count flickering should stop (one steady warm instance), latency spikes flatten, memory stops pinning, and the check-session iframe timeouts disappear.
+
+**The strategic point (feeds A.10):** once you're paying for one always-on, always-CPU'd, ≥1Gi instance for a JVM, you've **recreated a small VM at Cloud Run prices** — and lost scale-to-zero's benefit. Keycloak wants always-warm + steady CPU + steady memory, which is a VM's *native* model and Cloud Run's *expensive exception*. This tuning is the pragmatic fix to stabilize now; it's also the empirical argument for the Hetzner migration (A.10 / Option B). Tune first, get end-to-end working, then migrate from a known-good baseline — not while chasing flakiness.
+
+**Admin-console-specific note.** The perf pain shows up most in the **admin console** (a heavy SPA firing many Admin REST calls per page), not the login path (fewer calls). If login feels fine but admin pages are slow, that's expected and this tuning still helps. The `Timeout when waiting for 3rd party check iframe message` error is the admin console's session-status iframe timing out — worsened by cold/throttled CPU and cross-region latency, and by browsers blocking third-party cookies (try allowing third-party cookies for `auth.yourapp.com`, or use `kcadm.sh` for routine ops). Your app uses back-channel logout, not the check-session iframe, so end users never hit this path.
+
 ## A.10 Outgrowing Cloud Run
 
 Triggers for Option B:
 - 3+ services that would benefit from co-location.
 - Cold starts become user-visible *and* `min-instances=1` costs more than a multi-service VM.
 - You add Elasticsearch or another service that doesn't fit Cloud Run.
+- **JVM-on-Cloud-Run tuning (A.9a) stabilizes perf only by making the instance effectively always-on + always-CPU + ≥1Gi — i.e. a small VM at Cloud Run prices.** Once you're there, a Hetzner VM gives more resources for less, with none of Cloud Run's JVM-hostile defaults. yourapp-prod reached this point in 2026-07 (perf tuning applied as a stopgap; migration planned next).
 
 Migration when needed: export realms, stand up VM per Option B, import realms, repoint DNS. A couple of hours.
 
@@ -713,7 +743,7 @@ Add each policy below: **Create policy** [?] → select provider → configure �
 
 **On `trusted-hosts` (seeded by default):** Keycloak pre-creates this policy and **requires at least one of its two toggles to be ON** — you'll get an error trying to turn both off, so a fully-permissive version isn't achievable. Don't delete it reflexively; instead configure it as: "Host Sending Client Registration Request Must Match" **OFF** (MCP clients register from unpredictable IPs), "Client URIs Must Match" **ON**, with the Trusted Hosts list containing the hostnames MCP redirect URIs will use — at minimum `localhost` for desktop/CLI clients.
 
-⚠️ **Unverified behavior:** how Keycloak 26.6.0's "Client URIs Must Match" handles `http://localhost:<arbitrary-port>/callback` (match on host regardless of port, or require explicit entries?) is not confirmed. **Let the DCR test in D.12 decide:** if a registration with a `localhost` redirect URI is rejected, either add the needed hosts to the list or **delete the Trusted Hosts policy** (allowed — it's not mandatory) and rely on `max-clients` + Cloudflare WAF rate-limiting instead. Deleting is a legitimate choice, not a failure; it's the clean way to remove the constraint if it blocks legitimate MCP clients.
+✅ **VERIFIED behavior (2026-07-05):** Keycloak 26.6.0's "Client URIs Must Match" **matches on host regardless of port** — a registration with `http://localhost:53789/callback` or `http://127.0.0.1:53789/callback` (arbitrary high ports) **succeeds** with `localhost`/`127.0.0.1` in the trusted list. So Trusted Hosts is **viable to keep ON** for MCP desktop clients (which use arbitrary loopback ports) — it constrains redirect hosts for real security while allowing legitimate loopback clients. **Keep it enabled**; put both `localhost` and `127.0.0.1` in the list. (Earlier drafts said to consider deleting it; that's superseded — keeping it on is the better posture now that loopback-port handling is confirmed.)
 
 **On `max-clients` value:** the number's job is DoS protection — stop a script from creating millions of clients and exhausting Postgres. Size it above legitimate use but well below "database problem." At friends-of-founders scale (tens of users × a few MCP clients each), legitimate use is in the low hundreds at most. Keycloak's default is **200**; `1000` gives comfortable growth headroom. Either is fine; pick based on how much you want to avoid a future "bump the limit" admin change. 10000 (an earlier draft value) is meaninglessly high for your scale — it would never trip before a DoS became a storage problem.
 
@@ -744,17 +774,46 @@ After saving, the profile is editable. Add executors via **Add executor** [?].
 | Enforce PKCE (S256) | `pkce-enforcer` | **Auto-configure: ON** (auto-stamps S256 on clients; rejects non-S256 auth requests). The old explicit "Code Challenge Method" field is gone in 26.6.0 — Auto-configure replaces it. |
 | Restrict response types to `code` (forbid implicit) | `secure-response-type` | **Auto-configure: ON.** ⚠️ **"Allow token response type": leave OFF** — ON would re-permit the insecure implicit flow (`token` response type), defeating the executor. OAuth 2.1 / MCP clients use auth-code + PKCE only. |
 | Force consent required | `consent-required` | **Auto-configure: ON** |
-| Enforce HTTPS / secure redirect URIs | one of `secure-client-uris` / `secure-redirect-uri` [?] | **Auto-configure: ON** |
+| Enforce secure redirect URIs | **swap `secure-client-uris` → `secure-redirect-uris-enforcer`** | ⚠️ **The default `secure-client-uris` has NO loopback config and rejects all MCP desktop clients — you MUST swap it. See below.** |
 | Secure session binding | `secure-session` | **Auto-configure: ON** |
 | Disable client full-scope access | `full-scope-disabled` | **Auto-configure: ON** |
 
 ⚠️ **Confidence note:** I'm confident about `pkce-enforcer` Auto-configure and about leaving "Allow token response type" OFF. The exact Auto-configure semantics on the *other* executors are inferred from the same pattern, not individually verified. If any executor's Auto-configure writes a client setting you didn't expect, inspect that one. The D.12 DCR test plus decoding an actually-issued token is the end-to-end confirmation that the profile behaves correctly.
 
-**On the redirect-URI executors — two exist, pick one:** 26.6.0 exposes both `secure-redirect-uri` **and** `secure-client-uris-pattern`. Their exact difference isn't verified here; read each one's description in the UI. Best inference:
-- `secure-redirect-uri` — general hygiene: enforces HTTPS scheme, rejects wildcards/fragments, no configuration needed. **Likely the one you want.**
-- `secure-client-uris-pattern` — enforces URIs against a *configured pattern/allowlist* (if it exposes a field for entering patterns, this is confirmed). This reintroduces the localhost-vs-vendor-domain problem that Trusted Hosts had. **Likely skip for v1.**
+**🔑 The redirect-URI executor MUST allow loopback — and the DEFAULT executor can't. You must SWAP it.** This bit yourapp-prod in production (2026-07-05): DCR registrations with loopback redirects were rejected with `client_policy_error_detail="Invalid redirectUris"`. The cause is subtle — **there are two different redirect-URI executors, and they behave very differently:**
 
-Use `secure-redirect-uri` for the "enforce HTTPS redirect URIs" row above; skip `secure-client-uris-pattern` unless you specifically want pattern-allowlisting. Either way, watch the D.12 test — HTTPS enforcement may make loopback (`http://localhost:PORT`) redirects for desktop MCP clients fail; if so, that's the executor to reconsider.
+| Executor | Config options | Loopback (`http://127.0.0.1:PORT`)? | Origin |
+|---|---|---|---|
+| **`secure-client-uris`** | **NONE** (empty config) | **Rejected — no way to allow it** | FAPI 2.0; mandates HTTPS on all client URIs |
+| **`secure-redirect-uris-enforcer`** | loopback/http/scheme flags | **Yes, when configured** | OAuth 2.1; honors RFC 8252 loopback exception |
+
+Per Keycloak's own upgrade notes, `secure-client-uris` "enforce[s] stricter validation... mandating TLS (HTTPS) for client endpoints" — it is an **all-or-nothing HTTPS rule with no configuration and no loopback exception.** If your `mcp-hardening` profile has `secure-client-uris` (the older default), it will reject every loopback MCP desktop client (Claude Code, Cursor, Claude Desktop — all use `http://127.0.0.1:PORT` per RFC 8252), and there is **no config flag to fix it.**
+
+**Fix — swap the executor in the `mcp-hardening` profile:**
+1. **Delete `secure-client-uris`** (trash icon next to it).
+2. **Add `secure-redirect-uris-enforcer`** (a.k.a. `secure-redirect-uri`) from the executor dropdown.
+3. Configure the new executor (top-level Form view / JSON editor for the profile) with loopback allowed:
+```json
+"executor": "secure-redirect-uris-enforcer",
+"configuration": {
+    "allow-http-scheme": true,
+    "allow-ipv4-loopback-address": true,
+    "allow-ipv6-loopback-address": true,
+    "allow-private-use-uri-scheme": true,
+    "allow-open-redirect": false,
+    "allow-wildcard-context-path": false,
+    "oauth-2-1-compliant": false
+}
+```
+- `allow-ipv4-loopback-address` / `allow-ipv6-loopback-address` → permit `http://127.0.0.1:PORT` / `http://[::1]:PORT`.
+- `allow-http-scheme` → loopback is inherently `http`; without this it still fails.
+- `allow-private-use-uri-scheme` → permit `com.example.app:/callback` custom schemes some native clients use.
+- **`allow-open-redirect: false`** → KEEP false. This is the flag that matters for security (open-redirector prevention); loosening loopback does NOT loosen this.
+- **`oauth-2-1-compliant: false`** → leave false; `true` re-imposes strict rules that can reject loopback-by-hostname.
+
+⚠️ **`127.0.0.1` vs `localhost` — subsystems disagree, so register both / test.** RFC 8252 §7.3 recommends the IP literal `http://127.0.0.1:PORT`, and the `secure-redirect-uris-enforcer` loopback flags key on the IP literals. But Keycloak's *Trusted Hosts* loopback verification (a different subsystem) was changed to normalize/recognize only `localhost` and `*.localhost`. Because the two subsystems are inconsistent, the pragmatic move is to **register both `http://127.0.0.1:PORT/callback` and `http://localhost:PORT/callback`** on MCP clients (or test which your build accepts) rather than assume one. Communicate the working form to anyone piloting an MCP client.
+
+**Do NOT use `secure-client-uris-pattern`** (URI pattern allowlist) — it reintroduces the localhost-vs-vendor-domain problem and can't accommodate arbitrary loopback ports from unknown user machines.
 
 ### FAPI-tier executors — skip for v1
 
@@ -858,14 +917,23 @@ Settings:
 - **Clients → `yourapp-{env}-web` → Settings → Capability config → "Direct access grants" → Off.** (Already off — smoke Test 11 verifies `directAccessGrantsEnabled=false`.)
 - **Clients → `yourapp-{env}-admin-api` → same → Off.** (Already off — service account uses client-credentials, not ROPC.)
 
-⚠️ **DCR'd MCP clients — important nuance.** There is **no standard Keycloak client-policy executor that rejects a DCR registration for requesting `grant_types:["password"]`.** The `mcp-hardening` executors (pkce-enforcer, secure-response-type, secure-redirect-uri, etc.) constrain the authorize/response-type behavior, **not** which grant types a client may register with. So a DCR registration asking for the password grant will typically return **201** — that is *not* a misconfiguration of your profile; there is simply no built-in rule it violates. **Do not expect the client policy to reject it.**
+⚠️ **DCR'd MCP clients — important nuance.** No *redirect/response* executor rejects a DCR registration for requesting `grant_types:["password"]`. But Keycloak **does** have a purpose-built executor for ROPC: **`reject-resource-owner-password-credentials-grant`** (a.k.a. `reject-ropc`). Use it. Layer the controls so no single failure re-enables ROPC:
 
-The enforceable protection for DCR clients is to **neuter the realm's Direct Grant flow**, so that even a client registered with the password grant cannot use it to obtain a token:
+**Layer 1 — per-client capability (already done):**
+- **Clients → `yourapp-{env}-web` → Settings → Capability config → "Direct access grants" → Off.** (Smoke Test 11 verifies.)
+- **Clients → `yourapp-{env}-admin-api` → same → Off.**
 
-**Neuter the Direct Grant flow (the real ROPC control for federated-only realms):**
-- **Authentication → Flows → `direct grant`** → set its executions to **Disabled** (or delete them) so the flow can never succeed. Since yourapp.com is federated-only (no local passwords — Invariant 1), ROPC has no legitimate use for *any* client, so disabling it realm-wide is correct here, not just belt-and-suspenders. (The earlier caution about blocking "future service clients that need direct grants" doesn't apply to a federated-only realm — there are no passwords to grant against.)
+**Layer 2 — `reject-ropc` executor (primary, declarative control):**
+Add the **`reject-resource-owner-password-credentials-grant`** executor to a client-policy profile. For a realm-wide guarantee (correct here — federated-only means ROPC has zero legitimate use for *any* client), bind it via a policy with an **`any-client`** condition, not only the anonymous-DCR policy. This is cleaner than the old "neuter the flow" approach: it's declarative, lives with your other executors, and fails with a clear token-endpoint error instead of the confusing "flow has no executions" behavior.
 
-**Verify:** `./smoke.sh` → `Web client Direct Access Grants` / `Admin API Direct Access Grants` both `disabled` (Test 11); **`Password grant unusable (DCR)` green (Test 23)**. Test 23 registers a DCR client requesting the password grant (expects 201 — see nuance above) and then confirms `grant_type=password` **yields no token**. If Test 23 fails ("a DCR client OBTAINED an access token via password"), the fix is here — neuter the Direct Grant flow — **not** the client policy (which cannot enforce this).
+> 🔴 **SECURITY — CVE-2026-9792 (know this before relying on reject-ropc).** A flaw allows `reject-ropc` to be **silently bypassed** when the *policy* carrying it uses `client-type`, `client-roles`, `client-attributes`, or `client-scopes` conditions — an attacker can then still obtain tokens via ROPC even though the policy looks configured to block it. **Mitigations:** (1) **Patch** — confirm your Keycloak build includes the fix (filed May 2026; verify 26.6.x patch level and upgrade if needed — this is a security patch for your IdP regardless of ROPC). (2) **Bind reject-ropc via an `any-client` condition, NOT the affected condition types.** (3) **Don't rely on it alone** — keep Layers 1 and 3 too. The CVE is precisely why single-layer ROPC control isn't enough.
+
+**Layer 3 — neuter the Direct Grant flow (backstop the CVE can't bypass):**
+- **Authentication → Flows → `direct grant`** → set its executions to **Disabled**. Because the CVE bypasses the *client-policy* layer specifically, a control at the *flow* layer is what still holds if reject-ropc is bypassed. For a federated-only realm (no local passwords, Invariant 1) this is correct and costs nothing.
+
+**Why all three:** each fails independently. The per-client toggle is a client flag (CVE-unaffected); reject-ropc is the clean primary control (but CVE-bypassable via bad conditions); the disabled flow is a different-layer backstop. For a realm where ROPC must *never* work, layered is right.
+
+**Verify — the smoke test checks the EFFECT, not the config (which is why it catches a silently-bypassed control):** `./smoke.sh` → `Web client / Admin API Direct Access Grants` `disabled` (Test 11); **`Password grant unusable (DCR)` green (Test 23)**. Test 23 registers a DCR client requesting the password grant (expects 201) then confirms `grant_type=password` **yields no token**. Because it tests whether a token is actually issued — not whether reject-ropc is "configured" — it would catch a CVE-2026-9792 bypass. If Test 23 ever goes red, ROPC is live: check the patch level, the policy condition type, and that the flow is disabled.
 
 ## D.11 Verify HMAC handoff key is mounted
 
@@ -994,11 +1062,17 @@ These Client Registration Policies were removed (or never added) during initial 
 
 ## F.1 Trusted Hosts — when and how to re-add
 
+> **⚠️ Trusted Hosts is NOT an executor. Two different systems govern DCR:**
+> 1. **Client Policies** (newer) — Realm settings → *Client policies* tab → profiles + **executors** (this is where `mcp-hardening` and `secure-redirect-uris-enforcer` live). If you're looking at the executor list, you will NOT find Trusted Hosts here.
+> 2. **Client Registration Policies (CRP)** (older) — Clients → *Client registration* → **Trusted Hosts** lives here, alongside Allowed Client Scopes, Allowed Protocol Mappers, etc. (In the log/API these are `type=...ClientRegistrationPolicy` components.)
+>
+> Both systems can reject a DCR registration, which is why their errors look similar. Deleting Trusted Hosts (a CRP) does **not** affect the redirect-URI executor (a Client Policy) and vice-versa — they're independent. Keycloak's roadmap is to eventually fold CRPs into Client Policies, but in 26.6.0 both are active. **Design note (register B2):** because the executor system is the future, part of the pre-GA decision is whether to re-add the legacy Trusted Hosts CRP *at all*, versus using an executor-based or custom-SPI control. For the isolation test now, re-adding the CRP is fine to characterize its behavior.
+
 **Add back when:** you want to constrain which redirect-URI hosts DCR'd clients may use, i.e., before untrusted parties can register against prod. It's a meaningful control against a class of token-redirection attacks (an attacker registering a client whose redirect URI points at infrastructure they control).
 
-**Why it was removed:** Keycloak requires at least one of its two toggles ON (you can't make it fully permissive), and its handling of `localhost:<arbitrary-port>` for desktop/CLI MCP clients was unverified. Rather than fight it during early dev, it was deleted.
+**Why it was removed (historical):** during early dev the handling of `localhost:<arbitrary-port>` for desktop/CLI MCP clients was unverified, so rather than fight it, it was deleted. **This is now resolved** — testing (2026-07-05) confirmed Trusted Hosts matches on host regardless of port, so it works fine for loopback clients. Keep it on.
 
-**Path:** Clients → Client Registration → Anonymous Access Policies → Create policy → **Trusted Hosts**.
+**Path:** Clients → **Client registration** → **Anonymous Access Policies** → Create policy → **Trusted Hosts**. (This is the CRP system — a different tab from Client policies/executors above.)
 
 **Configuration:**
 - **Host Sending Client Registration Request Must Match:** OFF — MCP clients POST the DCR request from wherever the end user is (laptops, CI, arbitrary networks); their source IP is unpredictable and can't be whitelisted.
@@ -1007,7 +1081,7 @@ These Client Registration Policies were removed (or never added) during initial 
   - `localhost` and `127.0.0.1` — for desktop/CLI clients (Claude Desktop, Cursor, CLI tools) that use loopback redirect URIs
   - Any known vendor domains for web-hosted MCP clients you intend to support
 
-**Before trusting it, verify the localhost-port behavior** (the open question that caused the original removal): register a test client with `"redirect_uris": ["http://localhost:9999/callback"]` and one with `["http://localhost:54321/callback"]` (a different port). If both succeed with `localhost` in the trusted list, Keycloak matches on host regardless of port and you're done. If they fail, Keycloak is stricter than expected — either enumerate the specific host:port combinations you need, or accept that Trusted Hosts can't cleanly express "any localhost port" and fall back to `max-clients` + Cloudflare WAF + server-side redirect-URI validation instead.
+**✅ localhost-port behavior — VERIFIED (2026-07-05).** The open question that caused the original removal is resolved: with `localhost` in the Trusted Hosts list and "Client URIs Must Match" ON, a DCR registration with `"redirect_uris":["http://localhost:53789/callback"]` (an arbitrary high port) **succeeds** — Trusted Hosts matches on host regardless of port. So Trusted Hosts is viable to keep ON for GA: it constrains redirect hosts (real protection) while allowing legitimate loopback MCP desktop clients on any port. **Include both `localhost` AND `127.0.0.1` in the trusted list** — the executor (`secure-redirect-uris-enforcer`) and Trusted Hosts spell loopback differently (RFC 8252 `127.0.0.1` vs Keycloak's `localhost` normalization), so listing both ensures either redirect spelling a client uses satisfies both policies. (Confirm the `127.0.0.1` literal form specifically if your clients use it.)
 
 **Interaction with the DCR smoke test (D.12):** if you re-add Trusted Hosts with "Client URIs Must Match" ON, the D.12 test's default `https://example.com/callback` redirect URI will be **rejected** unless `example.com` is in the trusted list. Update the test's redirect URI to a trusted host, or temporarily add `example.com` to the list while testing, or run the DCR test before re-adding this policy.
 
