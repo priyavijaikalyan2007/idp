@@ -1886,70 +1886,191 @@ else
     fi
 fi
 
-# ----- test 25: DCR'd client has correct shape -----
-section "Test 25: DCR-registered client has correct default scopes + flow binding (§16.4)"
+# ----- test 25: DCR'd client has correct shape (post-provisioning) -----
+section "Test 25: DCR client shape after Option B provisioning (§7.5)"
 
-if [[ -z "$DCR_CLIENT_ID" ]]; then
-    record_fail "DCR'd client shape" "skipped - Test 21 did not produce a registered client to inspect"
+# IMPORTANT (test design): under Option B, a raw DCR-registered client (what Test 21
+# creates) has NO mcp scopes and NO flow binding until it goes through yourapp.com's
+# /mcp/consent provisioning (assignMcpScopes + bindBrowserFlow, web spec §7.5). This
+# smoke test cannot drive that path - it needs a real user session + a valid HMAC
+# picker-request token. So inspecting the raw Test-21 client will ALWAYS show it
+# unprovisioned. That is NOT a failure of the app or the realm - it's the expected
+# state of a client that hasn't been through consent yet.
+#
+# Therefore:
+#   - If PROVISIONED_MCP_CLIENT_ID is set (a client you've already driven through
+#     /mcp/consent once), inspect THAT client and assert the full shape (real check).
+#   - Otherwise inspect the raw Test-21 client and SKIP (informational), explaining
+#     that provisioning is app-driven and pointing at how to verify manually.
+
+INSPECT_CLIENT_ID="${PROVISIONED_MCP_CLIENT_ID:-$DCR_CLIENT_ID}"
+IS_PROVISIONED_CHECK="false"
+[[ -n "${PROVISIONED_MCP_CLIENT_ID:-}" ]] && IS_PROVISIONED_CHECK="true"
+
+if [[ -z "$INSPECT_CLIENT_ID" ]]; then
+    record_skip "DCR client shape" "no client to inspect (Test 21 produced none, and PROVISIONED_MCP_CLIENT_ID not set)"
 elif [[ -z "$ACCESS_TOKEN" ]]; then
-    record_fail "DCR'd client shape" "skipped - no admin access token to inspect client config"
+    record_fail "DCR client shape" "skipped - no admin access token to inspect client config"
 else
-    # Find the client by clientId (the DCR-issued opaque id matches what's in the admin API)
     CLIENT_INTERNAL_DATA=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
-        "${KC_URL}/admin/realms/${REALM}/clients?clientId=${DCR_CLIENT_ID}" 2>/dev/null | jq -r '.[0] // empty')
+        "${KC_URL}/admin/realms/${REALM}/clients?clientId=${INSPECT_CLIENT_ID}" 2>/dev/null | jq -r '.[0] // empty')
 
     if [[ -z "$CLIENT_INTERNAL_DATA" ]]; then
-        record_fail "DCR'd client shape" "could not retrieve admin view of DCR'd client ${DCR_CLIENT_ID}"
+        record_fail "DCR client shape" "could not retrieve admin view of client ${INSPECT_CLIENT_ID}"
     else
         CLIENT_INTERNAL_ID=$(echo "$CLIENT_INTERNAL_DATA" | jq -r '.id')
-
-        # Check default client scopes include mcp-default and the Author bundle
         DEFAULT_SCOPES=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
             "${KC_URL}/admin/realms/${REALM}/clients/${CLIENT_INTERNAL_ID}/default-client-scopes" 2>/dev/null | \
             jq -r '.[].name // empty')
-
         MISSING_DEFAULTS=()
         for required_scope in "$MCP_DEFAULT_SCOPE" "${MCP_AUTHOR_BUNDLE_SCOPES[@]}"; do
-            if ! echo "$DEFAULT_SCOPES" | grep -qx "$required_scope"; then
-                MISSING_DEFAULTS+=("$required_scope")
-            fi
+            echo "$DEFAULT_SCOPES" | grep -qx "$required_scope" || MISSING_DEFAULTS+=("$required_scope")
         done
+        HAS_ADMIN_DEFAULT="false"
+        echo "$DEFAULT_SCOPES" | grep -qx "yourapp:admin" && HAS_ADMIN_DEFAULT="true"
 
-        # Check yourapp:admin is NOT in default scopes (must be optional / explicit)
-        if echo "$DEFAULT_SCOPES" | grep -qx "yourapp:admin"; then
-            record_fail "DCR'd client shape" "yourapp:admin is incorrectly assigned as default scope - it must be optional (SETUP GUIDE D.7 / YOURAPP_WEB_MCP_ENDPOINTS.md §7.2.2; design: PRD §16.4)"
-        elif [[ ${#MISSING_DEFAULTS[@]} -gt 0 ]]; then
-            record_fail "DCR'd client shape" "default scopes missing: ${MISSING_DEFAULTS[*]} - EXPECTED until YourApp web runs assignMcpScopes() per YOURAPP_WEB_MCP_ENDPOINTS.md §7.2.2 (Option B: scopes assigned per-client by the app, NOT realm-default). Not a console fix."
-        else
-            record_pass "DCR'd client shape - default scopes" "Author bundle + mcp-default present; yourapp:admin correctly optional"
-        fi
-
-        # Check flow binding. Two valid configurations (setup guide D.8):
-        #   Option A: realm's default browser flow IS browser-mcp-tenant-pick, and
-        #             the SPI short-circuits for non-MCP clients. In this case a
-        #             per-client override is NOT expected (and its absence is fine).
-        #   Option B: realm browser flow stays browser-federated-only, and YourApp
-        #             web sets a per-client authenticationFlowBindingOverrides.browser.
-        # Detect which option is in effect by reading the realm's browser flow.
-        REALM_BROWSER_FLOW=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
-            "${KC_URL}/admin/realms/${REALM}" 2>/dev/null | jq -r '.browserFlow // empty')
         FLOW_BINDING=$(echo "$CLIENT_INTERNAL_DATA" | jq -r '.authenticationFlowBindingOverrides.browser // empty')
-
-        if [[ "$REALM_BROWSER_FLOW" == "$MCP_FLOW_NAME" ]]; then
-            # Option A in effect: realm default routes everything through the MCP
-            # flow; SPI short-circuits non-MCP clients. Per-client override optional.
-            record_pass "DCR'd client shape - flow binding" "Option A: realm browser flow is ${MCP_FLOW_NAME}; per-client override not required (SPI short-circuits non-MCP clients)"
-        elif [[ -n "$FLOW_BINDING" ]]; then
+        BOUND_FLOW_ALIAS=""
+        if [[ -n "$FLOW_BINDING" ]]; then
             BOUND_FLOW_ALIAS=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
                 "${KC_URL}/admin/realms/${REALM}/authentication/flows" 2>/dev/null | \
                 jq -r --arg fid "$FLOW_BINDING" '.[] | select(.id == $fid) | .alias' || true)
-            if [[ "$BOUND_FLOW_ALIAS" == "$MCP_FLOW_NAME" ]]; then
-                record_pass "DCR'd client shape - flow binding" "Option B: per-client override bound to ${MCP_FLOW_NAME}"
+        fi
+
+        FULLY_PROVISIONED="false"
+        [[ ${#MISSING_DEFAULTS[@]} -eq 0 && "$HAS_ADMIN_DEFAULT" == "false" && "$BOUND_FLOW_ALIAS" == "$MCP_FLOW_NAME" ]] && FULLY_PROVISIONED="true"
+
+        if [[ "$IS_PROVISIONED_CHECK" == "true" ]]; then
+            # Real assertion against a client you've told us IS provisioned.
+            if [[ "$FULLY_PROVISIONED" == "true" ]]; then
+                record_pass "DCR client shape (provisioned)" "client '${INSPECT_CLIENT_ID}': mcp-default + author bundle default, yourapp:admin optional, browser flow bound to ${MCP_FLOW_NAME}. Option B provisioning verified."
             else
-                record_fail "DCR'd client shape - flow binding" "per-client override bound to '${BOUND_FLOW_ALIAS:-(unresolvable)}', expected '${MCP_FLOW_NAME}'"
+                DETAIL=""
+                [[ ${#MISSING_DEFAULTS[@]} -gt 0 ]] && DETAIL+="missing default scopes: ${MISSING_DEFAULTS[*]}. "
+                [[ "$HAS_ADMIN_DEFAULT" == "true" ]] && DETAIL+="yourapp:admin wrongly in DEFAULT (must be optional). "
+                [[ "$BOUND_FLOW_ALIAS" != "$MCP_FLOW_NAME" ]] && DETAIL+="browser flow bound to '${BOUND_FLOW_ALIAS:-none}', expected ${MCP_FLOW_NAME}. "
+                record_fail "DCR client shape (provisioned)" "client '${INSPECT_CLIENT_ID}' was flagged provisioned but is incomplete: ${DETAIL}Check assignMcpScopes/bindBrowserFlow ran (web spec §7.5) and the admin-api service account has manage-clients (PRD §11.13)."
             fi
         else
-            record_fail "DCR'd client shape - flow binding" "realm browser flow is '${REALM_BROWSER_FLOW}' (not the MCP flow) AND no per-client override set. Choose one: set realm browser flow to ${MCP_FLOW_NAME} (Option A, setup guide D.8) or have YourApp web set a per-client override (Option B)."
+            # Inspecting the raw Test-21 client - provisioning is app-driven and not
+            # reachable from this suite. Report state as an informational SKIP.
+            if [[ "$FULLY_PROVISIONED" == "true" ]]; then
+                record_pass "DCR client shape" "raw DCR client already shows full MCP shape (scopes + flow binding) - provisioning must have run out-of-band. Good."
+            else
+                record_skip "DCR client shape" "raw DCR client '${INSPECT_CLIENT_ID}' is unprovisioned (no mcp scopes / no flow binding) - EXPECTED. Option B provisioning runs in yourapp.com at /mcp/consent (§7.5), which this suite can't drive (needs a real session + HMAC picker token). To verify the app works: set PROVISIONED_MCP_CLIENT_ID to a client you've driven through /mcp/consent once, or check the mcp_provisioned_clients table for a provisioned_at timestamp and inspect that client in Keycloak admin."
+            fi
+        fi
+    fi
+fi
+
+# ----- test 25b: Keycloak-side provisioning CAPABILITY (Variant B, browserless) -----
+section "Test 25b: Option B provisioning capability — Keycloak side (§7.5)"
+
+# WHAT THIS IS: Test 25 can only INSPECT a client's shape; it can't drive the
+# app's /mcp/consent provisioning (that needs a browser + HMAC token). This test
+# fills the automatable half: acting AS the admin-api service account (exactly
+# what yourapp.com does in assignMcpScopes/bindBrowserFlow), it registers a fresh
+# client and performs the same Admin API writes the app would, asserting each
+# SUCCEEDS. This validates the KEYCLOAK-SIDE contract the app depends on:
+#   - the service account CAN assign these scopes + bind the flow (catches a
+#     missing manage-clients role as a hard 403 - the exact issue from §11.13),
+#   - the mcp-default + author-bundle scopes EXIST to assign,
+#   - the browser-mcp-tenant-pick flow EXISTS to bind to.
+# It does NOT test yourapp.com's orchestration (single-flight, the state table,
+# the /mcp/consent trigger) - that's the interactive E2E test's job
+# (mcp-e2e-interactive.sh). Full three-tier model: see web spec §9.3.
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+    record_skip "Provisioning capability (KC side)" "no admin access token"
+else
+    VB_DCR="${REALM_BASE}/clients-registrations/openid-connect"
+    VB_BODY='{"client_name":"smoke-provision-cap","redirect_uris":["http://localhost:53999/callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none","scope":"openid"}'
+    VB_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST "$VB_DCR" \
+        -H "Content-Type: application/json" -d "$VB_BODY")
+    VB_STATUS=$(echo "$VB_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+    VB_JSON=$(echo "$VB_RESP" | sed '/HTTP_STATUS:/d')
+
+    if [[ "$VB_STATUS" != "201" ]]; then
+        record_skip "Provisioning capability (KC side)" "couldn't register a probe client (HTTP ${VB_STATUS}) - skipping capability check"
+    else
+        VB_CLIENT_ID=$(echo "$VB_JSON" | jq -r '.client_id')
+        VB_RAT=$(echo "$VB_JSON" | jq -r '.registration_access_token // empty')
+        VB_INTERNAL=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "${KC_URL}/admin/realms/${REALM}/clients?clientId=${VB_CLIENT_ID}" | jq -r '.[0].id // empty')
+
+        # resolve scope name → id
+        ALL_SCOPES=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+            "${KC_URL}/admin/realms/${REALM}/client-scopes")
+        scope_id() { echo "$ALL_SCOPES" | jq -r --arg n "$1" '.[] | select(.name==$n) | .id' ; }
+
+        VB_FAILED=0
+        VB_DETAIL=""
+
+        # (1) assign default scopes: mcp-default + author bundle (what assignMcpScopes does)
+        for s in "$MCP_DEFAULT_SCOPE" "${MCP_AUTHOR_BUNDLE_SCOPES[@]}"; do
+            sid=$(scope_id "$s")
+            if [[ -z "$sid" ]]; then
+                VB_FAILED=1; VB_DETAIL+="scope '${s}' does not exist (create per setup guide D.3/D.4); "
+                continue
+            fi
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+                -H "Authorization: Bearer $ACCESS_TOKEN" \
+                "${KC_URL}/admin/realms/${REALM}/clients/${VB_INTERNAL}/default-client-scopes/${sid}")
+            if [[ "$code" == "403" ]]; then
+                VB_FAILED=1; VB_DETAIL+="PUT default-scope '${s}' → 403 (admin-api service account missing manage-clients, PRD §11.13); "
+                break
+            elif [[ "$code" != "204" && "$code" != "200" ]]; then
+                VB_FAILED=1; VB_DETAIL+="PUT default-scope '${s}' → HTTP ${code}; "
+            fi
+        done
+
+        # (2) assign yourapp:admin as OPTIONAL
+        if [[ "$VB_FAILED" -eq 0 ]]; then
+            aid=$(scope_id "yourapp:admin")
+            if [[ -n "$aid" ]]; then
+                code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+                    -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/clients/${VB_INTERNAL}/optional-client-scopes/${aid}")
+                [[ "$code" == "204" || "$code" == "200" ]] || { VB_FAILED=1; VB_DETAIL+="PUT optional yourapp:admin → HTTP ${code}; "; }
+            else
+                VB_DETAIL+="(yourapp:admin scope absent - skipped optional assign) "
+            fi
+        fi
+
+        # (3) bind the browser flow (what bindBrowserFlow does)
+        if [[ "$VB_FAILED" -eq 0 ]]; then
+            FLOW_ID=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                "${KC_URL}/admin/realms/${REALM}/authentication/flows" | jq -r --arg a "$MCP_FLOW_NAME" '.[] | select(.alias==$a) | .id')
+            if [[ -z "$FLOW_ID" ]]; then
+                VB_FAILED=1; VB_DETAIL+="flow '${MCP_FLOW_NAME}' does not exist to bind (create per setup guide D.2); "
+            else
+                VB_CLIENT_REP=$(curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/clients/${VB_INTERNAL}")
+                VB_PATCHED=$(echo "$VB_CLIENT_REP" | jq --arg fid "$FLOW_ID" '.authenticationFlowBindingOverrides = {"browser": $fid}')
+                code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+                    -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+                    -d "$VB_PATCHED" \
+                    "${KC_URL}/admin/realms/${REALM}/clients/${VB_INTERNAL}")
+                if [[ "$code" == "403" ]]; then
+                    VB_FAILED=1; VB_DETAIL+="PUT flow-binding → 403 (missing manage-clients); "
+                elif [[ "$code" != "204" && "$code" != "200" ]]; then
+                    VB_FAILED=1; VB_DETAIL+="PUT flow-binding → HTTP ${code}; "
+                fi
+            fi
+        fi
+
+        if [[ "$VB_FAILED" -eq 0 ]]; then
+            record_pass "Provisioning capability (KC side)" "admin-api service account can assign mcp-default + author bundle (default), yourapp:admin (optional), and bind ${MCP_FLOW_NAME} - the Keycloak-side half of Option B works. (App orchestration verified separately by mcp-e2e-interactive.sh.)"
+        else
+            record_fail "Provisioning capability (KC side)" "${VB_DETAIL}"
+        fi
+
+        # cleanup the probe client (RAT first, admin fallback)
+        if [[ -n "$VB_RAT" ]]; then
+            curl -s -o /dev/null -X DELETE "${VB_DCR}/${VB_CLIENT_ID}" -H "Authorization: Bearer $VB_RAT" || true
+        elif [[ -n "$VB_INTERNAL" ]]; then
+            curl -s -o /dev/null -X DELETE -H "Authorization: Bearer $ACCESS_TOKEN" \
+                "${KC_URL}/admin/realms/${REALM}/clients/${VB_INTERNAL}" || true
         fi
     fi
 fi
