@@ -124,3 +124,31 @@ The user asked to double-check all SPI-spec updates since the July-1 implementat
 **Conclusion: no SPI source change required.** Under the recommended Option B, `mcp-default` is never a realm default, so the current `isMcpClient` guard is correct and acts as a pure safety net.
 
 **The required work was documentation drift from July 1** (all mine): `keycloak.web.mcp.md §7.2.1` still recommended Option A. Fixed it to recommend Option B and align with setup guide D.8. Recorded ADR-010 correcting ADR-009's "bound realm-wide safely" framing, updated the `McpTenantPickerAuthenticator` concept, added a CHANGELOG correction entry, and filed **TD-009** for the deferred `yourapp.mcp`-attribute hardening (YAGNI under Option B; revisit if Option A is ever adopted).
+
+---
+
+## Session: 2026-07-04 — Repository orientation summary
+
+The user asked for a summary of the repository's purpose and the agent's role in it. Read `README.md`, `agentknowledge/{concepts,entities,decisions}.yaml`, `CONVERSATION.md`, recent `git log`, and the MCP SPI status document. No source code or behavior was changed.
+
+Summary provided: this repo is the customized Keycloak 26.x identity broker for Outcrop Inc./YourApp web properties, with Java SPI code, themes/deployment scripts, Cloud Run configuration, and detailed specs for MCP/OAuth 2.1/DCR support. The agent's role is to act as the repository's implementation and maintenance engineer, following the documented V-V-P-T-I-R-V-C/TDD workflow, preserving the knowledge base and conversation history, keeping specs/docs synchronized, and making small, verified, committed changes when implementation work is requested.
+
+Correction from user: `CODEX.md` contains a critical role override. The primary role in this repository is red-team security lead for the Keycloak IdP: analyze repository, implementation, setup, and runtime for security issues, vulnerabilities, bypasses, DDoS exposure, patch/CVE posture, and write security reports for a separate coding agent to fix. Unless explicitly asked, do not modify existing code; review changes with the user and produce security findings/remediation reports instead.
+
+### Red-team review follow-up
+
+The user asked for a red-team analysis of everything done so far by the coding agent, including Keycloak setup instructions and whether any security credentials had been checked in. Produced `specs/security-red-team-report-2026-07-04.md`.
+
+Key findings: no plaintext production secret values were found in tracked files or git-history pattern scans, but a local untracked `keycloak_neon.dump` PostgreSQL dump exists and is ignored but world-readable by file mode. The highest-risk issues are: Keycloak is pinned to 26.6.0 while upstream current is 26.6.4 with multiple security fixes; bootstrap admin env vars remain mounted in `cloudrun.yaml`; Cloud Run uses the default compute service account; DCR redirect-host/protocol-mapper hardening and WAF/rate limiting remain deferred; setup docs still contain contradictory `mcp-default` realm-default checklist text; the MCP SPI should add server-side picker-request/result correlation and scope validation before public MCP exposure; replay protection is per-JVM; and Dependabot only covers pip, not Docker/Maven.
+
+No source implementation code was modified. The report is intended as a handoff artifact for a coding agent or operator to fix in priority order.
+
+### Secret scanner and GitHub security automation follow-up
+
+The user approved installing Gitleaks and TruffleHog and asked for a full local secret scan first, plus GitHub repository security-tool configuration where available. Installed Gitleaks 8.30.1 and TruffleHog 3.95.8 under `/tmp/security-tools`. Reports were written under `/tmp/security-scan` and not committed.
+
+Scan results: Gitleaks found 5 redacted findings in git history and 3 in the working tree, all reviewed as documentation/config-example false positives (`YOUR_ACCESS_TOKEN` Auth0 examples and a JDBC env-var example). TruffleHog found 0 verified and 0 unverified secrets in both git-history and working-tree scans. The sensitive local `keycloak_neon.dump` finding remains because dumps are sensitive even when scanners do not detect token-like strings.
+
+GitHub repository changes: enabled Dependabot alerts and automated security fixes via GitHub API; GitHub secret scanning / push protection returned HTTP 422 ("Secret scanning is not available for this repository") for this private repo. Updated `.github/dependabot.yml` to cover Docker, Maven, and GitHub Actions; added `.github/workflows/codeql.yml`; added `.github/workflows/dependency-review.yml`; rewrote `SECURITY.md` for the Keycloak IdP instead of the old UI-library scope. YAML parsed successfully with PyYAML and `git diff --check` passed.
+
+Live GCP read-only check: active `gcloud` account is `operator@example.com`; configured project is `your-gcp-project-id`. A read-only `gcloud run services describe yourappauth --region=your-region` succeeded and confirmed the latest service still has bootstrap admin env vars mounted and still uses the default compute service account.

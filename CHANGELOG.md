@@ -5,6 +5,10 @@ Categories per Keep a Changelog: Added, Changed, Fixed, Removed, Deprecated, Sec
 
 ## [Unreleased]
 
+### Security
+
+- 2026-07-04 — Added GitHub security automation for the IdP repo: Dependabot now covers Docker, Maven, and GitHub Actions; CodeQL and Dependency Review workflows were added; `SECURITY.md` now reflects the Keycloak IdP threat model instead of a UI-component library. Also enabled Dependabot alerts and automated security fixes through the GitHub API; GitHub secret scanning was unavailable for this private repo under current plan/settings.
+
 ### Changed
 
 - 2026-07-03 — Corrected the flow-binding guidance for the MCP short-circuit (docs only; no code change). Real-world testing reversed the recommendation from **Option A** (realm-wide browser-flow binding) to **Option B** (per-client binding): a malformed MCP flow bound realm-wide returned HTTP 400 for *every* login, and realm-default assignment of `mcp-default` breaks the SPI's own MCP-client detection (the web client would also carry the scope). Under the now-recommended Option B, `mcp-default` stays off the realm defaults and the current `isMcpClient` guard is correct and acts as a pure safety net — so no SPI source change is needed. Updated `keycloak.web.mcp.md §7.2.1` (was recommending Option A — now Option B), the `McpTenantPickerAuthenticator` concept, and recorded **ADR-010** correcting ADR-009's "bound realm-wide safely" framing. The July-1 entry below reflects the original (now-superseded) framing. The Option-A hardening (detect via a `yourapp.mcp` client attribute set at DCR) is deferred — see `TECH_DEBT.md` TD-009.

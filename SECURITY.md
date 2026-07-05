@@ -1,58 +1,42 @@
 # Security Policy
 
+## Scope
+
+This repository builds and operates the YourApp Keycloak IdP: a customized Keycloak 26.x container, Java SPI providers, OAuth/OIDC/MCP configuration, Cloud Run deployment metadata, and operational scripts.
+
+Security reports may involve authentication bypass, OAuth/OIDC flow flaws, dynamic client registration abuse, token leakage, tenant or scope escalation, secret exposure, Keycloak configuration drift, Cloud Run/IAM exposure, or denial-of-service risks against the identity broker.
+
 ## Supported Versions
 
-| Version | Supported |
-|---------|-----------|
-| 1.0.x   | Yes       |
-| < 1.0   | No        |
+Only the currently deployed Keycloak 26.x patch line is supported. Patch releases should be treated as security-relevant by default and applied promptly after testing.
 
 ## Reporting a Vulnerability
 
-**Do NOT open a public GitHub issue for security vulnerabilities.**
+Do **not** open a public GitHub issue for security vulnerabilities.
 
-Please report security concerns through [GitHub Security Advisories](../../security/advisories/new). This ensures the report remains private while we investigate and address the issue.
+Use GitHub Security Advisories for this repository, or contact the maintainers privately if advisory access is unavailable. Include one finding per report when possible.
 
-### What to Include
+## What To Include
 
-- **Description** — A clear, concise description of the vulnerability.
-- **Steps to Reproduce** — Detailed steps to trigger the issue, including any sample HTML or JavaScript.
-- **Impact Assessment** — What an attacker could achieve by exploiting this vulnerability.
-- **Affected Component** — Which component(s) are affected (e.g., HelpDrawer, CommentOverlay).
-- **Browser/Environment** — Browser name, version, and OS where the issue was observed.
-- **Suggested Fix** — If you have one, a proposed remediation approach.
+- Description of the vulnerability.
+- Affected component, realm, endpoint, script, or configuration.
+- Preconditions and required privileges.
+- Reproduction steps with safe test data.
+- Impact: what an attacker can read, modify, bypass, mint, exhaust, or escalate.
+- Evidence such as sanitized logs, request/response metadata, screenshots, or commit references.
+- Suggested remediation, if known.
 
-### Response Timeline
+Do not include live secrets, access tokens, refresh tokens, private keys, database dumps, or plaintext credentials in the report body. If secret material was exposed, identify where and coordinate rotation privately.
 
-- **Acknowledgment** — We will acknowledge receipt of your report within 48-72 hours.
-- **Initial Assessment** — We will provide an initial severity assessment within one week.
-- **Resolution** — Critical vulnerabilities will be prioritized for the next patch release. We will coordinate with you on disclosure timing.
+## Response Priorities
 
-## Scope
+- **Critical:** authentication bypass, token forgery, signing-key exposure, admin privilege escalation, production credential exposure.
+- **High:** tenant isolation failure, scope escalation, DCR abuse enabling token delivery to attacker-controlled destinations, exploitable IdP denial of service.
+- **Medium:** hardening gaps, missing rate limits, sensitive metadata exposure, unsafe defaults that require additional preconditions.
+- **Low:** documentation or defense-in-depth issues with limited exploitability.
 
-This project is a **client-side UI theme and component library**. There is no server-side code, backend API, authentication system, or database. All components run entirely in the browser.
+## Operational Expectations
 
-Because of this architecture, the typical web security attack surface is limited. The primary security concern is:
-
-### Cross-Site Scripting (XSS)
-
-The main attack vector is XSS through improper use of `innerHTML`. This project mitigates that risk by:
-
-- Using `textContent` instead of `innerHTML` for all user-supplied content.
-- Using `createElement` and `setAttr` DOM helpers for building component markup programmatically.
-- Avoiding inline event handlers in generated HTML.
-
-If you find a component that uses `innerHTML` with unsanitized user input, that is a valid security report.
-
-### Out of Scope
-
-The following are generally **not** security vulnerabilities in the context of this project:
-
-- CSS-only styling issues (visual glitches, layout problems).
-- Behavior that requires the consuming application to pass attacker-controlled HTML to a component's API, unless the component's documentation indicates that input will be sanitized.
-- Vulnerabilities in third-party dependencies (report those to the upstream project directly, but do let us know so we can update).
-- Issues that require physical access to the user's machine.
-
-## Acknowledgments
-
-We appreciate the security research community's efforts in responsibly disclosing vulnerabilities. Contributors who report valid security issues will be credited in the release notes (unless they prefer to remain anonymous).
+- Production secrets belong in GCP Secret Manager or equivalent; never in source, scripts, logs, dumps, or GitHub Actions variables unless intentionally scoped and protected.
+- Keycloak database dumps are sensitive artifacts and must be encrypted at rest, stored outside the repository, and tightly permissioned.
+- Security fixes should be tested with `./test.sh` and relevant `./smoke.sh` checks before deployment.
