@@ -677,12 +677,20 @@ Cover:
 - Verify replay rejection
 - Verify membership changes mid-flow are caught
 
-### 9.3 End-to-end tests
+### 9.3 End-to-end tests — three-tier model
 
-- Cypress / Playwright against a deployed dev environment
-- Real Keycloak (dev realm), real Knobby web (dev), real DCR-registered test client
-- Walk through the full flow, decode the resulting access token, verify claims
-- Covered by smoke test Test 33 (manual) for now; can be automated once stable
+MCP validation spans three tiers, each at a different cadence because the flow's security design (real federated login + HMAC-signed handoff token) makes parts of it un-forgeable by a script — which is correct, and shapes how it's tested:
+
+| Tier | Artifact | Cadence | What it validates | What it can't |
+|---|---|---|---|---|
+| **1. Smoke — config** | `keycloak-smoke-test.sh` (Test 25) | Frequent / automated / browserless | Inspects a client's shape; skips gracefully for an unprovisioned raw DCR client | Can't drive `/mcp/consent` (no browser, no HMAC token) |
+| **1b. Smoke — capability** | `keycloak-smoke-test.sh` (Test 25b, "Variant B") | Frequent / automated / browserless | Acting *as* the admin-api service account, performs the same Admin API writes the app does (assign scopes, bind flow) and asserts they succeed — validates the **Keycloak-side** half: roles (catches missing `manage-clients` as 403), scopes exist, flow exists | Doesn't test knobby.io's orchestration (single-flight, state table, `/mcp/consent` trigger) |
+| **2. Interactive E2E** | `mcp-e2e-interactive.sh` | Rare / human-in-the-loop | The **whole real chain**: DCR → real browser login → consent wizard → app provisioning → token issuance. Human completes only the login; a loopback listener (`http://localhost:PORT/callback`, same pattern as Claude Code / desktop MCP clients) auto-captures the code. Asserts token `aud`/`scope`/`tenant`, client shape, and the `mcp_provisioned_clients` row | Needs a human + valid federated creds; not CI |
+| **3. Full browser automation** | Playwright/Cypress (future, optional) | CI (if built) | Tier 2 with the login step scripted against a test IdP account | Higher maintenance; only if the manual cadence becomes a bottleneck |
+
+**When to run tier 2** (`mcp-e2e-interactive.sh`): before releases touching auth/MCP, after changing the SPI / `browser-mcp-tenant-pick` flow / consent wizard / provisioning code, and on new-environment bring-up. It's a named **pre-GA acceptance gate** (see `DEFERRED_ITEMS.md`). A human-run test only protects you if it's actually run at those moments — the "when to run" header in the script and the pre-GA checklist are what keep it from rotting.
+
+**Repo placement:** tiers 1/1b/2 are **operator/infra tools** (they validate the deployed Keycloak realm over HTTP and assert external state) — they live in the **Keycloak/infra repo** alongside the setup guide, PRD, SPI, and Dockerfile, *not* in the knobby.io app repo. knobby.io's own unit/integration tests for `McpConsentService`, `assignMcpScopes`, the state table, and single-flight refresh (§9.1/§9.2) live in the app repo. Rule of thumb: talks to the deployed system over HTTP and asserts external state → infra repo; imports app modules and mocks dependencies → app repo.
 
 ### 9.4 Cross-system contract tests
 

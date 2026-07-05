@@ -39,7 +39,7 @@
 | # | Item | Category | Trigger | Blast radius if forgotten |
 |---|------|----------|---------|---------------------------|
 | C1 | **`browser-mcp-tenant-pick` flow structure** — parked; needs the correct Required-subflow + IdP-selection step in 26.6.0 (nested-subflow-can't-be-Alternative constraint). | ROADMAP | When bringing up real MCP clients. | Not in use under Option B; binds per-client only. No current blast radius (governs zero traffic). Must be correct before first real MCP client, or MCP login fails. |
-| C2 | **Knobby web post-DCR processing** — `assignMcpScopes` + `bindBrowserFlow` (web spec §7.2.1–7.2.3). | ROADMAP | When implementing the MCP consent slice. | Until built, DCR'd MCP clients lack scopes + flow binding (smoke Tests 23/25 stay red — expected). No security exposure; it's unbuilt feature work. |
+| C2 | **Knobby web post-DCR processing** — `assignMcpScopes` + `bindBrowserFlow` (web spec §7.2.1–7.2.3, consolidated in §7.5). | ROADMAP | When implementing the MCP consent slice. | Until built, DCR'd MCP clients lack scopes + flow binding. Smoke Test 25 **skips** (informational) for a raw DCR client since the suite can't drive `/mcp/consent`; to verify the app's provisioning, set `PROVISIONED_MCP_CLIENT_ID` to a client already driven through consent, or check the `mcp_provisioned_clients` table. No security exposure; unbuilt/verify-manually feature work. |
 | C3 | **HMAC handoff key** (`knobby-mcp-handoff-hmac-key-prod`) created + mounted (setup guide D.11). | ROADMAP | Before the MCP consent handoff goes live. | Handoff JWT signing/verification unavailable → MCP consent flow can't complete. No exposure pre-launch. |
 
 ## D. Rotation & token posture
@@ -56,6 +56,7 @@
 | E2 | **Cloudflare posture for `auth.knobby.io`** (setup guide §A.11) — currently DNS-only after the 429 incident. | ROADMAP | When you want CDN/WAF in front of the IdP. | Re-proxying without the fixes (Rocket Loader off, rate-limits scoped off `/admin/*` `/resources/*`) re-breaks the admin console and smoke tests. Documented; just don't re-enable blindly. |
 | E3 | **Keycloak → Hetzner migration** — cut always-on JVM cost; also fixes the DB connection-mode constraints (direct connection becomes viable, IPv6 available). | ROADMAP | Cost-driven, when Cloud Run JVM cost bites. | None if not done. When done: re-verify pooler config (§A.2.3), pool sizing (§A.2.3.1), and observability scrape model change to private/localhost. |
 | E4 | **Dev/staging realms** (`knobby-dev`, `knobby-staging`) — topology planned, not created. | ROADMAP | Before you need a non-prod test surface. | Apply ALL learnings when created: pooler session-mode + `prepareThreshold=0`, pool caps, `ByAnonymous`-only condition, per-client Option B, all §11.7a IdP settings. Easy to reintroduce solved bugs on a fresh realm — this register is the checklist. |
+| E5 | **Interactive E2E acceptance test** (`mcp-e2e-interactive.sh`) — human-in-the-loop full-flow validation (DCR → real login → consent → provisioning → token). | ERGONOMICS (named GA gate) | Run before auth/MCP releases, after SPI/consent/flow changes, on new-env bring-up; a **pre-GA acceptance gate**. | Not a security gap in itself, but it's the only test that validates the *whole* real handoff. Its value depends on the discipline of running it at the right moments — a human test that isn't run is worthless. Lives in the infra repo (see note below). Three-tier model in web spec §9.3. |
 
 ## F. Enterprise / future auth surface (roadmap, from PRD §17)
 
@@ -75,8 +76,17 @@ Before exposing MCP DCR to any untrusted third party or going public, confirm ev
 - [ ] **B2** — Trusted Hosts CRP re-added and scoped (§F.1).
 - [ ] **B3** — Allowed Protocol Mapper Types CRP re-added (§F.2), or explicitly accepted as covered by server-side claim validation.
 - [ ] **A3** — Cross-IdP claim gating implemented and tested in the app (§8.3.1).
+- [ ] **E5** — Interactive E2E test (`mcp-e2e-interactive.sh`) run and green against the target environment (full real handoff validated).
 - [ ] Consider **B1** — custom grant-types registration policy for cleaner rejection + broader enforcement.
 - [ ] Rate-limiting back in front of DCR/token endpoints (if Cloudflare/WAF re-enabled per E2).
+
+## Repo placement (where these test artifacts live)
+
+The auth test artifacts are **operator/infra tools** — they validate the deployed Keycloak realm over HTTP and assert external state — so they live in the **Keycloak/infra repo** alongside the setup guide, PRD, SPI, and Dockerfile, **not** in the knobby.io app repo:
+- `keycloak-smoke-test.sh` (tiers 1 + 1b, automated/browserless)
+- `mcp-e2e-interactive.sh` (tier 2, human-in-the-loop)
+
+knobby.io's own unit/integration tests (`McpConsentService`, `assignMcpScopes`, the `mcp_provisioned_clients` state table, single-flight refresh) live in the **app repo** (web spec §9.1/§9.2). Rule of thumb: *talks to the deployed system over HTTP and asserts external state → infra repo; imports app modules and mocks dependencies → app repo.* Full three-tier model in web spec §9.3.
 
 ## Rotation re-enable checklist
 - [ ] **A1** — single-flight refresh shipped and verified (concurrent-request test).
