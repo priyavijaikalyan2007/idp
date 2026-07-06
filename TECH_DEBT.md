@@ -236,10 +236,18 @@ Estimated effort: ~30 minutes.
 
 ## TD-009: MCP-client detection has no signal robust to realm-default scoping
 
-**Status:** Deferred
+**Status:** Resolved (2026-07-06, ADR-011)
 **Priority:** Low (Medium if Option A is ever adopted)
 **Created:** 2026-07-03
 **Current location:** `src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java` (`isMcpClient`)
+
+> **Resolution (2026-07-06).** Implemented as part of ADR-011. `isMcpClient` now
+> **prefers** the `knobby.mcp="true"` attribute (checked first), falling back to
+> `mcp-default` scope presence — exactly the hardening sketched below. The attribute
+> is set **by `McpClientRegistrationPolicy` atomically at registration** (not by the
+> app, as the original plan assumed), so it exists before the client's first
+> authorization. 1 new unit test (`authenticate_mcpAttributeSet_proceedsEvenWithoutScope`).
+> The remainder of this entry is retained for historical context.
 
 ### What we have now
 

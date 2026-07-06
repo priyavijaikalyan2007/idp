@@ -173,3 +173,45 @@
     - "specs/keycloak.spi.mcp.md"
     - "specs/keycloak.web.mcp.md"
     - "specs/keycloak-setup-guide.md"
+
+- id: "ADR-011"
+  title: "MCP clients are marked (scopes + flow binding + knobby.mcp attribute) atomically at registration via a Client Registration Policy, not by the app at first /mcp/consent"
+  date: "2026-07-06"
+  status: "Accepted"
+  builds_on_note: "Implements the atomic-registration bootstrap and activates the knobby.mcp attribute detection that ADR-010 deferred as tech debt (TD-009)."
+  context: >-
+    The 2026-07-05 end-to-end interactive test exposed a circular bootstrapping
+    dependency (ERRATA-001): a freshly DCR'd MCP client has no mcp-default scope and
+    no browser-mcp-tenant-pick binding, so its FIRST authorization cannot be detected
+    as MCP and falls through the realm-default browser-federated-only flow — showing
+    Keycloak's native consent and never provisioning. The earlier plan bound the flow
+    and assigned scopes in the app at /mcp/consent, but reaching /mcp/consent requires
+    the SPI in browser-mcp-tenant-pick to run, which requires the client already be
+    bound to that flow. Deadlock. Resolution: a new McpClientRegistrationPolicy CRP
+    marks the client at REGISTRATION time (afterRegister mutates the live ClientModel
+    inside the registration transaction) — atomic, so either fully-marked or rolled
+    back; partial states are impossible and no reconciliation logic is needed. This is
+    the same framework hook Keycloak's own built-in CRPs use. Decisions: (1) all
+    anonymous DCR registrations are treated as MCP (anonymous registration IS the
+    signal; there is no reliable in-band discriminator); (2) scope lists + flow alias
+    are ComponentModel config properties (admin-tunable) with the settled defaults as
+    fallback; (3) the realm default browser flow stays browser-federated-only —
+    per-client binding is the only route into the MCP flow, confining any MCP-flow bug
+    to MCP clients; (4) the McpTenantPickerAuthenticator §5.1 short-circuit is demoted
+    to a pure SAFETY NET (not load-bearing) and its detection now PREFERS the
+    knobby.mcp attribute over mcp-default scope presence — the attribute cannot be
+    accidentally acquired by the web client via a realm-default scope. The deferred
+    AllowedGrantTypes rejection (register B1) is NOT folded in yet; the CRP's
+    beforeRegister is a documented no-op stub reserved for it. TDD: 15 new unit tests
+    (marking, default/optional scope assignment, flow binding, atomic rollback on
+    missing scope/flow, config override) + 1 real-DCR integration test proving the
+    atomic-at-registration client shape against Keycloak 26.6.0; 129 unit + 2 IT green.
+    All 26.6.0 model-API signatures verified against the pinned BOM jars before coding.
+  files:
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicy.java"
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicyFactory.java"
+    - "src/providers/src/main/resources/META-INF/services/org.keycloak.services.clientregistration.policy.ClientRegistrationPolicyFactory"
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+    - "specs/ERRATA-001-mcp-registration-crp.md"
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak.web.mcp.md"

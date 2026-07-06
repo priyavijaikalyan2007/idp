@@ -213,6 +213,23 @@ class McpTenantPickerAuthenticatorTest
         captureChallengeResponse();
     }
 
+    @Test
+    void authenticate_mcpAttributeSet_proceedsEvenWithoutScope()
+    {
+        // The knobby.mcp attribute is the preferred signal (§5.8): a client
+        // carrying it is MCP even if it has no mcp-default scope.
+        when(client.getAttribute(McpTenantPickerAuthenticator.MCP_CLIENT_ATTRIBUTE))
+                .thenReturn(McpTenantPickerAuthenticator.MCP_CLIENT_ATTRIBUTE_VALUE);
+        when(client.getClientScopes(true)).thenReturn(Map.of());
+        when(client.getClientScopes(false)).thenReturn(Map.of());
+
+        authenticator.authenticate(context);
+
+        verify(context, never()).success();
+        Response response = captureChallengeResponse();
+        assertEquals(Response.Status.SEE_OTHER.getStatusCode(), response.getStatus());
+    }
+
     // ------------------------------------------------------- failure: no user
 
     @Test
