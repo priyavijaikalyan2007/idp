@@ -811,6 +811,10 @@ Per Keycloak's own upgrade notes, `secure-client-uris` "enforce[s] stricter vali
 - **`allow-open-redirect: false`** → KEEP false. This is the flag that matters for security (open-redirector prevention); loosening loopback does NOT loosen this.
 - **`oauth-2-1-compliant: false`** → leave false; `true` re-imposes strict rules that can reject loopback-by-hostname.
 
+⚠️ **"Allow permitted domains" — the UI can persist a poison `[null]` value that 500s all DCR. Fix via JSON editor, not the form.** Leave this genuinely empty (you're not restricting redirects to domains — Trusted Hosts handles host constraints). **The bug:** the form renders an empty input row for this list; saving the executor with that blank row present persists `"allow-permitted-domains": [null]` (an array with one null element) — **NOT** `[]`. On every DCR request the executor calls `Pattern.matches(null, ...)` on that null → `java.lang.NullPointerException: ... "this.pattern" is null` in `SecureRedirectUrisEnforcerExecutor.matchDomain` → **uncaught 500 on `/clients-registrations/*`**. Confirmed on knobby-prod 2026-07-05: DCR worked in early manual tests (before the executor was saved), then every registration 500'd after a save persisted `[null]`.
+
+**The UI can't fix it** — the `–`/remove button next to the empty row does nothing (it can't remove the null element). **Fix via the JSON editor:** Realm settings → Client policies → Profiles → toggle **Configure via: JSON editor** → find `"allow-permitted-domains": [null]` in the `secure-redirect-uris-enforcer` config → change to `"allow-permitted-domains": []` (or delete the key) → Save. (Or PUT the corrected profile via `PUT /admin/realms/{realm}/client-policies/profiles`.) **Verify the fix** by re-reading the profile: `GET /admin/realms/{realm}/client-policies/profiles` should show `[]`, not `[null]`. This is a Keycloak UI defect (issues #27344, #33734, terraform-provider #1142 describe the same empty-URI NPE family); a later 26.6.x patch may fix the form serialization — worth upgrading (also needed for CVE-2026-9792).
+
 ⚠️ **`127.0.0.1` vs `localhost` — subsystems disagree, so register both / test.** RFC 8252 §7.3 recommends the IP literal `http://127.0.0.1:PORT`, and the `secure-redirect-uris-enforcer` loopback flags key on the IP literals. But Keycloak's *Trusted Hosts* loopback verification (a different subsystem) was changed to normalize/recognize only `localhost` and `*.localhost`. Because the two subsystems are inconsistent, the pragmatic move is to **register both `http://127.0.0.1:PORT/callback` and `http://localhost:PORT/callback`** on MCP clients (or test which your build accepts) rather than assume one. Communicate the working form to anyone piloting an MCP client.
 
 **Do NOT use `secure-client-uris-pattern`** (URI pattern allowlist) — it reintroduces the localhost-vs-vendor-domain problem and can't accommodate arbitrary loopback ports from unknown user machines.
@@ -856,39 +860,36 @@ Save.
 
 ## D.7 Assign MCP scopes to DCR'd clients
 
-**⚠️ Under the recommended Option B (see D.8), do NOT set these as realm-default scopes.** Doing so assigns `mcp-default` to *every* client including `knobby-{env}-web`, which (a) pollutes non-MCP clients and (b) breaks the SPI short-circuit's MCP-client detection, since the guard identifies MCP clients precisely by the presence of `mcp-default`. If the web client has `mcp-default`, the short-circuit can't distinguish it from a real MCP client.
+**⚠️ Do NOT set these as realm-default scopes.** Doing so assigns `mcp-default` to *every* client including `knobby-{env}-web`, which pollutes non-MCP clients and breaks the SPI short-circuit's MCP-client detection. Keep `mcp-default` and the `knobby:*` scopes as **`None`** assigned type (not auto-attached to any client).
 
-**Recommended (Option B): per-client assignment, not realm-default.**
-Leave `mcp-default` and the `knobby:*` scopes as **`None`** assigned type (not auto-attached to any client). Knobby web's post-DCR processing assigns them to each DCR'd MCP client specifically — the same place it sets the flow binding (D.8 Option B, `KNOBBY_WEB_MCP_ENDPOINTS.md` §7.2). Target per-client assignment:
-- **Default** on the DCR'd client: `mcp-default`, `knobby:read`, `knobby:comment`, `knobby:curate`, `knobby:write`, `knobby:share`
-- **Optional** on the DCR'd client: `knobby:admin`
+**Settled: the McpClientRegistrationPolicy CRP assigns these at registration (SPI design §5.8, D.8).** The CRP assigns, on each DCR'd MCP client, atomically at registration:
+- **Default:** `mcp-default`, `knobby:read`, `knobby:comment`, `knobby:curate`, `knobby:write`, `knobby:share`
+- **Optional:** `knobby:admin`
 
-For **manual testing** before Knobby web's post-processing exists, assign these to your throwaway test client by hand (client → Client scopes tab → Add).
+This replaces the earlier plan of assigning scopes from the app at `/mcp/consent` (which was too late for the first authorization's MCP detection — see D.8). The app's `/mcp/consent` may still assign idempotently as belt-and-suspenders, but the CRP is the authoritative bootstrap.
 
-**Only if you deliberately choose Option A** (realm-wide browser flow binding — not recommended, see D.8): you would set these as realm-default scopes so DCR'd clients inherit them. But then the SPI short-circuit cannot use `mcp-default` for MCP-client detection (the web client would have it too), and you'd need a different detection signal. This conflict is the main reason Option A is not recommended.
+For **manual testing** before the CRP is deployed, assign these to your throwaway test client by hand (client → Client scopes tab → Add).
 
 ## D.8 Bind the browser flow to MCP clients
 
-**The problem this solves:** DCR'd MCP clients must authenticate through `browser-mcp-tenant-pick` (the flow with your SPI step) so the consent handoff fires. Something must bind that flow to those clients. Two ways — **pick one.**
+**The problem this solves:** DCR'd MCP clients must authenticate through `browser-mcp-tenant-pick` (the flow with your SPI step) so the consent handoff fires. Something must bind that flow to those clients — and critically, it must happen **before the client's first authorization**, or that first login falls through the realm-default flow, shows Keycloak's own consent, and never reaches the app.
 
-### ⚠️ Recommendation: Option B (per-client binding)
+### ✅ Recommended: the McpClientRegistrationPolicy CRP binds at registration (atomic)
 
-Earlier drafts recommended Option A. **That recommendation is reversed** after Option A took down all logins in testing (a malformed MCP flow bound realm-wide returns HTTP 400 for *every* login, including the web client). Option B confines any MCP-flow problem to MCP clients, which aren't in production use.
+**Settled design:** a custom **Client Registration Policy** (`McpClientRegistrationPolicy`, SPI design §5.8) marks every MCP client **atomically at registration time** — it assigns `mcp-default` + the author bundle as default scopes, sets a `knobby.mcp=true` attribute, and binds the `browser-mcp-tenant-pick` flow, all on the `ClientModel` inside the registration transaction. Because it's in-transaction, either the client registers fully-marked or registration rolls back — **no partial states, and the first authorization already routes through the MCP flow.** This closes the bootstrapping gap (a fresh client couldn't otherwise be detected as MCP on its first login).
 
-**Option B — per-client binding. Realm browser flow unchanged; Knobby web owns the binding.**
+- Realm default browser flow **stays `browser-federated-only`** — web login is never affected by MCP flow issues. **Never bind the MCP flow realm-wide.**
+- The CRP does the scope + flow **bootstrap**; the app's `/mcp/consent` still does the tenant-picker wizard and the `mcp_provisioned_clients` record (web spec §7.5). Both are idempotent, so both touching the client is safe.
+- **Deploy the CRP** as an **anonymous** Client Registration Policy: Clients → Client registration → Anonymous Access Policies (same CRP system as Trusted Hosts). See SPI design §5.8 for the interface and the anonymous-binding rationale.
+- **For manual testing** before the CRP is built/deployed: on a throwaway test client, set `authenticationFlowBindingOverrides.browser` to `browser-mcp-tenant-pick` via the client's **Advanced** tab (Authentication flow overrides → Browser Flow), and assign the MCP scopes per D.7 by hand.
 
-- Realm default browser flow **stays `browser-federated-only`** — web login is never affected by MCP flow issues.
-- Knobby web's `/mcp/consent` backend calls the Keycloak Admin API to set `authenticationFlowBindingOverrides.browser = <browser-mcp-tenant-pick flow id>` on each DCR'd client at first-use. See `KNOBBY_WEB_MCP_ENDPOINTS.md` §7.2.1.
-- Pairs with D.7 per-client scope assignment (same post-DCR processing step): no realm-default scopes, so the SPI short-circuit's `mcp-default` detection stays meaningful and the short-circuit remains a pure safety net.
-- **For manual testing** before Knobby web's post-processing exists: on a throwaway test client, set `authenticationFlowBindingOverrides.browser` to `browser-mcp-tenant-pick` via the client's **Advanced** tab (Authentication flow overrides → Browser Flow), and assign the MCP scopes per D.7. Never bind the MCP flow realm-wide.
+**Why not bind at `/mcp/consent` (the earlier plan)?** Binding at first `/mcp/consent` is too late: to *reach* `/mcp/consent`, the SPI in `browser-mcp-tenant-pick` must run, which requires the client already be bound to that flow — a circular dependency. The first authorization would fall through `browser-federated-only`, show Keycloak's native consent, and never provision. Binding at registration (this CRP) breaks the cycle. The app may still bind idempotently as a belt-and-suspenders, but correctness comes from the CRP.
 
-**Option A — realm-level browser flow binding. NOT recommended.**
-
+**Why not Option A (realm-wide binding)? NOT recommended.**
 - Action would be: Authentication → Bindings → Browser Flow → `browser-mcp-tenant-pick`.
-- **Why not:** (1) blast radius — any MCP-flow bug breaks *all* logins, as observed. (2) It conflicts with D.7 realm-default scopes: the SPI short-circuit detects MCP clients by `mcp-default`, but realm-default scoping gives `mcp-default` to every client, so the short-circuit can't tell web from MCP. Making Option A work would require a *different* MCP-detection signal in the SPI (e.g. a client attribute set at DCR time) — extra complexity for no benefit over Option B.
-- Only consider Option A if you cannot modify Knobby web to do per-client binding, and even then, fix the detection-signal conflict first.
+- **Why not:** any MCP-flow bug breaks *all* logins (observed in testing — a malformed flow bound realm-wide returns HTTP 400 for every login). Per-client binding via the CRP confines any MCP-flow problem to MCP clients. The SPI short-circuit remains only as a safety net for this misconfiguration, not as a relied-upon control.
 
-**Do not do both.** They're alternatives.
+**Do not bind the MCP flow realm-wide.**
 
 ## D.9 OAuth 2.1 token settings (refresh token rotation)
 

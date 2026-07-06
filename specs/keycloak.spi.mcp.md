@@ -309,32 +309,31 @@ Called when this step is first encountered in the flow.
 Pseudocode:
 ```
 authenticate(context):
-    0. // SHORT-CIRCUIT GUARD (critical).
-       // This Authenticator may run in a flow that is bound realm-wide as the
-       // default browser flow (setup guide D.8 Option A). In that case it also
-       // executes for NON-MCP clients (e.g. knobby-{env}-web). Those must pass
-       // through untouched — only MCP clients get the picker redirect.
+    0. // SHORT-CIRCUIT GUARD — SAFETY NET ONLY (not load-bearing under the current design).
        //
-       // An MCP client is identified by having the 'mcp-default' client scope
-       // assigned (default or optional). Non-MCP clients don't have it.
+       // CURRENT DESIGN (settled): the McpClientRegistrationPolicy CRP (§5.8) binds
+       // 'browser-mcp-tenant-pick' to each MCP client ATOMICALLY at registration.
+       // So this Authenticator only ever runs for real MCP clients — a non-MCP
+       // client (e.g. knobby-{env}-web) is never bound to this flow and never
+       // reaches this code. The realm default stays 'browser-federated-only'
+       // (Option B); this flow is NEVER the realm default.
        //
-       // ⚠️ DETECTION-SIGNAL CAVEAT: this check is only valid if 'mcp-default'
-       // is NOT a realm-default client scope. If 'mcp-default' is assigned
-       // realm-wide (setup guide D.7 done the wrong way), EVERY client has it,
-       // including the web client, and this guard can no longer distinguish MCP
-       // from non-MCP clients. The recommended deployment (Option B, per-client
-       // binding + per-client scope assignment) keeps 'mcp-default' off the
-       // realm defaults, so this signal stays meaningful. Under Option B the
-       // guard is a pure safety net (the MCP flow is only ever bound to real MCP
-       // clients), so even if detection were imperfect it would not misroute web
-       // users. If you must use Option A, switch this guard to a detection signal
-       // that the web client cannot accidentally acquire — e.g. a client
-       // attribute set at DCR time (client.getAttribute("knobby.mcp") == "true").
+       // Therefore this guard is a PURE SAFETY NET: it exists only to fail safe if
+       // someone ever misconfigures the realm to make this flow the default, or
+       // binds it to a non-MCP client by mistake. It is NOT relied upon for
+       // correctness — correctness comes from atomic per-client binding at
+       // registration (§5.8).
+       //
+       // Detection signal: an MCP client is marked by the CRP with the client
+       // attribute 'knobby.mcp'="true" (§5.8) AND/OR the 'mcp-default' client scope.
+       // Prefer the attribute — it is set atomically at registration and cannot be
+       // accidentally acquired by the web client via a realm-default scope.
        client = context.getAuthenticationSession().getClient()
-       isMcpClient = client.getClientScopes(true).containsKey("mcp-default")
+       isMcpClient = "true".equals(client.getAttribute("knobby.mcp"))
+                     || client.getClientScopes(true).containsKey("mcp-default")
                      || client.getClientScopes(false).containsKey("mcp-default")
        if not isMcpClient:
-           context.success()      // no-op: let the flow finish as normal login
+           context.success()      // no-op safety net: let the flow finish as normal login
            return
 
     1. user = context.getUser()             // set by previous flow steps
@@ -627,11 +626,75 @@ Uses Keycloak's built-in `oidc-audience-mapper`. Configured on `mcp-default` Cli
 
 No SPI code needed.
 
----
+### 5.8 McpClientRegistrationPolicy (Client Registration Policy — atomic MCP bootstrapping)
 
-## 6. JWT handoff implementation
+**Purpose.** Close the MCP-client bootstrapping gap: a freshly DCR'd client has no `mcp-default` scope and no flow binding, so its *first* authorization can't be detected as MCP and never routes to the tenant-picker (it falls through the realm-default `browser-federated-only` flow → Keycloak's own consent → no provisioning). This CRP fixes that by **atomically marking every MCP client at registration time**, before its first authorization: it assigns `mcp-default` (+ the author bundle) as default scopes and binds the `browser-mcp-tenant-pick` flow — all on the live `ClientModel`, inside the registration transaction.
 
-### 6.1 PickerRequestToken POJO
+**Why a CRP, and why `afterRegister`.** The `ClientRegistrationPolicy` SPI's `afterRegister(ClientRegistrationContext, ClientModel)` runs **synchronously within the registration transaction** and receives the mutable `ClientModel`. Keycloak's own built-ins (`ClientScopesClientRegistrationPolicy`, `ProtocolMappersClientRegistrationPolicy`, `ConsentRequiredClientRegistrationPolicy`) use exactly this hook to mutate just-registered clients — so this is a first-class, framework-blessed pattern, not a workaround. Because the mutations happen on the `ClientModel` in the same transaction as the registration, they are **atomic with it**: either the client is created fully-marked (scopes + flow binding + attribute) or the registration rolls back and no client is created. **Partial states (scope assigned but flow unbound, or vice-versa) are impossible.** This is the key property — it removes the need for any post-registration reconciliation or recovery logic.
+
+**Interface:**
+```java
+public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
+
+    private final KeycloakSession session;
+
+    @Override
+    public void afterRegister(ClientRegistrationContext context, ClientModel client) {
+        // Only mark anonymous-DCR'd clients. (Bound as an 'anonymous' CRP subtype,
+        // so first-party clients created by admins never reach this.)
+        RealmModel realm = session.getContext().getRealm();
+
+        // 1. Mark as MCP (intrinsic signal — not scope-request dependent).
+        client.setAttribute("knobby.mcp", "true");
+
+        // 2. Assign mcp-default + author-bundle as DEFAULT client scopes.
+        //    (Default scopes are granted whether or not the client requests them.)
+        for (String scopeName : List.of("mcp-default",
+                "knobby:read", "knobby:comment", "knobby:curate",
+                "knobby:write", "knobby:share")) {
+            ClientScopeModel scope = KeycloakModelUtils
+                .getClientScopeByName(realm, scopeName);
+            if (scope == null) {
+                throw new ClientRegistrationPolicyException(
+                    "Required MCP client scope missing: " + scopeName
+                    + " (create per setup guide D.3/D.4)");
+            }
+            client.addClientScope(scope, true);   // true = default (not optional)
+        }
+        // knobby:admin as OPTIONAL (never default).
+        ClientScopeModel admin = KeycloakModelUtils.getClientScopeByName(realm, "knobby:admin");
+        if (admin != null) { client.addClientScope(admin, false); }
+
+        // 3. Bind the MCP browser flow (per-client override).
+        AuthenticationFlowModel flow = realm.getFlowByAlias("browser-mcp-tenant-pick");
+        if (flow == null) {
+            throw new ClientRegistrationPolicyException(
+                "browser-mcp-tenant-pick flow not found (create per setup guide D.2)");
+        }
+        client.setAuthenticationFlowBindingOverride("browser", flow.getId());
+
+        // Any throw here rolls back the ENTIRE registration transaction — atomic.
+    }
+
+    @Override public void afterUpdate(ClientRegistrationContext ctx, ClientModel client) { /* no-op */ }
+    @Override public void beforeRegister(ClientRegistrationContext ctx) { /* see note on B1 below */ }
+    @Override public void beforeUpdate(ClientRegistrationContext ctx, ClientModel client) { }
+    @Override public void beforeView(ClientRegistrationProvider p, ClientModel client) { }
+    @Override public void beforeDelete(ClientRegistrationProvider p, ClientModel client) { }
+    @Override public void close() { }
+}
+```
+Plus `McpClientRegistrationPolicyFactory implements ClientRegistrationPolicyFactory` (providerId e.g. `knobby-mcp-registration`) and a `META-INF/services/org.keycloak.services.clientregistration.policy.ClientRegistrationPolicyFactory` entry — same packaging as the authenticator SPI (§3), same JAR.
+
+**Deployment — bind as an anonymous CRP.** Register it under **Clients → Client registration → Anonymous Access Policies** (the CRP system, same place as Trusted Hosts — setup guide F.1). As an anonymous-subtype policy it governs only anonymous DCR registrations, never admin-created first-party clients.
+
+**⚠️ Verify during implementation (26.6.0 model API).** The pattern is confirmed (afterRegister receives a mutable ClientModel; Keycloak's own CRPs mutate there). Verify the exact 26.6.0 signatures: `client.setAuthenticationFlowBindingOverride("browser", flowId)`, `realm.getFlowByAlias(...)`, `client.addClientScope(scope, isDefault)`, and `KeycloakModelUtils.getClientScopeByName(...)`. Confirm the flow-binding override set in `afterRegister` persists (it should — it's a field on the client entity written in-transaction).
+
+**Interaction with the tenant-picker Authenticator (§5.1).** Because this CRP guarantees only real MCP clients are ever bound to `browser-mcp-tenant-pick`, the Authenticator's step-0 short-circuit (§5.1) is now a **pure safety net, not load-bearing** — correctness comes from atomic binding here. The Authenticator's detection was updated to prefer the `knobby.mcp` attribute this CRP sets.
+
+**Interaction with `/mcp/consent` provisioning (web spec §7.5).** This CRP does the **bootstrap subset** — `mcp-default` + author bundle + flow binding — the minimum for the first authorization to route correctly. The app's `/mcp/consent` still runs for the **rest**: the tenant-picker wizard, tenant-specific setup, and the `mcp_provisioned_clients` record. Because both the CRP and `/mcp/consent` are idempotent (adding an already-present scope / setting an already-correct binding is a no-op), it's safe for both to touch the client. **This splits provisioning: scope+flow bootstrap moves to registration (this CRP); the wizard/tenant work stays at `/mcp/consent`.** See errata + web spec §7.5 for the app-side implication (the app no longer needs to do the scope/flow bootstrap itself, though doing so idempotently is harmless).
+
+**Relationship to the deferred `AllowedGrantTypesPolicy` (§13a.1 / register B1).** Both are `ClientRegistrationPolicy` providers. They can be **one provider**: this CRP's `beforeRegister` is the natural home for the grant-type/auth-method rejection (B1), while `afterRegister` does the marking. Folding them keeps all DCR-time registration policy in one SPI. When you build B1, add it here rather than as a separate provider.
 
 ```
 public class PickerRequestToken {
