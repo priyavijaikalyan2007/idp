@@ -74,9 +74,18 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     static final String CONFIG_KEY_WEB_HOST = "yourapp.web.host";
 
     /**
-     * Client scope whose presence marks a client as MCP-enabled. The tenant
-     * picker only fires for clients carrying this scope; all others pass
-     * through untouched (see the short-circuit guard in {@link #authenticate}).
+     * Intrinsic MCP marker attribute, set atomically at registration by
+     * {@code McpClientRegistrationPolicy} (§5.8). This is the PREFERRED MCP
+     * signal: unlike a client scope, it cannot be accidentally acquired by a
+     * non-MCP client via a realm-default scope assignment.
+     */
+    static final String MCP_CLIENT_ATTRIBUTE = "yourapp.mcp";
+    static final String MCP_CLIENT_ATTRIBUTE_VALUE = "true";
+
+    /**
+     * Client scope whose presence also marks a client as MCP-enabled. Retained
+     * as a fallback detection signal behind {@link #MCP_CLIENT_ATTRIBUTE} (see
+     * the short-circuit guard in {@link #authenticate}).
      */
     static final String MCP_CLIENT_SCOPE = "mcp-default";
 
@@ -119,12 +128,14 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     {
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
 
-        // Short-circuit guard (spec §5.1). This step may be bound realm-wide as
-        // the default browser flow, in which case it also runs for NON-MCP
-        // clients (regular web logins, service clients). Those must pass through
-        // untouched — only MCP clients get the tenant-picker redirect. An MCP
-        // client is one carrying the mcp-default client scope (default or
-        // optional); non-MCP clients never have it.
+        // Short-circuit guard (spec §5.1) — SAFETY NET ONLY, not load-bearing.
+        // Under the settled design, McpClientRegistrationPolicy (§5.8) binds this
+        // flow to MCP clients atomically at registration, and the realm default
+        // stays browser-federated-only, so this step only ever runs for real MCP
+        // clients. This guard exists solely to fail safe if someone misconfigures
+        // the realm (makes this the default flow, or binds a non-MCP client by
+        // mistake): a non-MCP client passes through untouched. Correctness comes
+        // from the atomic binding at registration, NOT from this check.
         ClientModel client = authSession.getClient();
         if (!isMcpClient(client))
         {
@@ -216,12 +227,18 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     // ---------------------------------------------------------------- helpers
 
     /**
-     * An MCP client carries the {@code mcp-default} client scope, assigned as
-     * either a default or an optional scope. Regular web logins and service
-     * clients never have it, so the picker redirect is skipped for them.
+     * An MCP client is identified, in preference order, by the intrinsic
+     * {@code yourapp.mcp="true"} attribute the registration policy sets (§5.8),
+     * falling back to presence of the {@code mcp-default} client scope (default
+     * or optional). Regular web logins and service clients have neither, so the
+     * picker redirect is skipped for them.
      */
     private static boolean isMcpClient(ClientModel client)
     {
+        if (MCP_CLIENT_ATTRIBUTE_VALUE.equals(client.getAttribute(MCP_CLIENT_ATTRIBUTE)))
+        {
+            return true;
+        }
         return client.getClientScopes(true).containsKey(MCP_CLIENT_SCOPE)
                 || client.getClientScopes(false).containsKey(MCP_CLIENT_SCOPE);
     }
