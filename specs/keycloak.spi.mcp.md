@@ -628,30 +628,49 @@ No SPI code needed.
 
 ### 5.8 McpClientRegistrationPolicy (Client Registration Policy — atomic MCP bootstrapping)
 
-**Purpose.** Close the MCP-client bootstrapping gap: a freshly DCR'd client has no `mcp-default` scope and no flow binding, so its *first* authorization can't be detected as MCP and never routes to the tenant-picker (it falls through the realm-default `browser-federated-only` flow → Keycloak's own consent → no provisioning). This CRP fixes that by **atomically marking every MCP client at registration time**, before its first authorization: it assigns `mcp-default` (+ the author bundle) as default scopes and binds the `browser-mcp-tenant-pick` flow — all on the live `ClientModel`, inside the registration transaction.
+**Purpose.** Close the MCP-client bootstrapping gap: a freshly DCR'd client has no `mcp-default` scope and no flow binding, so its *first* authorization can't be detected as MCP and never routes to the tenant-picker (it falls through the realm-default `browser-federated-only` flow → Keycloak's own consent → no provisioning). This CRP fixes that by **atomically marking every anonymous-DCR client at registration time**, before its first authorization: it assigns `mcp-default` (+ the author bundle) as default scopes and binds the `browser-mcp-tenant-pick` flow — all on the live `ClientModel`, inside the registration transaction.
+
+**🔒 Load-bearing invariant: "anonymous DCR in this realm is MCP-only."** This CRP marks **every** anonymous-DCR client unconditionally — it does NOT gate on a discriminator. That is deliberate and correct, but rests on an explicit invariant:
+
+> **In the `yourapp-{env}` realm, the only integration that performs anonymous Dynamic Client Registration is MCP clients.**
+
+Why unconditional (and why NOT a discriminator): the whole reason this CRP exists is that we **cannot rely on what a client requests** — the bootstrapping redesign happened precisely because a client requesting `mcp-default` (or any request-time signal) is unreliable (some MCP clients won't send it). So gating on requested-scope or `software_id` would reintroduce the exact bug this fixes: a real MCP client that omits the signal wouldn't get marked, wouldn't get the flow binding, and its first authorization would break again. The only *reliable* discriminators are intrinsic to how registration happens — and "it's anonymous DCR" is already one (the CRP is bound as an anonymous CRP, §deployment below). There is no finer reliable signal available without the client cooperating, which we've established we can't depend on.
+
+**The mitigation is a documented invariant, not a code gate.** DCR (RFC 7591, 2015) predates MCP and is not MCP-exclusive in general — but in *this* realm it is, today and for the foreseeable roadmap, and the realm is entirely under yourapp.com's control. If that ever changes (a non-MCP integration is added that self-registers anonymously against this realm), this CRP must gain a discriminator — and at *that* point there will be a concrete, real signal to gate on (that integration's `software_id`, a distinct registration endpoint, or a separate realm). Until then, a speculative gate using an unreliable signal would be strictly worse than the honest invariant. **Tracked in `DEFERRED_ITEMS.md` (invariant + revisit-trigger).**
 
 **Why a CRP, and why `afterRegister`.** The `ClientRegistrationPolicy` SPI's `afterRegister(ClientRegistrationContext, ClientModel)` runs **synchronously within the registration transaction** and receives the mutable `ClientModel`. Keycloak's own built-ins (`ClientScopesClientRegistrationPolicy`, `ProtocolMappersClientRegistrationPolicy`, `ConsentRequiredClientRegistrationPolicy`) use exactly this hook to mutate just-registered clients — so this is a first-class, framework-blessed pattern, not a workaround. Because the mutations happen on the `ClientModel` in the same transaction as the registration, they are **atomic with it**: either the client is created fully-marked (scopes + flow binding + attribute) or the registration rolls back and no client is created. **Partial states (scope assigned but flow unbound, or vice-versa) are impossible.** This is the key property — it removes the need for any post-registration reconciliation or recovery logic.
+
+**Config-driven, not hardcoded.** The scope list and flow alias are read from the CRP's `ComponentModel` config (the standard built-in-CRP pattern), NOT compiled in. yourapp.com's scope taxonomy will grow (the ontology/RBAC surface implies more granular scopes over time), so hardcoding would couple a business-level change (new permission scope) to a JAR rebuild + Keycloak-image redeploy. Config-driven means adding a scope is a console config change. Provide sane defaults (the current six + `browser-mcp-tenant-pick`) but make them overridable via `ComponentConfig`.
 
 **Interface:**
 ```java
 public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
 
     private final KeycloakSession session;
+    private final ComponentModel config;   // scope list + flow alias come from here
+
+    // Config keys (with defaults):
+    //   default-scopes  (default: mcp-default,yourapp:read,yourapp:comment,
+    //                             yourapp:curate,yourapp:write,yourapp:share)
+    //   optional-scopes (default: yourapp:admin)
+    //   browser-flow    (default: browser-mcp-tenant-pick)
+    //   mcp-attribute   (default: yourapp.mcp)
 
     @Override
     public void afterRegister(ClientRegistrationContext context, ClientModel client) {
-        // Only mark anonymous-DCR'd clients. (Bound as an 'anonymous' CRP subtype,
-        // so first-party clients created by admins never reach this.)
+        // Marks EVERY anonymous-DCR client (see load-bearing invariant above).
+        // Bound as an 'anonymous' CRP subtype, so first-party admin-created clients
+        // never reach this. No per-request discriminator — by design.
         RealmModel realm = session.getContext().getRealm();
 
-        // 1. Mark as MCP (intrinsic signal — not scope-request dependent).
-        client.setAttribute("yourapp.mcp", "true");
+        // 1. Mark as MCP with the configured attribute (intrinsic marking, not
+        //    scope-request dependent). Default attribute: "yourapp.mcp".
+        String mcpAttr = config.get("mcp-attribute", "yourapp.mcp");
+        client.setAttribute(mcpAttr, "true");
 
-        // 2. Assign mcp-default + author-bundle as DEFAULT client scopes.
-        //    (Default scopes are granted whether or not the client requests them.)
-        for (String scopeName : List.of("mcp-default",
-                "yourapp:read", "yourapp:comment", "yourapp:curate",
-                "yourapp:write", "yourapp:share")) {
+        // 2. Assign default + optional scopes from CONFIG (not hardcoded).
+        //    Default scopes are granted whether or not the client requests them.
+        for (String scopeName : config.getList("default-scopes")) {   // config-driven
             ClientScopeModel scope = KeycloakModelUtils
                 .getClientScopeByName(realm, scopeName);
             if (scope == null) {
@@ -661,15 +680,18 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
             }
             client.addClientScope(scope, true);   // true = default (not optional)
         }
-        // yourapp:admin as OPTIONAL (never default).
-        ClientScopeModel admin = KeycloakModelUtils.getClientScopeByName(realm, "yourapp:admin");
-        if (admin != null) { client.addClientScope(admin, false); }
+        for (String scopeName : config.getList("optional-scopes")) {  // e.g. yourapp:admin
+            ClientScopeModel scope = KeycloakModelUtils.getClientScopeByName(realm, scopeName);
+            if (scope != null) { client.addClientScope(scope, false); }
+        }
 
-        // 3. Bind the MCP browser flow (per-client override).
-        AuthenticationFlowModel flow = realm.getFlowByAlias("browser-mcp-tenant-pick");
+        // 3. Bind the configured MCP browser flow (per-client override).
+        String flowAlias = config.get("browser-flow", "browser-mcp-tenant-pick");
+        AuthenticationFlowModel flow = realm.getFlowByAlias(flowAlias);
         if (flow == null) {
             throw new ClientRegistrationPolicyException(
-                "browser-mcp-tenant-pick flow not found (create per setup guide D.2)");
+                "MCP browser flow not found: " + flowAlias
+                + " (create per setup guide D.2)");
         }
         client.setAuthenticationFlowBindingOverride("browser", flow.getId());
 

@@ -645,18 +645,39 @@ The wrong structure (picker as a top-level Required sibling to the Alternative a
 2. The duplicate has Cookie / Identity Provider Redirector / Forms at the **top level** as Alternatives. Wrap the authentication executions in a Required sub-flow:
    - Add a sub-flow at the top level (**Add sub-flow**), name it `Authentication`, set it **Required**.
    - Move **Cookie** and **Identity Provider Redirector** into `Authentication` (drag-and-drop), keeping each **Alternative**.
-   - ⚠️ **Do not move the `Forms` sub-flow inside `Authentication`.** A *nested* sub-flow can only be set to Required or Disabled, never Alternative (confirmed in 26.6.0) — and Required Forms would force the password path on every login, breaking federated-only auth. Instead, **delete the `Forms` sub-flow** and replace it with the `Username Password Form` **execution** directly inside `Authentication`: on the `Authentication` row click **`+` → Add step → Username Password Form**, then set it **Alternative** (executions, unlike nested sub-flows, allow Alternative). This execution still renders the login page with the IdP buttons for users who have neither an existing session nor a `kc_idp_hint`. Dropping the OTP conditional that lived inside Forms is fine — per Invariant 2, MFA is authoritative at the upstream IdP.
+   - ⚠️ **Federated-only: DROP the Username Password Form entirely — you don't have local passwords.** yourapp.com authenticates via Google/Microsoft (Invariant 1), so the Username Password Form renders a password box no user can use. **Delete the `Forms` sub-flow and do not re-add the password form.** Federated login needs only two paths: Cookie (existing session) and Identity Provider Redirector (redirect to the IdP) — both Alternative. This sidesteps the whole "can't make Username Password Form Alternative" problem, because you remove the piece that doesn't belong rather than fighting Keycloak's flow model.
+
+     **⚠️ One thing to verify before deleting:** what renders the **IdP-selection page** for a user arriving with no `kc_idp_hint` and no cookie? In the stock flow, the Username Password Form page *also* shows the "Sign in with Google/Microsoft" buttons.
+       - **If MCP clients always send `kc_idp_hint`** (or the app/picker specifies the IdP): the Identity Provider Redirector fires directly — delete the form, done.
+       - **If a user must interactively choose Google vs Microsoft:** you need something to render that choice. Then keep the password form, but structure it the **idiomatic** way (next bullet) — NOT as a bare Alternative execution.
+
+   - **If you must keep the login/selection page:** use a **generic sub-flow set to Alternative**, containing **Username Password Form set to Required *inside* it**. ⚠️ **In 26.6.0 the built-in `Forms` sub-flow, once nested inside `Authentication`, only offers Required/Disabled — NOT Alternative.** A freshly-created *generic* sub-flow at the same position *does* offer Alternative. So: delete the stock `Forms` sub-flow, then on the `Authentication` row → **Add sub-flow** → name it (e.g. `password-auth`) → set it **Alternative** → then **Add step → Username Password Form** inside it, set **Required**. The key insight is unchanged: you make the *sub-flow* Alternative and the form Required *within* it — you do not (and cannot) make the form itself Alternative. Use a **generic** sub-flow, not the built-in `Forms`, because only the generic one accepts Alternative when nested. (If the sub-flow contains an OTP Form, set it **Disabled** — federated-only means MFA is authoritative at the upstream IdP, Invariant 2.)
 3. At the **top level** (a sibling of the `Authentication` sub-flow, positioned **after** it), **Add step** → find **YourApp MCP Tenant Picker** [?]. Set it **Required**.
-4. Confirm the final tree:
+4. Confirm the final tree — **federated-only (recommended):**
+   ```
+   browser-mcp-tenant-pick:
+     ├── Authentication [Required] (sub-flow)
+     │     ├── Cookie                       [Alternative]
+     │     └── Identity Provider Redirector [Alternative]
+     └── YourApp MCP Tenant Picker           [Required]
+   ```
+   Or, **if you need the IdP-selection page** (generic sub-flow — NOT the built-in Forms, which won't take Alternative when nested in 26.6.0):
    ```
    browser-mcp-tenant-pick:
      ├── Authentication [Required] (sub-flow)
      │     ├── Cookie                       [Alternative]
      │     ├── Identity Provider Redirector [Alternative]
-     │     └── Username Password Form       [Alternative]  (execution, NOT a nested Forms sub-flow)
+     │     └── password-auth                [Alternative] (GENERIC sub-flow, created new)
+     │           └── Username Password Form [Required]    (inside; OTP Form Disabled if present)
      └── YourApp MCP Tenant Picker           [Required]
    ```
 5. Save.
+
+⚠️ **Prerequisite for the IdP-selection page to actually work: each IdP must have "Display on login page" ON.** The `Username Password Form` renders the social/IdP login buttons ("Sign in with Google/Microsoft") **only for IdPs whose per-IdP setting "Display on login page" (a.k.a. `hideOnLoginPage=false`) is enabled.** If it's off, the login page renders a bare username/password box with **no IdP buttons** — and since MCP clients can't send `kc_idp_hint` (they speak standard OIDC/DCR and have no concept of Keycloak's upstream IdPs), a first-time MCP user would be **stranded with no way to reach Google/Microsoft.** Verify: Identity providers → (each of Google, Microsoft) → **Display on login page = On**. This is the piece that makes the selection page functional rather than merely present.
+
+> **Which login page do MCP clients see? Keycloak's — not yourapp.com's.** yourapp.com hosts its own web-app login page (`prod.yourapp.com/auth/login.html`, branded, IdP-only), but **MCP clients never see it** — they hit Keycloak's authorize endpoint directly (standard OIDC/DCR), so they land on **Keycloak's** login page at `auth.yourapp.com` (the `browser-mcp-tenant-pick` flow's Username Password Form execution). These are two separate surfaces (PRD §9). Consequences: (1) the MCP login page is styled by the **Keycloak theme** (`KEYCLOAK_THEMING_GUIDE.md`), not the app's `login.html` — you can't reuse the app page for MCP. (2) Un-themed, it shows a dead username/password box (federated-only) next to the working IdP buttons — functional but not pretty. (3) For MCP clients this Keycloak page is the **primary** login surface (every login), not a rare fallback — so theme it before the MCP pilot if first-impression branding matters.
+
+**Note — the nested-subflow-Alternative constraint is NOT a 26.6.0 bug and won't be fixed by upgrading.** A *nested* sub-flow's requirement options (and how conditionals/alternatives nest) are longstanding Keycloak design, not a regression. Do not upgrade to "fix" this — the fix is structural (drop the form, or use the idiomatic Forms-sub-flow nesting above). Upgrade for other reasons (CVE-2026-9792, the `[null]` form-serialization bug), not this.
 
 **Verify:**
 - `./smoke.sh` → Test 15 green (SPI step present in the flow).
