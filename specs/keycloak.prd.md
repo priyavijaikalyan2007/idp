@@ -753,9 +753,19 @@ Per the Access Control PRD.
 
 ## 9. Theming
 
-Per Invariant 3, Keycloak's rare user-facing fallback pages (no `kc_idp_hint`, errors, logout confirmation, session expiry, account linking) are themed to match knobby.io using **Keycloakify**.
+**Two distinct login surfaces (important — they are NOT the same page):**
+
+1. **knobby.io-hosted web login** (`prod.knobby.io/auth/login.html`) — the login page **web-app users** see. knobby.io renders it (branded, IdP-only, no password field) and initiates the OIDC flow to Keycloak with the IdP determined (the app controls the request, so it can supply `kc_idp_hint`). This is a **knobby.io application page**, not a Keycloak page — the app owns it.
+
+2. **Keycloak's own login page** (`auth.knobby.io`) — served by Keycloak when a client hits the authorize endpoint **directly, without going through the app's login page.** This is themed to match knobby.io via **Keycloakify** (per Invariant 3).
+
+**⚠️ MCP clients use surface #2, always — and it is NOT a rare fallback for them.** MCP clients (Claude Code, Cursor, Claude Desktop) speak standard OIDC/DCR and hit Keycloak's authorize endpoint directly; they **cannot** use knobby.io's hosted login page (they don't know it exists and don't route through the app), and they cannot send `kc_idp_hint`. So for MCP clients, the Keycloak login page is the **primary, every-login surface** — not the rare fallback it is for web users. This elevates the Keycloak theme (§11.14, companion guide) from "edge-case polish" to "the actual login experience every MCP pilot user sees." **Theme it before the MCP pilot** if login-page branding matters for first impressions; functionally it works un-themed (see below).
+
+For web users, Keycloak's page remains the rare fallback (no `kc_idp_hint`, errors, logout confirmation, session expiry, account linking), themed via Keycloakify.
 
 **All detailed setup, customization, build, and deployment instructions are in the companion document `KEYCLOAK_THEMING_GUIDE.md`.**
+
+**Until the Keycloak theme is applied**, the Keycloak login page (surface #2, incl. the MCP `browser-mcp-tenant-pick` flow) shows Keycloak's default styling **with a username/password box that is dead UI** (federated-only — no local passwords) alongside the working IdP buttons. This is acceptable — clicking Google/Microsoft works — but the password field should be hidden by the theme, and ideally the MCP flow's login page is styled to match knobby.io. Tracked in `DEFERRED_ITEMS.md`.
 
 Pages **not** themed: Account Console (disabled), Admin Console (internal-only), Registration/Forgot Password (disabled per Invariant 1).
 
