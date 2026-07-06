@@ -1709,7 +1709,7 @@ else
     DCR_REQUEST_BODY=$(cat <<DCRBODY
 {
   "client_name": "smoke-test-mcp-client",
-  "redirect_uris": ["https://example.com/callback"],
+  "redirect_uris": ["http://127.0.0.1:53210/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
   "token_endpoint_auth_method": "none",
@@ -1739,7 +1739,7 @@ DCRBODY
         # Distinguish the common DCR rejections - they need DIFFERENT fixes:
         DCR_HINT=""
         if echo "$DCR_BODY" | grep -qi "trusted host\|trusted domain"; then
-            DCR_HINT=" → Trusted Hosts CRP rejected this. NOTE: it validates the CALLER host and/or the redirect-URI host, not the localhost in your redirect. For dev this should be OFF/permissive (register B2) - it's a deferred GA hardening item, not something that should block your own testing. Remove/disable the Trusted Hosts policy (Realm → Client registration policies) or add your calling host. See DEFERRED_ITEMS.md B2 - and note Trusted Hosts may be the wrong control for localhost-redirect MCP desktop clients."
+            DCR_HINT=" → Trusted Hosts CRP rejected this: the registration's redirect-URI host isn't in the trusted list. With 'Client URIs Must Match' ON, Trusted Hosts checks the redirect host against its list. This test registers a loopback redirect (127.0.0.1), which should be trusted - so if you see this, add BOTH 'localhost' and '127.0.0.1' to the Trusted Hosts list (Clients → Client registration → Anonymous Access Policies → Trusted Hosts). Trusted Hosts is KEPT ON by design (verified viable for loopback, register B2) - do NOT disable it; add the loopback hosts instead."
         elif echo "$DCR_BODY" | grep -qi "invalid_client_metadata\|insufficient_scope\|not trusted in the list"; then
             DCR_HINT=" → looks like the Allowed Client Scopes policy rejected a requested scope (e.g. yourapp:read/yourapp:write not in the DCR-allowed set). Fix: add those scopes to the Allowed Client Scopes CRP, or request only 'openid' at registration and assign yourapp scopes via app provisioning (§7.5). This is a DIFFERENT policy from Trusted Hosts."
         else
@@ -1758,6 +1758,12 @@ elif [[ "$YOURAPP_ENV" == "test" ]]; then
     record_pass "DCR rejects HTTP redirect" "skipped for test env (localhost over HTTP permitted in dev/test)"
 else
     DCR_ENDPOINT="${REALM_BASE}/clients-registrations/openid-connect"
+    # Property under test: a NON-LOOPBACK http:// redirect must be rejected. (Loopback
+    # http - 127.0.0.1/localhost - is allowed by design for MCP desktop clients via
+    # allow-http-scheme + allow-ipv4-loopback. A public http URL like example.com is
+    # still insecure and must be rejected.) With both policies on, the rejection can
+    # come from EITHER the secure-redirect-uris-enforcer (non-loopback http) OR Trusted
+    # Hosts (example.com not in the trusted list) - both are correct verdicts.
     BAD_REDIRECT_BODY='{"client_name":"smoke-test-bad-redirect","redirect_uris":["http://example.com/callback"],"grant_types":["authorization_code"],"token_endpoint_auth_method":"none","scope":"openid yourapp:read"}'
 
     HTTP_REDIRECT_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
@@ -1767,7 +1773,7 @@ else
     HTTP_REDIRECT_STATUS=$(echo "$HTTP_REDIRECT_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
 
     if [[ "$HTTP_REDIRECT_STATUS" == "400" || "$HTTP_REDIRECT_STATUS" == "403" ]]; then
-        record_pass "DCR rejects HTTP redirect" "HTTP ${HTTP_REDIRECT_STATUS} as expected"
+        record_pass "DCR rejects non-loopback HTTP redirect" "HTTP ${HTTP_REDIRECT_STATUS} as expected (rejected by secure-redirect-uris-enforcer or Trusted Hosts - both correct)"
     elif [[ "$HTTP_REDIRECT_STATUS" == "201" ]]; then
         # Cleanup this accidentally-created client
         ACCIDENTAL_CLIENT_ID=$(echo "$HTTP_REDIRECT_RESP" | sed '$d' | jq -r '.client_id // empty')
@@ -1775,9 +1781,9 @@ else
         if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
             curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
         fi
-        record_fail "DCR rejects HTTP redirect" "non-HTTPS redirect was ACCEPTED (HTTP 201) - fix the mcp-hardening client policy per SETUP GUIDE D.6 (design: PRD §16.4)"
+        record_fail "DCR rejects non-loopback HTTP redirect" "a public http:// (non-loopback) redirect was ACCEPTED (HTTP 201). Either secure-redirect-uris-enforcer is mis-set (allow-http-scheme should permit ONLY loopback http, not public http - check allow-open-redirect=false) or Trusted Hosts isn't constraining hosts. Setup guide D.6a."
     else
-        record_fail "DCR rejects HTTP redirect" "unexpected HTTP ${HTTP_REDIRECT_STATUS}"
+        record_fail "DCR rejects non-loopback HTTP redirect" "unexpected HTTP ${HTTP_REDIRECT_STATUS}"
     fi
 fi
 
@@ -1801,7 +1807,7 @@ else
     DCR_ENDPOINT="${REALM_BASE}/clients-registrations/openid-connect"
     # Register a public client that requests the password grant. We expect this to
     # SUCCEED (201) - see note above - and then prove the grant is unusable.
-    ROPC_BODY='{"client_name":"smoke-test-ropc","redirect_uris":["https://example.com/callback"],"grant_types":["password","authorization_code"],"token_endpoint_auth_method":"none","scope":"openid yourapp:read"}'
+    ROPC_BODY='{"client_name":"smoke-test-ropc","redirect_uris":["http://127.0.0.1:53211/callback"],"grant_types":["password","authorization_code"],"token_endpoint_auth_method":"none","scope":"openid yourapp:read"}'
 
     # Retry on transient 5xx. A 503/502 here is NOT a policy result - it's Keycloak
     # or its DB being momentarily unavailable (e.g. connection-pool starvation under
@@ -1824,7 +1830,7 @@ else
     done
 
     if [[ "$ROPC_STATUS" =~ ^5[0-9][0-9]$ || -z "$ROPC_STATUS" ]]; then
-        record_fail "Password grant unusable (DCR)" "registration returned HTTP ${ROPC_STATUS:-(no response)} after 3 attempts - this is a Keycloak/DB availability problem, NOT a policy result. Likely causes: (1) DB connection-pool starvation - check the Keycloak log for 'Acquisition timeout' and consider whether KC_DB_POOL_MAX_SIZE is too tight under the smoke suite's burst (Test 4b hammers /token 15x just before this); (2) Cloud Run cold start / scale-from-zero mid-request; (3) a proxy/LB in front returning 5xx. Re-run: if it's intermittent it's load/cold-start; if consistent, check /health/ready on the management port."
+        record_fail "Password grant unusable (DCR)" "registration returned HTTP ${ROPC_STATUS:-(no response)} after 3 attempts. A 500 on DCR has two common causes: (A) CONFIG BUG - a client-policy executor NPEs on bad config. Most common: an empty entry in 'Allow permitted domains' on secure-redirect-uris-enforcer → NullPointerException in matchDomain → 500 on EVERY registration (setup guide D.6a). Check the Keycloak log for 'this.pattern is null' / 'matchDomain'. Consistent 500s = this. (B) AVAILABILITY - DB pool starvation ('Acquisition timeout', KC_DB_POOL_MAX_SIZE too tight under Test 4b's burst) or Cloud Run cold start. Intermittent 500s = this. Check the Keycloak log: a stack trace = (A) config bug; silence or 'Acquisition timeout' = (B)."
     elif [[ "$ROPC_STATUS" == "400" || "$ROPC_STATUS" == "403" ]]; then
         # If a future Keycloak/policy DOES reject the registration outright, that's
         # even stronger - accept it as a pass.
@@ -1873,7 +1879,7 @@ if [[ -z "$AUTH_ENDPOINT" ]]; then
 else
     DCR_ENDPOINT="${REALM_BASE}/clients-registrations/openid-connect"
     # Try to register requesting a privileged realm-management scope that should NOT be in the whitelist
-    BAD_SCOPE_BODY='{"client_name":"smoke-test-bad-scope","redirect_uris":["https://example.com/callback"],"grant_types":["authorization_code"],"token_endpoint_auth_method":"none","scope":"openid realm-admin"}'
+    BAD_SCOPE_BODY='{"client_name":"smoke-test-bad-scope","redirect_uris":["http://127.0.0.1:53212/callback"],"grant_types":["authorization_code"],"token_endpoint_auth_method":"none","scope":"openid realm-admin"}'
 
     BAD_SCOPE_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
         -X POST "$DCR_ENDPOINT" \
