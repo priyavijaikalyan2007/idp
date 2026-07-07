@@ -1,7 +1,7 @@
 # Errata 003 — Picker-result must echo the `kc_*` session-correlation claims
 
 **Date:** 2026-07-06
-**Status:** Root cause confirmed in production; SPI-side + spec fixes applied; **app-side echo pending**.
+**Status:** Root cause confirmed in production; SPI-side + spec fixes applied; **app-side echo implemented 2026-07-06** (KnobbyApi echoes all three claims from the server-held picker-request; awaiting e2e re-run).
 **Applies to:** `KNOBBY_WEB_MCP_ENDPOINTS.md` (app spec, §2.2 + §3.3) and `KEYCLOAK_MCP_SPI_DESIGN.md` (§5.3, reconciled).
 **Companion to:** ERRATA-001 (Keycloak-side CRP) and ERRATA-002 (app-side `/mcp/consent` split). Independent of both — this is the *final* handoff hop, not the registration bootstrap.
 

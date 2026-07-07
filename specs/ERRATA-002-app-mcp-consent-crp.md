@@ -1,7 +1,7 @@
 # Errata 002 — App-side `/mcp/consent` after the registration-time CRP
 
 **Date:** 2026-07-05
-**Status:** Design settled; app-side implementation pending.
+**Status:** Applied app-side 2026-07-06 — `/mcp/consent` keeps the idempotent re-assert as a non-fatal safety net (no more 502-halt); web spec §2.1/§7.2/§7.5 edited per the list below.
 **Applies to:** `KNOBBY_WEB_MCP_ENDPOINTS.md` (the app spec), primarily §7.5 and §7.2.
 **Companion to:** ERRATA-001 (the Keycloak-side CRP). Read that first.
 
@@ -41,7 +41,7 @@ Because the app still does the scope-override writes (step 2 above) and may idem
 
 ## Spec edits needed in `KNOBBY_WEB_MCP_ENDPOINTS.md` (for the app team to apply)
 
-> These are NOT yet applied — this errata is the instruction. Apply in the app-side implementation pass.
+> Applied 2026-07-06 in the app-side implementation pass (this list preserved as the record of what changed).
 
 1. **§7.5.1 (trigger/sequence)** — add up top: "The scope + flow **bootstrap** is done by the Keycloak CRP at registration (SPI §5.8); this section covers the wizard/tenant work only. Do not rely on `/mcp/consent` to bootstrap scopes/flow."
 2. **§7.5.3 (sequence pseudocode)** — remove `assignMcpScopes` + `bindBrowserFlow` as *required* steps; if kept, mark them "idempotent re-assert, optional safety-net, not source of truth."

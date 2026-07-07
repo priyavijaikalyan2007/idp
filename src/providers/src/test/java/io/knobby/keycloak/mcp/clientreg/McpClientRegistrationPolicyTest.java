@@ -114,6 +114,19 @@ class McpClientRegistrationPolicyTest
                 McpClientRegistrationPolicy.MCP_ATTRIBUTE_VALUE);
     }
 
+    @Test
+    void afterRegister_suppressesBuiltInConsent()
+    {
+        // The knobby /mcp/consent wizard is the sole consent surface; Keycloak's
+        // built-in OAUTH_GRANT screen must be off for MCP clients (ERRATA-005).
+        try (MockedStatic<KeycloakModelUtils> ignored = stubAllScopesResolve())
+        {
+            policy.afterRegister(regContext, client);
+        }
+
+        verify(client).setConsentRequired(false);
+    }
+
     // ------------------------------------------------------- scope assignment
 
     @Test
@@ -171,6 +184,42 @@ class McpClientRegistrationPolicyTest
                         scopes.get(i).getName() + " must be assigned as OPTIONAL");
             }
         }
+    }
+
+    @Test
+    void afterRegister_promotesPreboundScope_removesBindingBeforeAdding()
+    {
+        // A real OIDC DCR pre-binds the requested `scope` values as OPTIONAL client
+        // scopes BEFORE this policy runs. ClientModel.addClientScope is a no-op when
+        // a binding already exists, so it will NOT promote optional -> default. The
+        // policy must remove any existing binding first (ERRATA-005).
+        try (MockedStatic<KeycloakModelUtils> ignored = stubAllScopesResolve())
+        {
+            policy.afterRegister(regContext, client);
+        }
+
+        int expectedCount = McpClientRegistrationPolicyFactory.DEFAULT_SCOPES_FALLBACK.size()
+                + McpClientRegistrationPolicyFactory.OPTIONAL_SCOPES_FALLBACK.size();
+        ArgumentCaptor<ClientScopeModel> removed =
+                ArgumentCaptor.forClass(ClientScopeModel.class);
+        verify(client, org.mockito.Mockito.times(expectedCount))
+                .removeClientScope(removed.capture());
+
+        java.util.Set<String> removedNames = removed.getAllValues().stream()
+                .map(ClientScopeModel::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        for (String name : McpClientRegistrationPolicyFactory.DEFAULT_SCOPES_FALLBACK)
+        {
+            assertTrue(removedNames.contains(name),
+                    "default scope " + name + " must be removed before (re)adding");
+        }
+
+        // Ordering: a remove precedes an add (the loop does remove;add per scope).
+        org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(client);
+        inOrder.verify(client).removeClientScope(org.mockito.ArgumentMatchers.any());
+        inOrder.verify(client).addClientScope(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyBoolean());
     }
 
     // --------------------------------------------------------- flow binding
@@ -260,6 +309,8 @@ class McpClientRegistrationPolicyTest
         policy.afterUpdate(regContext, client);
         verify(client, never()).setAttribute(anyString(), anyString());
         verify(client, never()).addClientScope(any(), org.mockito.ArgumentMatchers.anyBoolean());
+        verify(client, never()).removeClientScope(any());
+        verify(client, never()).setConsentRequired(org.mockito.ArgumentMatchers.anyBoolean());
     }
 
     @Test

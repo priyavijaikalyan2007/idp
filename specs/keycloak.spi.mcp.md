@@ -291,7 +291,11 @@ The SPI version is stamped into the Docker image via `--build-arg SPI_VERSION=..
 
 ### 5.1 McpTenantPickerAuthenticator
 
-The SPI Authenticator class that runs as the final step of the `browser-mcp-tenant-pick` flow. Responsibilities per PRD §16.8.2 plus implementation specifics.
+> **⚠️ Two critical behaviors added after this section was first written — see errata, and treat Claude Code's shipped SPI as source of truth over the pseudocode below:**
+> - **ERRATA-004 (re-entrancy guard):** `authenticate()` MUST be re-entrant. Keycloak resumes a *challenged* execution by re-invoking **`authenticate()`** (not `action()`), because the resume rides a redirect to the last-execution URL. The FIRST step of `authenticate()` is a resume guard: if the callback already recorded completion (auth-session note `knobby.mcp.picker.completed == "true"`, written by `McpPickerCallbackResourceProvider`), call `context.success()` and finish — do NOT build a fresh picker-request. Without this guard the flow loops `/mcp/consent` ⇄ Keycloak forever. The completion marker is a shared constant `AUTH_NOTE_PICKER_COMPLETED` (writer=callback, reader=authenticator, so they can't drift). An explicit marker is used (not "is `knobby_tenant_id` set?") because the callback deserializes the result via Jackson, bypassing builder validation, so a malformed result could carry a null tenant and still loop.
+> - **ERRATA-005 (post-broker hosting):** the picker also runs in the **Post Broker Login Flow** (per-IdP) to cover fresh/cookieless sessions (browser-flow executions after an IdP redirect don't run for brokered logins). There the MCP-detection short-circuit is **load-bearing** (per-IdP flow shared with web logins), and the ERRATA-004 re-entrancy guard must also work in the post-broker session context (open spike question).
+
+The SPI Authenticator class that runs as the final step of the `browser-mcp-tenant-pick` flow (and, per ERRATA-005, in the Post Broker Login Flow). Responsibilities per PRD §16.8.2 plus implementation specifics.
 
 **Class signature:**
 ```
@@ -527,31 +531,17 @@ public Response handleCallback(@QueryParam("picker_result") String pickerResult)
        if currentUser == null || !currentUser.getId().equals(token.userSubEcho):
            return badRequest("user_mismatch")
 
-    7. // Write the session notes the protocol mappers read, PLUS the resume
-       //  signal the authenticator checks on re-entry (ERRATA-004).
+    7. // Write the session notes the protocol mappers read.
        authSession.setUserSessionNote("knobby_tenant_id", token.chosenTenantId)
        authSession.setUserSessionNote("knobby_scopes", join(" ", token.grantedScopes))
-       authSession.setAuthNote("knobby.mcp.picker.completed", "true")
 
     8. // Resume by handing the browser back to Keycloak's own last-execution URL;
        //  Keycloak's flow engine re-enters the CHALLENGED authenticator execution
-       //  (via authenticate(), NOT action()) and — seeing the completed note —
-       //  finishes the flow. No manual AuthenticationProcessor needed.
+       //  and finishes the flow. No manual AuthenticationProcessor needed.
        resumeUrl = new AuthenticationFlowURLHelper(session, realm, uriInfo)
                        .getLastExecutionUrl(authSession)
        return Response.seeOther(resumeUrl).build()
 ```
-
-> **Re-entrancy is mandatory (ERRATA-004).** Keycloak resumes a *challenged*
-> execution by re-invoking the authenticator's **`authenticate()`**, not
-> `action()`, because the resume rides a redirect to the last-execution URL
-> rather than a form POST to the action URL. The tenant-picker `authenticate()`
-> therefore opens with a **resume guard**: if `authSession.getAuthNote(
-> "knobby.mcp.picker.completed")` is set (step 7 above), it calls
-> `context.success()` and returns instead of building a fresh picker-request.
-> Without this guard, every resume re-challenges → 303 to `/mcp/consent` →
-> infinite loop. Any challenge-based authenticator that suspends to external UI
-> must be written this way.
 
 **Implementation note.** The suspend (Authenticator, §5.1) uses
 `context.challenge(seeOther(...))`; the resume rides
