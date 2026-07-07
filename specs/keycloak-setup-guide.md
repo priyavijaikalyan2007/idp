@@ -685,29 +685,26 @@ The wrong structure (picker as a top-level Required sibling to the Alternative a
 
 **Verify the structure is not broken:** temporarily bind this flow to a *throwaway test client* (not the realm default, not the web client) and attempt a login. If you get HTTP 400 at `/auth`, the Required/Alternative structure is still wrong — recheck that the auth executions are inside the Required sub-flow, not siblings of the picker.
 
-## D.2a Create the Post Broker Login Flow (fresh-session / IdP path) — REQUIRED for pilot
+## D.2a Post Broker Login Flow — the tenant picker for fresh/brokered logins (ERRATA-005)
 
-⚠️ **Without this, fresh (cookieless) MCP logins never reach `/mcp/consent`** — the common case for real pilot users. This is [ERRATA-005](../specs/ERRATA-005-post-broker-tenant-picker.md).
+⚠️ **`browser-mcp-tenant-pick` alone is NOT enough.** Keycloak does **not** run browser-flow executions placed *after* an IdP-redirect step for **brokered** logins ([issue #10250](https://github.com/keycloak/keycloak/issues/10250)). So for a **fresh/cookieless** session that authenticates via Google/Microsoft, the tenant-picker step in `browser-mcp-tenant-pick` is **skipped** — the login finishes with Keycloak's own consent and never reaches `/mcp/consent`. (An *already-logged-in* session works because the Cookie step authenticates without an IdP redirect, leaving the flow intact.) Real pilot users are almost always fresh sessions, so this must be configured.
 
-**Why:** the `browser-mcp-tenant-pick` flow (D.2) only reaches the picker on the **Cookie** path (already-logged-in). On a **fresh** session, authentication goes out to Google/Microsoft, and — by longstanding Keycloak behavior ([#10250](https://github.com/keycloak/keycloak/issues/10250)) — browser-flow executions placed *after* an IdP-redirect step **do not run for brokered logins**, so the picker is skipped. The sanctioned hook to run an authenticator after a brokered login is the **Post Broker Login Flow**. The same `YourApp MCP Tenant Picker` authenticator is used; it skips non-MCP clients, so it is safe even though the post-broker flow is per-IdP and shared with web logins.
+**Fix (config-only — verified against the 26.6.0 SDK; no app or SPI-logic change):** host the **same** `YourApp MCP Tenant Picker` authenticator in a **Post Broker Login Flow** bound per-IdP. It runs unmodified there — brokered login keeps ONE auth session end-to-end, so `getClient()`, `getUser()`, the suspend/resume, and the ERRATA-004 re-entrancy note all work identically.
 
-**Path:** Authentication → Flows
+**Steps (per environment):**
+1. **Authentication → Flows → Create flow** → name `post-broker-mcp-tenant-pick`, type **Basic flow**.
+2. **Add step → YourApp MCP Tenant Picker**, requirement **Required**. (No sub-flows — authentication already happened upstream; this flow is *just* the picker.)
+3. On that execution → **⚙ Config** → set **YourApp web host** (`yourapp.web.host`) = the env web host (e.g. `prod.yourapp.com`). ⚠️ **Per-execution gotcha:** this config is **separate** from the browser-flow picker's config object — you must set it here too, or the step fails with `INTERNAL_ERROR` ("Authenticator config missing yourapp.web.host"). (Same class of trap as the CRP scope config and the `[null]` domains — config is per-execution, not global.)
+4. **Identity providers → Google → Post login flow** = `post-broker-mcp-tenant-pick`. Save.
+5. **Repeat step 4 for Microsoft** (and any other brokered IdP an MCP user might use). **One realm-level flow, referenced by multiple IdPs** — don't create a separate flow per IdP.
+6. Leave **First login flow** as the existing `first-broker-login-no-prompt` — the two are separate and sequential (first-broker-login runs, then post-broker-login, on every brokered login).
 
-1. **Create flow** (top-level) → name `post-broker-mcp-tenant-pick`, type **Basic flow**.
-2. **Add step** → **YourApp MCP Tenant Picker**. Set it **Required**. (No sub-flows needed — authentication already happened upstream; this flow is just the picker.)
-3. On that execution → **⚙ (gear) → Config** → set **YourApp web host** (`yourapp.web.host`) = the env's web host (e.g. `prod.yourapp.com`). **⚠️ Config is per-execution — this is a SEPARATE config object from the browser-flow picker's; you must set it here too, or the step fails with `INTERNAL_ERROR` (missing yourapp.web.host).**
-4. Save.
+**The MCP-detection guard is LOAD-BEARING here** (unlike in `browser-mcp-tenant-pick`, where it's a safety net). The post-broker flow is per-IdP and **shared with regular web-app logins** (they use the same Google/Microsoft). The picker's `isMcpClient` short-circuit is the ONLY thing that no-ops it for non-MCP clients — so it must not be removed.
 
-**Bind it per-IdP** (one shared flow, both IdPs — a Post Login Flow is a realm flow referenced by IdP config, reusable across providers):
-
-- Identity providers → **Google** → *Advanced* (or *Settings*) → **Post login flow** = `post-broker-mcp-tenant-pick`. Save.
-- Repeat for **Microsoft** (and any other brokered IdP an MCP user may use).
-- Leave **First login flow** as your existing `first-broker-login-no-prompt` (PRD §11.4) — the two are separate and sequential; post-broker runs *after* first-broker-login, on every brokered login.
-
-**Verify (fresh session — this is the case that reproduces the bug):**
-- In an **incognito / cleared-cookie** browser, run `./smoke-mcp.sh` and complete the Google/Microsoft login. The picker must appear (`/mcp/consent`) and the token must carry a `tenant` claim.
-- A warm Cookie session exercises only the D.2 browser-flow path and will pass even if D.2a is missing — so the acceptance test MUST start cookieless.
-- Non-MCP web-app logins via the same IdP are unaffected (the picker's MCP-detection guard no-ops for them).
+**Acceptance test — MUST be cookieless:**
+- In an **incognito / cleared-cookie** browser, run `./smoke-mcp.sh` and complete Google/Microsoft login. Expect `/mcp/consent` to appear and the token to carry a `tenant` claim.
+- ⚠️ A **warm** Cookie session only exercises the already-working `browser-mcp-tenant-pick` path and will pass **even if this config is missing** — so the test MUST start cookieless or it gives a false green.
+- Confirm a **non-MCP web-app login** via the same IdP is unaffected (picker no-ops for it).
 
 ## D.3 Create the six atomic `yourapp:*` Client Scopes
 
@@ -896,8 +893,6 @@ Policies tab → **Create policy** [?]:
 Add condition: **Condition type:** `client-updater-context`. **Update Client Source:** select **`ByAnonymous` ONLY**.
 
 ⚠️ **Select only `ByAnonymous`. Do NOT also select `ByAuthenticatedUser`.** The source is a multi-select, and it's easy to leave `ByAuthenticatedUser` checked. But `ByAuthenticatedUser` matches any client created or updated **by an authenticated user — including an admin editing a client in the console.** With it selected, this policy matches your first-party clients (`yourapp-{env}-web`, `yourapp-{env}-admin-api`) every time you edit them, and the `mcp-hardening` profile's executors get force-applied to them. The most visible symptom: the `consent-required` executor (auto-configure) sets `consentRequired = true` on the web client, so regular users start seeing Keycloak's "Grant Access to …" consent screen on login. `ByAnonymous` alone matches only anonymously-registered DCR clients (your MCP clients), which is the entire intent.
-
-> **Note (ERRATA-006): the `consent-required` executor is intentionally overridden for MCP clients.** The executor sets `consentRequired = true` on every anonymous DCR client, but the `McpClientRegistrationPolicy` CRP then sets `consentRequired = false` in `afterRegister` — which runs **after** the client-policy executors (`triggerAfterRegister` after `triggerOnEvent`), so the CRP wins. This is deliberate: the yourapp web `/mcp/consent` wizard **is** the consent surface for MCP clients, so Keycloak's built-in "Grant Access" screen would be redundant double-consent. First-party clients (`yourapp-{env}-web`, etc.) do **not** go through this CRP, so they keep whatever consent setting you give them.
 
 Add profile reference: `mcp-hardening`.
 
