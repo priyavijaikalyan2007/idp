@@ -325,3 +325,4 @@ Run `./diag-mcp-flow.sh` (added 2026-07-07) to confirm the realm default browser
 ### Related
 
 - ERRATA-004 (the resume loop) is a **separate** bug on the Cookie path — fixed. TD-010 is the broker path. Both must be green for end-to-end MCP login to work.
+- **ERRATA-005** (`specs/ERRATA-005-post-broker-tenant-picker.md`) is the settled root cause + fix direction for this exact broker-path gap (Keycloak issue #10250: executions after an IdP-redirect step don't run for brokered logins; the fix hosts the picker in the Post Broker Login Flow). Treat ERRATA-005 as the authoritative write-up; this TD is the backlog pointer. Reconcile the two if either changes.

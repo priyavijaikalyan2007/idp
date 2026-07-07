@@ -35,6 +35,13 @@ When the resume rides a redirect to `getLastExecutionUrl` (a GET), Keycloak re-e
 
 **Principle**: Model any suspend-to-external-UI authenticator as re-entrant on `authenticate()`. Its first branch is the resume guard (finish if already done); the challenge is the fallthrough. Note the completion with a dedicated boolean marker, and share the marker's key as one constant between the writer (callback) and reader (authenticator) so they cannot drift. (Companion to 1.3: 1.3 is how to resume; 1.5 is what the resumed step must check.)
 
+### 1.6 DCR pre-binds requested scopes as optional; `addClientScope` won't promote them; know the registration order (2026-07-07)
+Two coupled facts bit us in the same run (ERRATA-006). (a) Keycloak's OIDC Dynamic Client Registration maps the request's `scope` field to the new client's **optional** client scopes *before* any registration-policy `afterRegister` runs. (b) `ClientModel.addClientScope(scope, defaultScope)` is a **no-op when a binding already exists** — it does NOT update the default/optional flag. So a policy that "adds mcp-default as default" silently does nothing for any scope the client *requested*, leaving it optional. The fix is **remove-then-add** (`removeClientScope` then `addClientScope(scope, asDefault)`) so the policy's placement is authoritative. The diagnostic tell: a scope the client does NOT request (here `knobby:admin`) is placed correctly, while requested ones are stuck — that asymmetry points straight at pre-binding.
+
+Relatedly, when two registration-time systems both mutate the client (the newer **Client Policies** executors and the older **Client Registration Policies**), the order is decidable, not a guess: read `AbstractClientRegistrationProvider`'s bytecode. In 26.6.0, `clientPolicy().triggerOnEvent(DynamicClientRegistered…)` runs **before** `ClientRegistrationPolicyManager.triggerAfterRegister(…)` (offsets 228 < 237), so a CRP `afterRegister` is the last writer and can authoritatively override an executor (e.g. set `consentRequired=false` after the `consent-required` executor set it true).
+
+**Principle**: When a framework hook mutates state that an earlier hook already touched, verify the hook order against the actual dispatch code before assuming your write wins — and prefer set-then-verify APIs (remove-then-add) over add-if-absent ones when you need a specific end state.
+
 ---
 
 ## 2. Test harness

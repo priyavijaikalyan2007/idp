@@ -282,3 +282,40 @@
     - "src/providers/src/main/java/io/knobby/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
     - "specs/ERRATA-004-picker-resume-reentrancy.md"
     - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-014"
+  title: "CRP forces default-scope placement (remove-then-add) and suppresses Keycloak's built-in consent for MCP clients"
+  date: "2026-07-07"
+  status: "Accepted"
+  context: >-
+    Once ERRATA-004 let the MCP flow complete end-to-end, smoke-mcp.sh exposed two
+    McpClientRegistrationPolicy client-shape defects. (1) mcp-default + the author
+    bundle were missing from the DCR'd client's DEFAULT client scopes even though
+    they were effective (token aud correct). Root cause: Keycloak's OIDC DCR maps the
+    registration request's `scope` field to the new client's OPTIONAL client scopes
+    BEFORE the CRP's afterRegister runs, and ClientModel.addClientScope is a no-op
+    when a binding already exists — so it never promotes an existing optional binding
+    to default. knobby:admin (not in the request scope) was placed correctly, which is
+    the tell. (2) Keycloak's built-in OAUTH_GRANT consent screen double-upped the
+    knobby /mcp/consent wizard because the mcp-hardening consent-required client-policy
+    executor sets consentRequired=true. Decisions: (1) the CRP makes scope placement
+    authoritative via remove-then-add (removeClientScope then addClientScope(scope,
+    asDefault)) for every configured scope — both APIs verified present in 26.6.0 via
+    javap; (2) the CRP sets consentRequired=false so the knobby wizard is the sole
+    consent surface — chosen over removing the executor from the mcp-hardening profile
+    (that would be per-environment admin config, not code that travels with the deploy);
+    this is safe because client-policy executors fire on triggerOnEvent (the
+    DynamicClientRegistered event) BEFORE the CRP's triggerAfterRegister — verified
+    against the 26.6.0 AbstractClientRegistrationProvider bytecode (offset 228 < 237) —
+    so the CRP runs last and its setter wins; (3) the integration test now sends a
+    `scope` field (it previously sent none, which is why it passed while prod failed),
+    clears all default registration policies so the scoped anonymous DCR reaches the
+    CRP, and asserts both default-scope placement and consentRequired=false —
+    converting the IT into a real regression guard. Both mutations stay inside the
+    atomic afterRegister transaction.
+  files:
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicy.java"
+    - "src/providers/src/test/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicyTest.java"
+    - "src/providers/src/test/java/io/knobby/keycloak/mcp/integration/McpClientRegistrationPolicyIT.java"
+    - "specs/ERRATA-006-crp-scope-promotion-and-consent.md"
+    - "specs/keycloak.spi.mcp.md"

@@ -688,6 +688,11 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
 
         // 2. Assign default + optional scopes from CONFIG (not hardcoded).
         //    Default scopes are granted whether or not the client requests them.
+        //    REMOVE-THEN-ADD (ERRATA-006): the OIDC DCR pre-binds the request's
+        //    `scope` values as OPTIONAL client scopes BEFORE this policy runs, and
+        //    addClientScope is a no-op when a binding already exists — so it will
+        //    NOT promote optional->default. Remove any existing binding first so
+        //    the placement below is authoritative.
         for (String scopeName : config.getList("default-scopes")) {   // config-driven
             ClientScopeModel scope = KeycloakModelUtils
                 .getClientScopeByName(realm, scopeName);
@@ -696,11 +701,12 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
                     "Required MCP client scope missing: " + scopeName
                     + " (create per setup guide D.3/D.4)");
             }
+            client.removeClientScope(scope);
             client.addClientScope(scope, true);   // true = default (not optional)
         }
         for (String scopeName : config.getList("optional-scopes")) {  // e.g. knobby:admin
             ClientScopeModel scope = KeycloakModelUtils.getClientScopeByName(realm, scopeName);
-            if (scope != null) { client.addClientScope(scope, false); }
+            if (scope != null) { client.removeClientScope(scope); client.addClientScope(scope, false); }
         }
 
         // 3. Bind the configured MCP browser flow (per-client override).
@@ -712,6 +718,14 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
                 + " (create per setup guide D.2)");
         }
         client.setAuthenticationFlowBindingOverride("browser", flow.getId());
+
+        // 4. Suppress Keycloak's built-in OAUTH_GRANT consent — the knobby
+        //    /mcp/consent wizard is the sole consent surface (ERRATA-006). Safe
+        //    against the mcp-hardening consent-required executor: client-policy
+        //    executors fire on triggerOnEvent BEFORE this policy's
+        //    triggerAfterRegister (verified in the 26.6.0
+        //    AbstractClientRegistrationProvider bytecode), so this write wins.
+        client.setConsentRequired(false);
 
         // Any throw here rolls back the ENTIRE registration transaction — atomic.
     }
@@ -728,7 +742,7 @@ Plus `McpClientRegistrationPolicyFactory implements ClientRegistrationPolicyFact
 
 **Deployment — bind as an anonymous CRP.** Register it under **Clients → Client registration → Anonymous Access Policies** (the CRP system, same place as Trusted Hosts — setup guide F.1). As an anonymous-subtype policy it governs only anonymous DCR registrations, never admin-created first-party clients.
 
-**⚠️ Verify during implementation (26.6.0 model API).** The pattern is confirmed (afterRegister receives a mutable ClientModel; Keycloak's own CRPs mutate there). Verify the exact 26.6.0 signatures: `client.setAuthenticationFlowBindingOverride("browser", flowId)`, `realm.getFlowByAlias(...)`, `client.addClientScope(scope, isDefault)`, and `KeycloakModelUtils.getClientScopeByName(...)`. Confirm the flow-binding override set in `afterRegister` persists (it should — it's a field on the client entity written in-transaction).
+**⚠️ Verify during implementation (26.6.0 model API).** The pattern is confirmed (afterRegister receives a mutable ClientModel; Keycloak's own CRPs mutate there). Verify the exact 26.6.0 signatures: `client.setAuthenticationFlowBindingOverride("browser", flowId)`, `realm.getFlowByAlias(...)`, `client.addClientScope(scope, isDefault)`, `client.removeClientScope(scope)`, `client.setConsentRequired(false)`, and `KeycloakModelUtils.getClientScopeByName(...)` (all confirmed present — ERRATA-006). Confirm the flow-binding override set in `afterRegister` persists (it should — it's a field on the client entity written in-transaction).
 
 **Interaction with the tenant-picker Authenticator (§5.1).** Because this CRP guarantees only real MCP clients are ever bound to `browser-mcp-tenant-pick`, the Authenticator's step-0 short-circuit (§5.1) is now a **pure safety net, not load-bearing** — correctness comes from atomic binding here. The Authenticator's detection was updated to prefer the `knobby.mcp` attribute this CRP sets.
 

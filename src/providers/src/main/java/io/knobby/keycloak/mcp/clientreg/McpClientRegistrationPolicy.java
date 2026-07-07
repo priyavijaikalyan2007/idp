@@ -16,7 +16,7 @@
  *             it: (1) sets the knobby.mcp="true" attribute, (2) assigns the
  *             configured default + optional MCP client scopes (removing any
  *             DCR-prebound binding first so default/optional placement is
- *             authoritative — ERRATA-005), (3) binds the browser flow override to
+ *             authoritative — ERRATA-006), (3) binds the browser flow override to
  *             browser-mcp-tenant-pick, and (4) sets consentRequired=false so the
  *             knobby /mcp/consent wizard is the sole consent surface. Because the
  *             mutations share the registration transaction, the client either
@@ -103,7 +103,7 @@ public final class McpClientRegistrationPolicy implements ClientRegistrationPoli
         // 4. Suppress Keycloak's built-in OAuth consent screen. The knobby web
         //    /mcp/consent wizard is the authoritative consent surface (it collects
         //    the tenant + scope grants); Keycloak's own OAUTH_GRANT screen after it
-        //    is redundant double-consent (ERRATA-005). The mcp-hardening
+        //    is redundant double-consent (ERRATA-006). The mcp-hardening
         //    consent-required client-policy executor sets consentRequired=true, but
         //    it runs on the DynamicClientRegistered event (triggerOnEvent) BEFORE
         //    this policy's afterRegister (triggerAfterRegister) — verified against
@@ -141,7 +141,7 @@ public final class McpClientRegistrationPolicy implements ClientRegistrationPoli
             // ClientModel.addClientScope is a no-op when a binding already exists,
             // so it will NOT promote an existing optional binding to default —
             // leaving mcp-default + the author bundle as optional and off the
-            // client's default-client-scopes (ERRATA-005). Remove any existing
+            // client's default-client-scopes (ERRATA-006). Remove any existing
             // binding first so THIS policy's default/optional placement is
             // authoritative, regardless of what the DCR request requested.
             client.removeClientScope(scope);

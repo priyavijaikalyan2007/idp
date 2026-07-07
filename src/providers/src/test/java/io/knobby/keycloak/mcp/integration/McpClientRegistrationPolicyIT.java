@@ -94,7 +94,7 @@ class McpClientRegistrationPolicyIT
         //   - "Allowed Client Scopes" rejects a DCR whose requested `scope` names
         //     scopes outside the realm's default/optional set (returns 403).
         // Since this test's DCR both comes from the container gateway IP AND
-        // requests mcp-default + the author bundle (to reproduce the ERRATA-005
+        // requests mcp-default + the author bundle (to reproduce the ERRATA-006
         // promotion path), remove ALL pre-existing registration policies so the
         // scoped DCR reaches our CRP deterministically (test-only relaxation).
         String realmId = realm.toRepresentation().getId();
@@ -167,7 +167,7 @@ class McpClientRegistrationPolicyIT
                 "browser flow override must point at " + FLOW_ALIAS);
 
         // 5. Built-in consent suppressed — the knobby /mcp/consent wizard is the
-        //    sole consent surface (ERRATA-005).
+        //    sole consent surface (ERRATA-006).
         assertTrue(!Boolean.TRUE.equals(client.isConsentRequired()),
                 "consentRequired must be false so Keycloak's OAUTH_GRANT screen "
                 + "does not double up the knobby consent wizard");
@@ -183,7 +183,7 @@ class McpClientRegistrationPolicyIT
                 // Send `scope` exactly like a real MCP client (Claude Code / the
                 // smoke test) does. Keycloak's OIDC DCR pre-binds these as OPTIONAL
                 // client scopes BEFORE the CRP runs — so this reproduces the
-                // ERRATA-005 condition where addClientScope must PROMOTE an
+                // ERRATA-006 condition where addClientScope must PROMOTE an
                 // already-optional binding to default. Without a `scope` field the
                 // bug is invisible (nothing is pre-bound), which is why the IT
                 // previously passed while prod failed.
