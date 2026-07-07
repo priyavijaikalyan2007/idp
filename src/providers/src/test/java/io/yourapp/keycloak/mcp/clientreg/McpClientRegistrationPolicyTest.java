@@ -118,7 +118,7 @@ class McpClientRegistrationPolicyTest
     void afterRegister_suppressesBuiltInConsent()
     {
         // The yourapp /mcp/consent wizard is the sole consent surface; Keycloak's
-        // built-in OAUTH_GRANT screen must be off for MCP clients (ERRATA-005).
+        // built-in OAUTH_GRANT screen must be off for MCP clients (ERRATA-006).
         try (MockedStatic<KeycloakModelUtils> ignored = stubAllScopesResolve())
         {
             policy.afterRegister(regContext, client);
@@ -192,7 +192,7 @@ class McpClientRegistrationPolicyTest
         // A real OIDC DCR pre-binds the requested `scope` values as OPTIONAL client
         // scopes BEFORE this policy runs. ClientModel.addClientScope is a no-op when
         // a binding already exists, so it will NOT promote optional -> default. The
-        // policy must remove any existing binding first (ERRATA-005).
+        // policy must remove any existing binding first (ERRATA-006).
         try (MockedStatic<KeycloakModelUtils> ignored = stubAllScopesResolve())
         {
             policy.afterRegister(regContext, client);

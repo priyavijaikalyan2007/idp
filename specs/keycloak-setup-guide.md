@@ -873,6 +873,8 @@ Add condition: **Condition type:** `client-updater-context`. **Update Client Sou
 
 ⚠️ **Select only `ByAnonymous`. Do NOT also select `ByAuthenticatedUser`.** The source is a multi-select, and it's easy to leave `ByAuthenticatedUser` checked. But `ByAuthenticatedUser` matches any client created or updated **by an authenticated user — including an admin editing a client in the console.** With it selected, this policy matches your first-party clients (`yourapp-{env}-web`, `yourapp-{env}-admin-api`) every time you edit them, and the `mcp-hardening` profile's executors get force-applied to them. The most visible symptom: the `consent-required` executor (auto-configure) sets `consentRequired = true` on the web client, so regular users start seeing Keycloak's "Grant Access to …" consent screen on login. `ByAnonymous` alone matches only anonymously-registered DCR clients (your MCP clients), which is the entire intent.
 
+> **Note (ERRATA-006): the `consent-required` executor is intentionally overridden for MCP clients.** The executor sets `consentRequired = true` on every anonymous DCR client, but the `McpClientRegistrationPolicy` CRP then sets `consentRequired = false` in `afterRegister` — which runs **after** the client-policy executors (`triggerAfterRegister` after `triggerOnEvent`), so the CRP wins. This is deliberate: the yourapp web `/mcp/consent` wizard **is** the consent surface for MCP clients, so Keycloak's built-in "Grant Access" screen would be redundant double-consent. First-party clients (`yourapp-{env}-web`, etc.) do **not** go through this CRP, so they keep whatever consent setting you give them.
+
 Add profile reference: `mcp-hardening`.
 
 Save.
