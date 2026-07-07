@@ -26,7 +26,11 @@
  *         -> [Keycloak flow engine resumes]
  * 🛡️ SECURITY: HMAC signature + jti replay (validator) + user_sub_echo cross
  *              check + per-realm key isolation. kc_* correlation fields are
- *              HMAC-signed (not query-param tamperable).
+ *              HMAC-signed (not query-param tamperable). The app MUST echo the
+ *              kc_client_id / kc_tab_id / auth_session_id claims from the
+ *              picker-request into the picker-result (web spec §3.3 / ERRATA-003);
+ *              their absence is reported as `missing_correlation`, distinct from
+ *              a genuine `client_not_found`.
  * ----------------------------------------------------------------------------
  */
 package io.knobby.keycloak.mcp.resource;
@@ -165,6 +169,25 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
             return badRequest("realm_misconfigured", ex.getCode().name());
         }
 
+        // The suspended-session correlation claims (kc_client_id, kc_tab_id,
+        // auth_session_id) are echoed by the app from the picker-request. If they
+        // are absent, the app is not honouring the picker-result contract (web
+        // spec §3.3 / ERRATA-003) — fail with a precise, actionable code rather
+        // than a misleading client_not_found (which reads as "the client id you
+        // sent doesn't exist" when the real problem is "you sent no client id").
+        if (isBlank(token.getKcClientId()) || isBlank(token.getKcTabId())
+                || isBlank(token.getAuthSessionId()))
+        {
+            log.warnf("Picker callback realm=%s missing correlation claims "
+                    + "(kc_client_id present=%s, kc_tab_id present=%s, "
+                    + "auth_session_id present=%s) — the app must echo these from "
+                    + "the picker-request into the picker-result; see web spec "
+                    + "§3.3 / ERRATA-003",
+                    realmName, !isBlank(token.getKcClientId()),
+                    !isBlank(token.getKcTabId()), !isBlank(token.getAuthSessionId()));
+            return badRequest("missing_correlation", null);
+        }
+
         ClientModel client = realm.getClientByClientId(token.getKcClientId());
         if (client == null)
         {
@@ -238,6 +261,11 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
         return new AuthenticationFlowURLHelper(session, realm,
                 session.getContext().getUri())
                 .getLastExecutionUrl(authSession);
+    }
+
+    private static boolean isBlank(String value)
+    {
+        return value == null || value.isBlank();
     }
 
     private static Response badRequest(String error, String description)

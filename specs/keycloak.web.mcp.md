@@ -129,12 +129,25 @@ The final step of the wizard. The user clicks `[Authorize]` on Step 3; this endp
      "chosen_tenant_id": <as posted>,
      "granted_scopes": <as posted>,
      "oauth_state": <from picker-request, held in session state>,
+     "kc_client_id": <echoed from the server-held picker-request>,
+     "kc_tab_id": <echoed from the server-held picker-request>,
+     "auth_session_id": <echoed from the server-held picker-request>,
      "nonce": <128-bit random>,
      "jti": <UUID>,
      "iat": now,
      "exp": now + 60 seconds
    }
    ```
+
+   > **⚠️ Required — session-correlation claims (ERRATA-003).** `kc_client_id`,
+   > `kc_tab_id`, and `auth_session_id` are **mandatory**: the Keycloak SPI
+   > callback uses them to recover the suspended authentication session and its
+   > client. Omitting them makes the callback return HTTP 400 `missing_correlation`
+   > (observed in production as `client=null`). Echo them from the **server-held
+   > picker-request** (validated and stored in §2.1) — the same source as
+   > `oauth_state` — **never** from the client's POST body: a client-supplied
+   > `kc_client_id` would let a caller redirect the resume at a different
+   > client/session (session-fixation surface). See ERRATA-003.
 6. Sign with HMAC (current HMAC key from secret manager).
 7. Construct redirect URL: `https://auth.knobby.io/realms/knobby-{env}/mcp-picker-callback?picker_result=<token>`
 8. Clear server-side session state for this wizard (the picker-request is consumed).
@@ -328,7 +341,9 @@ When `/api/mcp/consent/authorize` (§2.2) builds the picker-result token:
 
 ```
 1. Generate jti (UUID v4) and nonce (128-bit random hex).
-2. Build claims per Keycloak PRD §16.8.5.
+2. Build claims per Keycloak PRD §16.8.5, INCLUDING the three session-correlation
+   claims kc_client_id / kc_tab_id / auth_session_id echoed from the server-held
+   picker-request (§2.1) — required, see §2.2 step 5 and ERRATA-003.
 3. Set iat = now, exp = now + 60s.
 4. Serialize claims as JSON.
 5. Construct JWT:
