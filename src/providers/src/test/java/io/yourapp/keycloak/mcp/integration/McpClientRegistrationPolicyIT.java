@@ -89,14 +89,18 @@ class McpClientRegistrationPolicyIT
         // resolve; a copy of the built-in browser flow suffices for this test.
         realm.flows().copy("browser", Map.of("newName", FLOW_ALIAS));
 
-        // A fresh realm ships a default "Trusted Hosts" anonymous policy that
-        // rejects anonymous DCR from unlisted hosts. Remove it so the test's DCR
-        // from the container gateway IP is permitted (test-only relaxation).
+        // A fresh realm ships several default anonymous registration policies:
+        //   - "Trusted Hosts" rejects anonymous DCR from unlisted hosts, and
+        //   - "Allowed Client Scopes" rejects a DCR whose requested `scope` names
+        //     scopes outside the realm's default/optional set (returns 403).
+        // Since this test's DCR both comes from the container gateway IP AND
+        // requests mcp-default + the author bundle (to reproduce the ERRATA-005
+        // promotion path), remove ALL pre-existing registration policies so the
+        // scoped DCR reaches our CRP deterministically (test-only relaxation).
         String realmId = realm.toRepresentation().getId();
         String policyType =
                 "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy";
-        realm.components().query(realmId, policyType).stream()
-                .filter(c -> "trusted-hosts".equals(c.getProviderId()))
+        realm.components().query(realmId, policyType)
                 .forEach(c -> realm.components().component(c.getId()).remove());
 
         // Register the CRP as an ANONYMOUS client-registration policy. Empty
@@ -161,6 +165,12 @@ class McpClientRegistrationPolicyIT
         String boundAlias = realm.flows().getFlow(browserFlowId).getAlias();
         assertEquals(FLOW_ALIAS, boundAlias,
                 "browser flow override must point at " + FLOW_ALIAS);
+
+        // 5. Built-in consent suppressed — the yourapp /mcp/consent wizard is the
+        //    sole consent surface (ERRATA-005).
+        assertTrue(!Boolean.TRUE.equals(client.isConsentRequired()),
+                "consentRequired must be false so Keycloak's OAUTH_GRANT screen "
+                + "does not double up the yourapp consent wizard");
     }
 
     /** Anonymous OIDC Dynamic Client Registration; returns the new client_id. */
@@ -170,11 +180,20 @@ class McpClientRegistrationPolicyIT
                 + "/realms/" + REALM + "/clients-registrations/openid-connect";
         return RestAssured.given()
                 .contentType(ContentType.JSON)
+                // Send `scope` exactly like a real MCP client (Claude Code / the
+                // smoke test) does. Keycloak's OIDC DCR pre-binds these as OPTIONAL
+                // client scopes BEFORE the CRP runs — so this reproduces the
+                // ERRATA-005 condition where addClientScope must PROMOTE an
+                // already-optional binding to default. Without a `scope` field the
+                // bug is invisible (nothing is pre-bound), which is why the IT
+                // previously passed while prod failed.
                 .body(Map.of(
                         "client_name", "it-mcp-agent",
                         "redirect_uris", List.of("https://client.example/callback"),
                         "grant_types", List.of("authorization_code"),
-                        "token_endpoint_auth_method", "none"))
+                        "token_endpoint_auth_method", "none",
+                        "scope", "openid mcp-default yourapp:read yourapp:comment "
+                                + "yourapp:curate yourapp:write yourapp:share"))
                 .when()
                 .post(dcrUrl)
                 .then()

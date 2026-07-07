@@ -2020,7 +2020,15 @@ Path (i) remains a clean fallback design if (iii)'s cross-redirect flow ever has
    b. Validates user's membership in the chosen tenant (RBAC).
    c. HMAC-signs a "picker-result" JWT containing:
         { picker_request_jti, chosen_tenant_id, granted_scopes[],
-          user_sub_echo, nonce, jti, exp(now+1min) }
+          user_sub_echo, nonce, jti, exp(now+1min),
+          kc_client_id, kc_tab_id, auth_session_id }
+      ⚠️ The three correlation claims (kc_client_id, kc_tab_id, auth_session_id)
+      are REQUIRED — the SPI callback recovers the suspended auth session + client
+      from them (NOT from picker_request_jti). The app MUST source them from its
+      SERVER-HELD picker-request, NOT the client's POST body (session-fixation
+      guard). Omitting them causes the callback's client lookup to return null →
+      HTTP 400 'missing_correlation'. (This desync caused the 2026-07-06 client=null
+      incident; see ERRATA-003 + web spec §2.2 step 5 / §3.3, SPI design §6.2.)
    d. 302s browser back to Keycloak's Realm Resource Provider callback URL:
         https://auth.yourapp.com/realms/yourapp-prod/mcp-picker-callback
           ?picker_result=<picker-result-token>
