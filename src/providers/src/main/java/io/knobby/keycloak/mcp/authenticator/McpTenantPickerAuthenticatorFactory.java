@@ -62,9 +62,11 @@ public final class McpTenantPickerAuthenticatorFactory implements AuthenticatorF
 
     private static final String HELP_TEXT =
             "Redirects MCP-client auth flows to Knobby web for tenant picker "
-                    + "and consent. Required final step of "
-                    + "browser-mcp-tenant-pick flow. Configure knobby.web.host "
-                    + "per realm.";
+                    + "and consent. Add as a Required step in BOTH the "
+                    + "browser-mcp-tenant-pick flow (Cookie path) and a Post Broker "
+                    + "Login Flow bound per-IdP (fresh/IdP path) — see ERRATA-005. "
+                    + "Skips non-MCP clients, so it is safe in the shared per-IdP "
+                    + "post-broker flow. Configure knobby.web.host on EACH execution.";
 
     private static final Requirement[] REQUIREMENT_CHOICES =
             new Requirement[] { Requirement.REQUIRED };

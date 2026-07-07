@@ -10,7 +10,11 @@
 /*
  * ----------------------------------------------------------------------------
  * ⚓ COMPONENT: McpTenantPickerAuthenticator
- * 📜 PURPOSE: Final step of the browser-mcp-tenant-pick flow. A RE-ENTRANT
+ * 📜 PURPOSE: The MCP tenant-picker step. Hosted in TWO flows (ERRATA-005): the
+ *             browser-mcp-tenant-pick flow (Cookie / already-logged-in path) and
+ *             the Post Broker Login Flow (fresh / IdP-redirect path) — because
+ *             browser-flow executions after an IdP redirect don't run for brokered
+ *             logins. Both converge on identical behavior. A RE-ENTRANT
  *             suspend/resume step (ERRATA-004): authenticate() first checks the
  *             resume note (knobby.mcp.picker.completed) the callback writes — if
  *             set, it finishes the step; otherwise it builds a signed
@@ -165,14 +169,16 @@ public final class McpTenantPickerAuthenticator implements Authenticator
             return;
         }
 
-        // Short-circuit guard (spec §5.1) — SAFETY NET ONLY, not load-bearing.
-        // Under the settled design, McpClientRegistrationPolicy (§5.8) binds this
-        // flow to MCP clients atomically at registration, and the realm default
-        // stays browser-federated-only, so this step only ever runs for real MCP
-        // clients. This guard exists solely to fail safe if someone misconfigures
-        // the realm (makes this the default flow, or binds a non-MCP client by
-        // mistake): a non-MCP client passes through untouched. Correctness comes
-        // from the atomic binding at registration, NOT from this check.
+        // MCP-client detection guard (spec §5.1). Its role depends on WHICH flow
+        // hosts this step:
+        //   - In browser-mcp-tenant-pick (per-client bound by the CRP, §5.8): a
+        //     SAFETY NET — only MCP clients are ever routed here, so this is
+        //     belt-and-suspenders.
+        //   - In the Post Broker Login Flow (ERRATA-005): LOAD-BEARING. That flow
+        //     is per-IdP and shared with regular web-app logins (they use the same
+        //     Google/Microsoft IdPs), so this guard is the ONLY thing that keeps
+        //     the tenant picker from firing on non-MCP web logins. Do NOT remove it.
+        // Either way a non-MCP client passes through untouched via context.success().
         ClientModel client = authSession.getClient();
         if (!isMcpClient(client))
         {

@@ -319,3 +319,48 @@
     - "src/providers/src/test/java/io/knobby/keycloak/mcp/integration/McpClientRegistrationPolicyIT.java"
     - "specs/ERRATA-006-crp-scope-promotion-and-consent.md"
     - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-015"
+  title: "Host the MCP tenant picker in a per-IdP Post Broker Login Flow for fresh/brokered sessions (config-only)"
+  date: "2026-07-07"
+  status: "Accepted"
+  context: >-
+    The full MCP chain worked for already-logged-in (Cookie) sessions but failed
+    for fresh/cookieless sessions: after a brokered IdP login (Google/Microsoft),
+    Keycloak does not run browser-flow executions placed after the IdP-redirect step
+    (longstanding behavior, issue #10250), so the tenant picker in browser-mcp-tenant-pick
+    is skipped and /mcp/consent is never reached (ERRATA-005). Decision: also host the
+    same McpTenantPickerAuthenticator ("Knobby MCP Tenant Picker") in a Post Broker
+    Login Flow bound per-IdP — Keycloak's sanctioned hook for running an authenticator
+    after brokered login. A 26.6.0 SDK spike (decompiling LoginActionsService,
+    AuthenticationProcessor, AuthenticationFlowURLHelper, IdentityBrokerService)
+    confirmed the authenticator works UNMODIFIED there: (1) the brokered login keeps a
+    single AuthenticationSessionModel keyed by (rootAuthSessionId, client, tabId), so
+    authSession.getClient() is the original MCP client, context.getUser() is the
+    brokered user, and the ERRATA-004 re-entrancy note (knobby.mcp.picker.completed)
+    lives on that same session so the loop does not reappear on the IdP path; (2) the
+    MCP-detection short-circuit is resolvable AND load-bearing there (per-IdP flow
+    shared with web logins — it no-ops the picker for non-MCP clients); (3) suspend/
+    resume works because AuthenticationFlowURLHelper.getLastExecutionUrl is
+    flow-path-agnostic — it rebuilds the resume URL from the current.flow.path auth
+    note, which LoginActionsService.brokerLoginFlow sets to "post-broker-login" via
+    AuthenticationProcessor.setFlowPath, so the callback's existing getLastExecutionUrl
+    redirect resumes the post-broker flow correctly. Consequences: (a) the §5.1
+    short-circuit is reclassified from "safety net only" (ADR-011) to LOAD-BEARING in
+    the post-broker context; (b) the fix is CONFIGURATION-ONLY — one shared
+    post-broker-mcp-tenant-pick flow (single Required picker execution + its own
+    knobby.web.host config) set as the Post login flow on Google + Microsoft; (c) NO
+    change to McpTenantPickerAuthenticator logic or McpPickerCallbackResourceProvider,
+    and NO app-side change (the picker-request/result contract, correlation claims, and
+    the fixed /mcp-picker-callback URL are identical regardless of hosting flow). Code
+    touch was documentation-only (comments/help text/marker note the two-flows design).
+    Rejected alternative: a RequiredActionProvider that fires on both paths with one
+    hook — cleaner in theory but would require changing the callback's resume mechanism
+    (required actions resume via a different URL than getLastExecutionUrl), a larger and
+    riskier change than reusing the working authenticator in a second flow.
+  files:
+    - "specs/ERRATA-005-post-broker-tenant-picker.md"
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak-setup-guide.md"
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticatorFactory.java"
