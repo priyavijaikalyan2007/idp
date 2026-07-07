@@ -295,10 +295,12 @@ SPI design §5.1 DETECTION-SIGNAL CAVEAT and ADR-010.
 
 ## TD-010: Per-client browser-flow override is not honored after the IdP broker round-trip
 
-**Status:** Open (diagnosed, fix pending a decision)
+**Status:** Superseded / resolved by ERRATA-005 (2026-07-07). The design is settled and documented; only the per-environment admin-console config remains (setup guide D.2a).
 **Priority:** High — blocks MCP consent on the *primary* login path (fresh federated login)
 **Created:** 2026-07-07
 **Current location:** interaction between `McpClientRegistrationPolicy.bindBrowserFlow` (per-client override) and the realm's default browser flow; `src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java`
+
+> **Resolution (2026-07-07, ERRATA-005 + ADR-015).** The right frame turned out not to be "the override is lost" but the underlying Keycloak behavior (#10250): browser-flow executions *after* an IdP-redirect step don't run for brokered logins at all. The settled fix is to host the same tenant picker in a per-IdP **Post Broker Login Flow** — config-only, no code change (a 26.6.0 SDK spike confirmed the authenticator + suspend/resume work there unmodified). The Option-A "bind realm-wide" idea sketched below is **no longer the plan**. See `specs/ERRATA-005-post-broker-tenant-picker.md` and setup guide §D.2a. Retained for history.
 
 ### Symptom
 

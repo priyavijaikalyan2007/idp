@@ -202,3 +202,20 @@ Live GCP read-only check: active `gcloud` account is `operator@example.com`; con
 **Diagnosis 2 (consent).** `consentRequired=true` from the mcp-hardening `consent-required` client-policy executor → Keycloak's `OAUTH_GRANT` screen double-ups the yourapp wizard. User chose: CRP sets `consentRequired=false`. Verified it wins by decompiling `AbstractClientRegistrationProvider` (26.6.0): `triggerOnEvent` (executors) at bytecode offset 228 runs before `triggerAfterRegister` (CRP) at 237, so the CRP is the last writer.
 
 **Implementation.** `McpClientRegistrationPolicy.afterRegister`: remove-then-add scope placement + `setConsentRequired(false)`. Verified `removeClientScope` + `setConsentRequired` in 26.6.0 via javap. TDD: 2 new unit tests (promotion removes-before-adds; consent suppressed) + tightened no-op test; IT now asserts default-scope placement + `consentRequired=false` end-to-end. 135 unit + 2 IT green. Docs: ERRATA-006, ADR-014, insight 1.6, concepts.yaml, spec §5.8, setup guide §D.6a note, CHANGELOG, status, history. **Still open: TD-010** (broker-path per-client browser-flow override lost after the IdP round-trip — the fresh-login path).
+
+---
+
+## 2026-07-07 (cont.) — ERRATA-005 spike: fresh-session tenant picker via Post Broker Login Flow
+
+**Request.** Implement ERRATA-005 (the fresh/cookieless login gap). User asked me to work through the 5 open questions via SDK spikes, settle a solution, and report whether anything is needed app-side.
+
+**Spike (26.6.0 SDK, by decompiling `LoginActionsService`, `AuthenticationProcessor`, `AuthenticationFlowURLHelper`, `IdentityBrokerService`).** Resolved all five:
+1. Authenticator runs unmodified in post-broker — brokered login keeps ONE auth session keyed by (root, client, tab); `postBrokerLoginGet/Post` recover it by clientId+tabId → client/user/re-entrancy-note all resolve. The ERRATA-004 loop does NOT reappear on the IdP path (same session ⇒ same note).
+2. Client available + `isMcpClient` load-bearing there (per-IdP flow shared with web logins; no-ops non-MCP).
+3. Suspend/resume works: `getLastExecutionUrl` is flow-path-agnostic — rebuilds from `current.flow.path`, which `brokerLoginFlow`→`setFlowPath("post-broker-login")` sets. Callback unchanged.
+4. One shared `post-broker-mcp-tenant-pick` flow, bound as Post login flow on Google + Microsoft.
+5. Runs after `first-broker-login-no-prompt`, no conflict, every brokered login.
+
+**Conclusion — CONFIG-ONLY.** No change to `McpTenantPickerAuthenticator` logic or `McpPickerCallbackResourceProvider`; **no app-side change** (picker-request/result contract + correlation claims + fixed `/mcp-picker-callback` URL are identical regardless of hosting flow). Code touch was documentation-only: §5.1 guard reclassified safety-net(browser)/load-bearing(post-broker) in the comment, factory help text + marker note both flows. Emphasized the per-execution `yourapp.web.host` gotcha.
+
+**Deliverables.** ERRATA-005 spike write-up + status flip; SPI §5.1; setup guide new **D.2a** (create the flow + bind per-IdP + cookieless acceptance test); ADR-015; CHANGELOG/status/history/concepts/insight (1.7). Rejected a RequiredActionProvider alternative (one hook both paths) — would force changing the callback resume mechanism, larger/riskier than reusing the working authenticator. TD-010 is now resolved-by-ERRATA-005. 135 unit + 2 IT green (doc-only code touch). **App team: nothing to do.**

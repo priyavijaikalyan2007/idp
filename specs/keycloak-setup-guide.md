@@ -685,6 +685,30 @@ The wrong structure (picker as a top-level Required sibling to the Alternative a
 
 **Verify the structure is not broken:** temporarily bind this flow to a *throwaway test client* (not the realm default, not the web client) and attempt a login. If you get HTTP 400 at `/auth`, the Required/Alternative structure is still wrong — recheck that the auth executions are inside the Required sub-flow, not siblings of the picker.
 
+## D.2a Create the Post Broker Login Flow (fresh-session / IdP path) — REQUIRED for pilot
+
+⚠️ **Without this, fresh (cookieless) MCP logins never reach `/mcp/consent`** — the common case for real pilot users. This is [ERRATA-005](../specs/ERRATA-005-post-broker-tenant-picker.md).
+
+**Why:** the `browser-mcp-tenant-pick` flow (D.2) only reaches the picker on the **Cookie** path (already-logged-in). On a **fresh** session, authentication goes out to Google/Microsoft, and — by longstanding Keycloak behavior ([#10250](https://github.com/keycloak/keycloak/issues/10250)) — browser-flow executions placed *after* an IdP-redirect step **do not run for brokered logins**, so the picker is skipped. The sanctioned hook to run an authenticator after a brokered login is the **Post Broker Login Flow**. The same `YourApp MCP Tenant Picker` authenticator is used; it skips non-MCP clients, so it is safe even though the post-broker flow is per-IdP and shared with web logins.
+
+**Path:** Authentication → Flows
+
+1. **Create flow** (top-level) → name `post-broker-mcp-tenant-pick`, type **Basic flow**.
+2. **Add step** → **YourApp MCP Tenant Picker**. Set it **Required**. (No sub-flows needed — authentication already happened upstream; this flow is just the picker.)
+3. On that execution → **⚙ (gear) → Config** → set **YourApp web host** (`yourapp.web.host`) = the env's web host (e.g. `prod.yourapp.com`). **⚠️ Config is per-execution — this is a SEPARATE config object from the browser-flow picker's; you must set it here too, or the step fails with `INTERNAL_ERROR` (missing yourapp.web.host).**
+4. Save.
+
+**Bind it per-IdP** (one shared flow, both IdPs — a Post Login Flow is a realm flow referenced by IdP config, reusable across providers):
+
+- Identity providers → **Google** → *Advanced* (or *Settings*) → **Post login flow** = `post-broker-mcp-tenant-pick`. Save.
+- Repeat for **Microsoft** (and any other brokered IdP an MCP user may use).
+- Leave **First login flow** as your existing `first-broker-login-no-prompt` (PRD §11.4) — the two are separate and sequential; post-broker runs *after* first-broker-login, on every brokered login.
+
+**Verify (fresh session — this is the case that reproduces the bug):**
+- In an **incognito / cleared-cookie** browser, run `./smoke-mcp.sh` and complete the Google/Microsoft login. The picker must appear (`/mcp/consent`) and the token must carry a `tenant` claim.
+- A warm Cookie session exercises only the D.2 browser-flow path and will pass even if D.2a is missing — so the acceptance test MUST start cookieless.
+- Non-MCP web-app logins via the same IdP are unaffected (the picker's MCP-detection guard no-ops for them).
+
 ## D.3 Create the six atomic `yourapp:*` Client Scopes
 
 **Path:** Client scopes → **Create client scope** (repeat 6×)

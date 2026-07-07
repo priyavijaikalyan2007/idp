@@ -1,7 +1,7 @@
 # Errata 005 — Tenant picker must also run in the Post Broker Login Flow (fresh-session / IdP path)
 
-**Date:** 2026-07-06
-**Status:** Root cause confirmed + reproducible in production; fix direction settled; **implementation pending (needs a Claude Code spike against the 26.6.0 SDK).**
+**Date:** 2026-07-06 (spike completed 2026-07-07)
+**Status:** Root cause confirmed + reproducible in production; **spike done against the 26.6.0 SDK — all five open questions resolved (see below). The existing `McpTenantPickerAuthenticator` works UNMODIFIED in the Post Broker Login Flow; the fix is CONFIGURATION-ONLY (create the post-broker flow + bind per-IdP). No code change to the authenticator logic and NO app-side change.** Remaining work: apply the admin-console config in each environment and run the fresh-session acceptance test.
 **Applies to:** `KEYCLOAK_MCP_SPI_DESIGN.md` (the tenant-picker Authenticator, §5.1) and `KEYCLOAK_SETUP_GUIDE.md` (flow config, D.2/D.8) and the per-IdP config in `KEYCLOAK_AUTH_PRD.md` (§11.x IdP setup).
 **Companion to:** ERRATA-001 (CRP bootstrap), ERRATA-002 (`/mcp/consent` split), ERRATA-003 (correlation claims), and ERRATA-004 (Claude Code's — separate topic). This (005) is a *distinct* gap from all of those — it's about *which authentication path* reaches the picker, not registration, the consent split, or the callback.
 
@@ -64,15 +64,17 @@ Both paths converge on the same Authenticator behavior (suspend → `/mcp/consen
 
 ---
 
-## Open questions for the implementation spike (verify against Keycloak 26.6.0 SDK)
+## Spike results — all five questions resolved (Keycloak 26.6.0 SDK, 2026-07-07)
 
-These are why this errata is "fix direction settled, implementation pending" rather than a copy-paste:
+Verified by decompiling `LoginActionsService`, `AuthenticationProcessor`, `AuthenticationFlowURLHelper`, and `IdentityBrokerService` from the pinned 26.6.0 JARs. **Bottom line: the existing authenticator works unmodified; the fix is config-only.**
 
-1. **Does the existing `McpTenantPickerAuthenticator` run unmodified in the Post Broker Login Flow context?** The post-broker flow runs in a different context than the browser flow (post-first-broker-login, brokered-context session). Confirm the Authenticator's assumptions (auth session shape, `context.getUser()`, the client reference) hold there. **⚠️ Includes the re-entrancy guard from ERRATA-004:** `authenticate()` now reads the `yourapp.mcp.picker.completed` auth note (via `authSession.getAuthNote(...)`) to detect callback-recorded completion and finish instead of re-challenging. Confirm that auth note is written/readable in the **post-broker** session context too — if the post-broker flow uses a different auth session than the one the callback wrote to, the guard won't see the note and the loop (ERRATA-004) could reappear on the IdP path. This is the single most important cross-check between 004 and 005.
-2. **Is the CLIENT context available in the post-broker flow for the detection guard?** The MCP-detection short-circuit reads the client (`yourapp.mcp` attribute / `mcp-default` scope). Confirm the client is resolvable in the post-broker context — if the post-broker flow doesn't carry the originating client cleanly, the guard needs a different signal.
-3. **How does suspend/resume-to-`/mcp/consent` interact with the post-broker flow?** The ERRATA-003 resume (correlation claims → `getLastExecutionUrl`) was validated in the browser-flow context. Confirm the same suspend (challenge) + callback-resume works when the picker is hosted in the post-broker flow — the execution URL and auth-session correlation may differ.
-4. **Config placement:** Post Broker Login Flow is set **per-IdP** (Identity providers → Google/Microsoft → Settings → *Post login flow*). Both Google and Microsoft need it. Confirm whether one shared post-broker flow (containing the guarded picker) can be reused across both IdPs (likely yes) or whether each needs its own.
-5. **Interaction with `first-broker-login-no-prompt`:** the post-broker flow runs *after* first-broker-login. Confirm ordering and that the no-prompt first-broker flow (PRD §11.4) doesn't interfere.
+1. **Does the authenticator run unmodified in the Post Broker Login Flow? — YES.** The brokered login preserves a single `AuthenticationSessionModel` throughout (authorize → IdP round-trip → first-broker-login → post-broker-login), keyed by `(rootAuthSessionId, client, tabId)`. `LoginActionsService.postBrokerLoginGet/Post(authSessionId, code, execution, clientId, tabId, clientData)` recovers **that same** session, so `authSession.getClient()` is the original MCP client, `context.getUser()` is the brokered user (set before post-broker runs), and `authSession.getClientNote(state)` / `getClientScopes()` persist. **The ERRATA-004 re-entrancy note lives on that same session** — the callback recovers it by the identical correlation tuple and writes `yourapp.mcp.picker.completed` to it, and the post-broker resume re-enters `authenticate()` on that session and reads the note. So the loop does NOT reappear on the IdP path. (This was the critical 004↔005 cross-check.)
+2. **Is the client available for the detection guard? — YES.** Same session ⇒ `authSession.getClient()` is the originating MCP client (post-broker resume is keyed on `clientId`). `isMcpClient` works and is **load-bearing** here: the post-broker flow is per-IdP and shared with web logins, so the guard is the only thing that no-ops the picker for non-MCP clients.
+3. **Does suspend/resume-to-`/mcp/consent` work? — YES, unchanged.** `AuthenticationFlowURLHelper.getLastExecutionUrl(authSession)` is **flow-path-agnostic**: it rebuilds the resume URL from the `current.flow.path` auth note (falling back to `authenticate`) plus `current.authentication.execution`. When the picker challenges inside the post-broker flow, `LoginActionsService.brokerLoginFlow(...)` runs the `AuthenticationProcessor` with `setFlowPath("post-broker-login")`, so `current.flow.path = post-broker-login` is written. The callback's existing `getLastExecutionUrl` redirect therefore rebuilds `/login-actions/post-broker-login?execution=…` and resumes the **post-broker** flow correctly. No change to `McpPickerCallbackResourceProvider`.
+4. **Config placement — ONE shared post-broker flow, bound on both IdPs.** A Post Login Flow is a realm-level `AuthenticationFlowModel` referenced by `IdentityProviderModel.getPostBrokerLoginFlowId()`; multiple IdPs may reference the same flow. Create one flow (e.g. `post-broker-mcp-tenant-pick`) with a single **Required** `YourApp MCP Tenant Picker` execution, and set it as the *Post login flow* on both Google and Microsoft. **Each execution needs its own `yourapp.web.host` AuthenticatorConfig** (config is per-execution) — set it on the post-broker execution just as on the browser-flow one.
+5. **Interaction with `first-broker-login-no-prompt` — none.** `brokerLoginFlow` runs first-broker-login and post-broker-login as separate, sequential flows; post-broker runs *after* first-broker-login and on **every** brokered login (not just first link). No ordering conflict.
+
+**Net: no code change to the authenticator's logic, no `McpPickerCallbackResourceProvider` change, no app change.** Only doc-in-code touch-ups (the §5.1 guard is now load-bearing in post-broker; marker/help text mention both flows) plus the admin-console config below.
 
 ---
 
@@ -95,11 +97,14 @@ These are why this errata is "fix direction settled, implementation pending" rat
 
 ## What still needs doing
 
-1. **Claude Code spike** — resolve the five open questions above against the 26.6.0 SDK.
-2. **Build/config** — create a Post Broker Login Flow containing the MCP-guarded tenant picker; set it as the Post Login Flow on Google + Microsoft IdPs.
-3. **Update SPI §5.1** — short-circuit is load-bearing in the post-broker context.
-4. **Re-run `mcp-e2e-interactive.sh` in a FRESH (incognito / cleared-cookie) session** — this is the case that reproduces the bug. The existing E2E may have been passing only because of a warm Cookie session; the acceptance test for this fix MUST start cookieless.
-5. **Apply the doc edits** above once mechanics are confirmed.
+1. ~~**Claude Code spike**~~ — DONE (2026-07-07); all five questions resolved above.
+2. ~~**Update SPI §5.1 + code docs**~~ — DONE: guard reworded as load-bearing-in-post-broker (`McpTenantPickerAuthenticator` comment + factory help text + marker), and SPI design §5.1 updated with the two-flows design.
+3. **Build/config (admin console — per environment, OPERATOR ACTION):**
+   - Create a top-level auth flow `post-broker-mcp-tenant-pick` with one **Required** execution: **YourApp MCP Tenant Picker**.
+   - On that execution, set the config `yourapp.web.host` = the env's web host (e.g. `prod.yourapp.com`) — **same value as the browser-flow picker's config; it is per-execution, so it must be set here too.**
+   - Identity providers → **Google** → *Post login flow* = `post-broker-mcp-tenant-pick`. Repeat for **Microsoft**. (One flow, both IdPs.)
+   - Setup guide D.2/D.8 updated with these steps.
+4. **Re-run `smoke-mcp.sh` in a FRESH (incognito / cleared-cookie) session** — this is the case that reproduces the bug; the acceptance test for this fix MUST start cookieless. (A warm Cookie session exercises only the browser-flow path, which already worked.)
 
 ---
 
