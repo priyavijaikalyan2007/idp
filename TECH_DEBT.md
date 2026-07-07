@@ -290,3 +290,38 @@ SPI design §5.1 DETECTION-SIGNAL CAVEAT and ADR-010.
 - Any incident where a non-MCP client is misrouted into the MCP consent flow.
 - Introduction of client types (PRD §17: mobile, browser plugins) where the
   scope-only signal proves insufficient.
+
+---
+
+## TD-010: Per-client browser-flow override is not honored after the IdP broker round-trip
+
+**Status:** Open (diagnosed, fix pending a decision)
+**Priority:** High — blocks MCP consent on the *primary* login path (fresh federated login)
+**Created:** 2026-07-07
+**Current location:** interaction between `McpClientRegistrationPolicy.bindBrowserFlow` (per-client override) and the realm's default browser flow; `src/providers/src/main/java/io/knobby/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java`
+
+### Symptom
+
+A freshly DCR'd, correctly-marked MCP client (CRP log confirms `knobby.mcp` + scopes + browser-flow override) logs in via the Google IdP and goes **Google → Keycloak `OAUTH_GRANT` → token**, never hitting `/mcp/consent`. The server log shows **no** `Emitting MCP picker request` line — `authenticate()` never ran after the broker round-trip.
+
+### Root cause (confirmed by elimination)
+
+A **Cookie-path** login (existing Keycloak session, no broker redirect) **does** fire the picker and reach `/mcp/consent`. So the `browser-mcp-tenant-pick` flow is structurally correct (the picker is REQUIRED and reachable). The only difference on the failing path is the **Identity Provider Redirector round-trip**. Conclusion: the **per-client** browser-flow override the CRP sets is dropped when Keycloak resumes after the broker login — the post-broker resume runs the **realm default** browser flow (`browser-federated-only`, which has no picker). This is why the earlier deployments that bound the flow realm-wide (Option A) worked and the CRP's per-client binding (Option B) regressed the broker path.
+
+### Fix options
+
+1. **Recommended — Option A (realm-wide).** Bind `browser-mcp-tenant-pick` as the realm's **default** browser flow and rely on `McpTenantPickerAuthenticator`'s `isMcpClient` short-circuit (now **attribute-based**, TD-009/ADR-011, so `knobby-{env}-web` is unaffected) to pass non-MCP clients through. Removes the per-client override entirely, so there is nothing to lose on resume. The two historical objections to Option A are now moot: the flow structure is proven correct (Cookie path works), and detection no longer depends on `mcp-default` being off the realm defaults. If adopted, drop `bindBrowserFlow` from the CRP (or keep it as belt-and-suspenders — harmless but redundant).
+2. **Keep Option B and re-apply the override post-broker.** Investigate whether a `postBrokerLoginFlow` or a custom step can re-assert the client override after `firstBrokerLogin`. More moving parts; not recommended.
+
+### Next step before implementing
+
+Run `./diag-mcp-flow.sh` (added 2026-07-07) to confirm the realm default browser flow is `browser-federated-only` and that the picker is `REQUIRED` at the top level of `browser-mcp-tenant-pick`. Then apply Option A and re-run `smoke-mcp.sh` (fresh login) — it should reach `/mcp/consent` and stamp the tenant.
+
+### Triggers to revisit
+
+- Any change to how MCP clients bind the browser flow.
+- Adoption of `kc_idp_hint` / a non-broker first login path for MCP clients.
+
+### Related
+
+- ERRATA-004 (the resume loop) is a **separate** bug on the Cookie path — fixed. TD-010 is the broker path. Both must be green for end-to-end MCP login to work.

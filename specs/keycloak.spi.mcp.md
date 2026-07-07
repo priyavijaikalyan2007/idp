@@ -527,17 +527,31 @@ public Response handleCallback(@QueryParam("picker_result") String pickerResult)
        if currentUser == null || !currentUser.getId().equals(token.userSubEcho):
            return badRequest("user_mismatch")
 
-    7. // Write the session notes the protocol mappers read.
+    7. // Write the session notes the protocol mappers read, PLUS the resume
+       //  signal the authenticator checks on re-entry (ERRATA-004).
        authSession.setUserSessionNote("knobby_tenant_id", token.chosenTenantId)
        authSession.setUserSessionNote("knobby_scopes", join(" ", token.grantedScopes))
+       authSession.setAuthNote("knobby.mcp.picker.completed", "true")
 
     8. // Resume by handing the browser back to Keycloak's own last-execution URL;
        //  Keycloak's flow engine re-enters the CHALLENGED authenticator execution
-       //  and finishes the flow. No manual AuthenticationProcessor needed.
+       //  (via authenticate(), NOT action()) and — seeing the completed note —
+       //  finishes the flow. No manual AuthenticationProcessor needed.
        resumeUrl = new AuthenticationFlowURLHelper(session, realm, uriInfo)
                        .getLastExecutionUrl(authSession)
        return Response.seeOther(resumeUrl).build()
 ```
+
+> **Re-entrancy is mandatory (ERRATA-004).** Keycloak resumes a *challenged*
+> execution by re-invoking the authenticator's **`authenticate()`**, not
+> `action()`, because the resume rides a redirect to the last-execution URL
+> rather than a form POST to the action URL. The tenant-picker `authenticate()`
+> therefore opens with a **resume guard**: if `authSession.getAuthNote(
+> "knobby.mcp.picker.completed")` is set (step 7 above), it calls
+> `context.success()` and returns instead of building a fresh picker-request.
+> Without this guard, every resume re-challenges → 303 to `/mcp/consent` →
+> infinite loop. Any challenge-based authenticator that suspends to external UI
+> must be written this way.
 
 **Implementation note.** The suspend (Authenticator, §5.1) uses
 `context.challenge(seeOther(...))`; the resume rides

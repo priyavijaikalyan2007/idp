@@ -14,7 +14,8 @@
  *             the picker-result JWT returned by Knobby web, re-finds the
  *             suspended auth session via AUTH_SESSION_ID cookie (with auth-
  *             session-id fallback from the JWT), writes the tenant + scopes
- *             user-session notes, and 302-redirects back into the suspended
+ *             user-session notes AND the picker-completed auth note (the resume
+ *             signal, ERRATA-004), and 302-redirects back into the suspended
  *             flow via AuthenticationFlowURLHelper.getLastExecutionUrl so
  *             Keycloak's flow engine resumes from the CHALLENGED authenticator
  *             execution.
@@ -56,6 +57,7 @@ import org.keycloak.services.resource.RealmResourceProvider;
 import org.keycloak.services.util.AuthenticationFlowURLHelper;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
+import io.knobby.keycloak.mcp.authenticator.McpTenantPickerAuthenticator;
 import io.knobby.keycloak.mcp.config.McpSpiConfigException;
 import io.knobby.keycloak.mcp.jwt.HandoffTokenValidator;
 import io.knobby.keycloak.mcp.jwt.HandoffValidationException;
@@ -253,6 +255,13 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
                 (scopes == null || scopes.isEmpty())
                         ? ""
                         : String.join(" ", scopes));
+
+        // Mark the suspended tenant-picker step complete (ERRATA-004). The
+        // resume rides getLastExecutionUrl, which re-invokes the authenticator's
+        // authenticate() — this note is what tells it to FINISH instead of
+        // issuing a fresh picker-request and looping back to /mcp/consent.
+        authSession.setAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_COMPLETED, "true");
     }
 
     private static URI defaultResumeUrl(KeycloakSession session, RealmModel realm,
