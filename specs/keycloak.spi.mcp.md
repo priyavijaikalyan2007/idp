@@ -470,7 +470,24 @@ close(): return
 
 #### JAX-RS endpoint: `GET /` (after Keycloak's `/realms/{realm}/mcp-picker-callback` path prefix)
 
-Pseudocode:
+> **RECONCILED with the shipped implementation (ERRATA-003, 2026-07-06).** The
+> original pseudocode below correlated the session by `picker_request_jti` and
+> resumed via a hand-driven `AuthenticationProcessor.continueAuthentication()`.
+> Neither matches what was built. The **actual** design correlates via three
+> signed claims the app echoes from the picker-request — `kc_client_id`,
+> `kc_tab_id`, `auth_session_id` — recovers the auth session through
+> `AuthenticationSessionManager`, and resumes by redirecting to Keycloak's own
+> action URL (`AuthenticationFlowURLHelper.getLastExecutionUrl`). This section now
+> documents that.
+
+**Correlation-claim contract.** The callback is stateless: it recovers the
+suspended session purely from the signed picker-result. The app **must** echo
+`kc_client_id`, `kc_tab_id`, and `auth_session_id` from the picker-request into
+the picker-result (web spec §3.3 / ERRATA-003). Carrying them *inside the
+HMAC-signed JWT* (rather than as URL query params) keeps them tamper-proof. Their
+absence is the production `client=null` failure — reported as `missing_correlation`.
+
+Pseudocode (as implemented):
 ```
 @GET
 @Path("/")
@@ -480,58 +497,55 @@ public Response handleCallback(@QueryParam("picker_result") String pickerResult)
            return badRequest("missing_token")
 
     2. try:
-           tokenObj = HandoffTokenValidator.validate(
-               pickerResult,
-               expected_audience="keycloak-mcp-spi",
-               expected_issuer="yourapp-web-mcp-consent"
-           )
+           token = HandoffTokenValidator.validatePickerResult(pickerResult, realmName)
+           // verifies HS256 sig (current+previous key), iss/aud/exp/iat, jti replay
        catch HandoffValidationException e:
-           log.warn("Picker-result validation failed: {}", e.getCode())
            return badRequest("invalid_handoff", e.getCode())
+       catch McpSpiConfigException e:
+           return badRequest("realm_misconfigured", e.getCode())
 
-    3. // Resume the suspended authentication flow.
-       // Keycloak stores authentication sessions keyed by a cookie or query param
-       // we need to retrieve the right one. The picker_request_jti claim in the
-       // picker-result token correlates back to the original session.
-       authSession = findAuthSessionByJti(tokenObj.pickerRequestJti)
+    3. // Correlation-claim guard (ERRATA-003). Distinguishes "app sent no
+       //  client id" from "client id doesn't resolve".
+       if isBlank(token.kcClientId) || isBlank(token.kcTabId) || isBlank(token.authSessionId):
+           return badRequest("missing_correlation")
+
+    4. client = realm.getClientByClientId(token.kcClientId)
+       if client is null:
+           return badRequest("client_not_found")
+
+    5. // Recover the suspended auth session: AUTH_SESSION_ID cookie first, then
+       //  the HMAC-signed auth_session_id as a fallback (cookie may be dropped
+       //  on the cross-site round-trip through the app).
+       authSession = AuthenticationSessionManager
+                        .getCurrentAuthenticationSession(realm, client, token.kcTabId)
+                     ?? AuthenticationSessionManager
+                        .getAuthenticationSessionByIdAndClient(realm, token.authSessionId, client, token.kcTabId)
        if authSession is null:
            return badRequest("session_not_found")
 
-    4. currentUser = session.users().getUserById(realm, authSession.getAuthenticatedUserId())
-       if currentUser == null || !currentUser.getId().equals(tokenObj.userSubEcho):
-           log.warn("Picker-result user mismatch: session={} echo={}",
-                    currentUser?.getId(), tokenObj.userSubEcho)
+    6. currentUser = authSession.getAuthenticatedUser()
+       if currentUser == null || !currentUser.getId().equals(token.userSubEcho):
            return badRequest("user_mismatch")
 
-    5. // Write session notes that protocol mappers will read.
-       authSession.setUserSessionNote("yourapp_tenant_id", tokenObj.chosenTenantId)
-       authSession.setUserSessionNote("yourapp_scopes", String.join(" ", tokenObj.grantedScopes))
+    7. // Write the session notes the protocol mappers read.
+       authSession.setUserSessionNote("yourapp_tenant_id", token.chosenTenantId)
+       authSession.setUserSessionNote("yourapp_scopes", join(" ", token.grantedScopes))
 
-    6. log.info("Picker-result accepted for user={} tenant={} scopes={}",
-                currentUser.getId(), tokenObj.chosenTenantId,
-                tokenObj.grantedScopes)
-
-    7. // Resume the authentication flow. This step requires invoking Keycloak's
-       // AuthenticationProcessor to continue from where the Authenticator suspended.
-       // The exact API for "resume from suspended state" requires consulting the
-       // Keycloak SDK; the pattern is:
-       //   - Mark the Authenticator's execution as SUCCESS in the auth session
-       //   - Redirect the browser back to Keycloak's standard authentication flow
-       //     entry point, which will pick up where we left off
-       processor = new AuthenticationProcessor()
-           .setSession(session)
-           .setRealm(realm)
-           .setAuthenticationSession(authSession)
-
-       // Set the Authenticator execution as success
-       executionId = findExecutionId(authSession, McpTenantPickerAuthenticatorFactory.PROVIDER_ID)
-       authSession.setExecutionStatus(executionId, ExecutionStatus.SUCCESS)
-
-       return processor.continueAuthentication()
-       // ^ pseudocode for "let Keycloak finish the flow now"
+    8. // Resume by handing the browser back to Keycloak's own last-execution URL;
+       //  Keycloak's flow engine re-enters the CHALLENGED authenticator execution
+       //  and finishes the flow. No manual AuthenticationProcessor needed.
+       resumeUrl = new AuthenticationFlowURLHelper(session, realm, uriInfo)
+                       .getLastExecutionUrl(authSession)
+       return Response.seeOther(resumeUrl).build()
 ```
 
-**Important implementation note:** the exact mechanics of "suspend authentication flow, resume from a different endpoint" require careful reading of Keycloak's `AuthenticationProcessor` and `AuthenticationFlowContext` internals. There are working examples in the Keycloak source tree (e.g., the IdP first-broker-login flow does similar suspend/resume). The implementer should study those before writing the resume logic from scratch.
+**Implementation note.** The suspend (Authenticator, §5.1) uses
+`context.challenge(seeOther(...))`; the resume rides
+`AuthenticationFlowURLHelper.getLastExecutionUrl`, which is Keycloak's supported
+mechanism for re-entering a suspended flow at its last execution — no direct
+`AuthenticationProcessor` driving. The correlation lives in the signed token, not
+in server-side state, so the callback stays stateless and multi-instance-safe
+(except the `jti` replay cache, §6.5).
 
 ### 5.4 McpPickerCallbackResourceProviderFactory
 

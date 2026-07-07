@@ -215,3 +215,38 @@
     - "specs/ERRATA-001-mcp-registration-crp.md"
     - "specs/keycloak.spi.mcp.md"
     - "specs/keycloak.web.mcp.md"
+
+- id: "ADR-012"
+  title: "Picker-result carries the session-correlation claims (kc_client_id/kc_tab_id/auth_session_id) echoed from the picker-request; the callback stays stateless"
+  date: "2026-07-06"
+  status: "Accepted"
+  context: >-
+    Production E2E hit HTTP 400 on the final hop: the app posts the picker-result
+    to /realms/{realm}/mcp-picker-callback and the SPI logs "client=null not found".
+    Root cause (ERRATA-003) is a contract desync, not a resume-mechanics defect:
+    McpPickerCallbackResourceProvider recovers the suspended auth session + client
+    from three correlation claims carried inside the signed picker-result
+    (kc_client_id, kc_tab_id, auth_session_id), but the app spec (web §2.2 step 5 /
+    §3.3) defined the picker-result claim set without them, so the app never sent
+    them and getClientByClientId(null) returned null. The correlation values already
+    exist — the SPI's picker-REQUEST carries them and the app holds the full request
+    server-side for the wizard — so the fix is for the app to echo three fields, from
+    the SERVER-HELD picker-request (not the client POST body; a client-supplied
+    kc_client_id would be a session-fixation surface). Decisions: (1) the three kc_*
+    claims are a mandatory part of the picker-result contract; (2) they are carried
+    inside the HMAC-signed JWT (tamper-proof) rather than as URL query params —
+    rejecting the alternative of re-architecting suspend/resume around
+    context.getActionUrl()/session_code, which discards tested code and weakens the
+    correlation to URL params; (3) the callback stays stateless (correlation in the
+    token, not server state) and resumes via Keycloak's own
+    AuthenticationFlowURLHelper.getLastExecutionUrl; (4) the SPI now distinguishes a
+    missing correlation claim (new `missing_correlation` code + a spec-pointing WARN)
+    from a genuine `client_not_found`. SPI-side + spec fixes applied here; the app-side
+    echo is the remaining change that actually clears the 400. Also reconciled the
+    stale SPI design §5.3 (it had documented jti-based correlation +
+    AuthenticationProcessor.continueAuthentication, neither of which was built).
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
+    - "specs/ERRATA-003-picker-result-correlation-claims.md"
+    - "specs/keycloak.spi.mcp.md"
+    - "specs/keycloak.web.mcp.md"

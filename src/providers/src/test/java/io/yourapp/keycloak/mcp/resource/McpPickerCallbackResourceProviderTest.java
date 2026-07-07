@@ -206,6 +206,36 @@ class McpPickerCallbackResourceProviderTest
     }
 
     @Test
+    void handleCallback_missingCorrelationClaims_returns400MissingCorrelation()
+    {
+        // Reproduces the production bug (ERRATA-003): the app's picker-result
+        // omits the kc_* correlation claims it must echo from the picker-request.
+        // Signed as a raw claim map (the app's actual claim set) so the missing
+        // fields deserialize to null — the Builder would otherwise require them.
+        Map<String, Object> appClaims = new HashMap<>();
+        appClaims.put("iss", "yourapp-web-mcp-consent");
+        appClaims.put("aud", "keycloak-mcp-spi");
+        appClaims.put("picker_request_jti", "req-jti-1");
+        appClaims.put("user_sub_echo", "user-sub-123");
+        appClaims.put("chosen_tenant_id", "tenant-uuid-1");
+        appClaims.put("granted_scopes", List.of("yourapp:read"));
+        appClaims.put("oauth_state", "oauth-state-xyz");
+        appClaims.put("nonce", "nonce-3");
+        appClaims.put("jti", "res-jti-missing-corr");
+        appClaims.put("iat", T0 - 10);
+        appClaims.put("exp", T0 + 60);
+        String jwt = signer.sign(appClaims, "yourapp-prod");
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("missing_correlation", error(response));
+        // Must not attempt a client lookup with a null id.
+        verify(realm, never()).getClientByClientId(
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
     void handleCallback_authSessionNotFoundAnywhere_returns400SessionNotFound()
     {
         String jwt = signer.sign(validResultBuilder().build(), "yourapp-prod");
