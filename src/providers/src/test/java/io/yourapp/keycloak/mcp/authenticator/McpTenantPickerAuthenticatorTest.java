@@ -153,6 +153,42 @@ class McpTenantPickerAuthenticatorTest
                 "decoded token must be a 3-part JWS: " + decoded);
     }
 
+    // ------------------------------------------------ resume after callback (ERRATA-004)
+
+    @Test
+    void authenticate_pickerCompletedNoteSet_finishesWithoutChallenge()
+    {
+        // The mcp-picker-callback recorded the consent and re-entered the flow;
+        // authenticate() must FINISH the step, not issue a fresh picker-request
+        // (which would 303 back to /mcp/consent forever).
+        when(authSession.getAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_COMPLETED))
+                .thenReturn("true");
+
+        authenticator.authenticate(context);
+
+        verify(context).success();
+        verify(context, never())
+                .challenge(org.mockito.ArgumentMatchers.any(Response.class));
+        verify(context, never()).failure(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void authenticate_pickerCompletedNoteAbsent_stillChallenges()
+    {
+        // Sanity: without the resume note (the first, pre-consent pass), the
+        // MCP client is challenged as usual — the guard must not swallow it.
+        when(authSession.getAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_COMPLETED))
+                .thenReturn(null);
+
+        authenticator.authenticate(context);
+
+        verify(context, never()).success();
+        Response response = captureChallengeResponse();
+        assertEquals(Response.Status.SEE_OTHER.getStatusCode(), response.getStatus());
+    }
+
     // ------------------------------------------- short-circuit: non-MCP client
 
     @Test

@@ -250,3 +250,35 @@
     - "specs/ERRATA-003-picker-result-correlation-claims.md"
     - "specs/keycloak.spi.mcp.md"
     - "specs/keycloak.web.mcp.md"
+
+- id: "ADR-013"
+  title: "The tenant-picker authenticator is a re-entrant suspend/resume step; the callback signals completion via an auth note"
+  date: "2026-07-07"
+  status: "Accepted"
+  context: >-
+    Once ERRATA-003 (ADR-012) let mcp-picker-callback resume instead of 400, an
+    infinite redirect loop surfaced between /mcp/consent and Keycloak. Root cause:
+    Keycloak resumes a CHALLENGED execution by re-invoking the authenticator's
+    authenticate(), NOT action(), because the resume rides a redirect to
+    getLastExecutionUrl (not a form POST to the action URL). McpTenantPickerAuthenticator
+    .authenticate() was not re-entrant — for an MCP client with an authenticated user
+    it unconditionally built a fresh picker-request and re-challenged, so every resume
+    bounced the browser back to /mcp/consent forever. Decisions: (1) the tenant-picker
+    authenticator is a suspend/resume step and MUST be re-entrant — authenticate()
+    opens with a resume guard that finishes the step (context.success()) when the
+    out-of-band consent is already recorded; (2) the completion signal is an EXPLICIT
+    auth-session note (yourapp.mcp.picker.completed = "true") written by the callback,
+    not an inference from "is yourapp_tenant_id set?" — the validator's Jackson path
+    bypasses the builder's requireString, so a signed-but-malformed null-tenant result
+    could otherwise still loop; (3) writer (callback) and reader (authenticator) share
+    ONE public constant, McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_COMPLETED, so
+    the key cannot drift; (4) NO resume re-architecture — the callback-resource +
+    last-execution-URL resume is retained (the getActionUrl/session_code alternative
+    stays rejected, per ADR-012); (5) NO app-side change — the loop was evidence the
+    ERRATA-003 echo works. General rule: any challenge-based authenticator that
+    suspends to external UI must be written re-entrantly.
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
+    - "specs/ERRATA-004-picker-resume-reentrancy.md"
+    - "specs/keycloak.spi.mcp.md"

@@ -208,6 +208,23 @@ echo -e "${DIM}A local listener is waiting on ${CALLBACK_URI} to catch the redir
 echo -e "After you finish consent, the browser will redirect there and this script continues.${RESET}"
 echo ""
 
+# ── reclaim the loopback port from a stale listener ─────────────────────────
+# The one-shot listener below blocks up to 10 min (srv.timeout). If a prior run
+# was aborted (browser closed / Ctrl-C), its python listener can still hold the
+# port and a re-run dies with "Address already in use". This is a dedicated
+# loopback test port, so anything on it is a stale listener — reclaim it.
+if command -v fuser >/dev/null 2>&1 && fuser "${CALLBACK_PORT}/tcp" >/dev/null 2>&1; then
+    HOLDER=$(fuser "${CALLBACK_PORT}/tcp" 2>/dev/null | tr -s ' ')
+    warn "port ${CALLBACK_PORT} busy" "reclaiming from a stale listener (${HOLDER# }) — likely a prior aborted run"
+    fuser -k "${CALLBACK_PORT}/tcp" >/dev/null 2>&1; sleep 1
+elif command -v lsof >/dev/null 2>&1; then
+    HOLDER=$(lsof -ti "tcp:${CALLBACK_PORT}" 2>/dev/null)
+    if [[ -n "$HOLDER" ]]; then
+        warn "port ${CALLBACK_PORT} busy" "reclaiming from a stale listener (pid ${HOLDER})"
+        kill $HOLDER 2>/dev/null; sleep 1
+    fi
+fi
+
 # Minimal one-shot HTTP listener in python3: waits for GET /callback?code=...&state=...
 # prints "code state" to stdout, returns a friendly page to the browser, exits.
 CAPTURED=$(python3 - "$CALLBACK_PORT" "$STATE" <<'PYEOF'

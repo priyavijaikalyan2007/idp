@@ -35,6 +35,7 @@ import org.keycloak.models.UserModel;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
+import io.yourapp.keycloak.mcp.authenticator.McpTenantPickerAuthenticator;
 import io.yourapp.keycloak.mcp.config.McpSpiConfig;
 import io.yourapp.keycloak.mcp.jwt.HandoffTokenSigner;
 import io.yourapp.keycloak.mcp.jwt.HandoffTokenValidator;
@@ -346,6 +347,24 @@ class McpPickerCallbackResourceProviderTest
         assertEquals(MOCK_RESUME_URI, response.getLocation());
         verify(authSession).setUserSessionNote("yourapp_tenant_id", "tenant-uuid-1");
         verify(authSession).setUserSessionNote("yourapp_scopes", "yourapp:read");
+    }
+
+    @Test
+    void handleCallback_happyPath_marksPickerCompletedForResume()
+    {
+        // ERRATA-004: the callback must set the resume signal the authenticator
+        // reads on re-entry, else authenticate() re-challenges and loops.
+        String jwt = signer.sign(validResultBuilder().build(), "yourapp-prod");
+        when(realm.getClientByClientId("mcp-client-abc")).thenReturn(client);
+        when(sessionManager.getCurrentAuthenticationSession(realm, client, "tab-1"))
+                .thenReturn(authSession);
+        when(authSession.getAuthenticatedUser()).thenReturn(currentUser);
+        when(currentUser.getId()).thenReturn("user-sub-123");
+
+        provider.handleCallback(jwt);
+
+        verify(authSession).setAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_COMPLETED, "true");
     }
 
     @Test

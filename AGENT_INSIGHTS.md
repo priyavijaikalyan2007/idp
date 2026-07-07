@@ -30,6 +30,11 @@ The Keycloak source-spike found a critical detail: when `context.challenge(Respo
 
 **Principle**: Auth sessions are not identified by cookie alone. Any handoff that comes back via a path that bypasses normal flow continuation must carry the routing tuple explicitly, HMAC-signed.
 
+### 1.5 A challenge-based authenticator that suspends to external UI MUST be re-entrant (2026-07-07)
+When the resume rides a redirect to `getLastExecutionUrl` (a GET), Keycloak re-enters the suspended execution through the authenticator's **`authenticate()`**, NOT `action()`. `action()` only runs for a form POST to the execution's action URL. So an authenticator that redirects out and expects to be "finished" on return is a **loop generator by construction** unless `authenticate()`'s FIRST move is a "has my out-of-band step already completed?" check that calls `context.success()` and returns. We hit this as ERRATA-004: the callback recorded consent and resumed, `authenticate()` re-issued a fresh picker-request, and the browser bounced `/mcp/consent` ⇄ Keycloak forever. The completion signal must be an **explicit** auth note (we used `yourapp.mcp.picker.completed`), not an inference from a data note like "is the tenant set?" — the validator's Jackson deserialization bypasses the builder's `requireString`, so a malformed-but-signed result could carry a null tenant and still loop.
+
+**Principle**: Model any suspend-to-external-UI authenticator as re-entrant on `authenticate()`. Its first branch is the resume guard (finish if already done); the challenge is the fallthrough. Note the completion with a dedicated boolean marker, and share the marker's key as one constant between the writer (callback) and reader (authenticator) so they cannot drift. (Companion to 1.3: 1.3 is how to resume; 1.5 is what the resumed step must check.)
+
 ---
 
 ## 2. Test harness

@@ -10,15 +10,20 @@
 /*
  * ----------------------------------------------------------------------------
  * ⚓ COMPONENT: McpTenantPickerAuthenticator
- * 📜 PURPOSE: Final step of the browser-mcp-tenant-pick flow. Builds a signed
- *             picker-request JWT carrying the user / client / scope / OAuth
- *             state and the Keycloak auth-session correlation fields, then
- *             302-redirects the browser to YourApp web's /mcp/consent endpoint.
- *             Suspends the authentication flow via context.challenge.
+ * 📜 PURPOSE: Final step of the browser-mcp-tenant-pick flow. A RE-ENTRANT
+ *             suspend/resume step (ERRATA-004): authenticate() first checks the
+ *             resume note (yourapp.mcp.picker.completed) the callback writes — if
+ *             set, it finishes the step; otherwise it builds a signed
+ *             picker-request JWT carrying the user / client / scope / OAuth state
+ *             and the Keycloak auth-session correlation fields, then 302-redirects
+ *             the browser to YourApp web's /mcp/consent endpoint, suspending the
+ *             flow via context.challenge.
  * 🔗 RELATES: [[McpTenantPickerAuthenticatorFactory]], [[HandoffTokenSigner]],
  *             [[PickerRequestToken]], [[McpPickerCallbackResourceProvider]]
  * ⚡ FLOW: [Keycloak auth flow] -> [this.authenticate]
- *         -> [HandoffTokenSigner.sign] -> [302 to https://{host}/mcp/consent]
+ *         -> resume note set ? [context.success] (finish)
+ *         : [HandoffTokenSigner.sign] -> [302 to https://{host}/mcp/consent]
+ *         -> [/mcp-picker-callback sets note] -> [resume re-enters authenticate]
  * 🛡️ SECURITY: Per-realm HMAC key (via signer). yourapp.web.host read from
  *              per-realm Authenticator config (admin-controlled). Failures
  *              never leak key material or PII into logs (id-only).
@@ -89,6 +94,19 @@ public final class McpTenantPickerAuthenticator implements Authenticator
      */
     static final String MCP_CLIENT_SCOPE = "mcp-default";
 
+    /**
+     * Auth-session note set by the {@code McpPickerCallbackResourceProvider}
+     * once it has validated a picker-result and recorded the consent (tenant +
+     * scopes) on this auth session. It is the RESUME signal: the callback
+     * re-enters the suspended flow via {@code getLastExecutionUrl}, which
+     * re-invokes {@link #authenticate} (NOT {@code action}). Without checking
+     * this note, {@code authenticate} would build a fresh picker-request and
+     * redirect to {@code /mcp/consent} again — an infinite loop (ERRATA-004).
+     * Public because the callback writes this exact key; the two MUST agree.
+     */
+    public static final String AUTH_NOTE_PICKER_COMPLETED =
+            "yourapp.mcp.picker.completed";
+
     /** Constants required by YourApp web's picker-request validator. */
     static final String ISSUER = "keycloak-mcp-spi";
     static final String AUDIENCE = "yourapp-web-mcp-consent";
@@ -127,6 +145,25 @@ public final class McpTenantPickerAuthenticator implements Authenticator
     public void authenticate(AuthenticationFlowContext context)
     {
         AuthenticationSessionModel authSession = context.getAuthenticationSession();
+
+        // Resume guard (spec §5.3, ERRATA-004) — MUST be first. When the app
+        // posts a valid picker-result, McpPickerCallbackResourceProvider records
+        // the consent on this auth session and re-enters the flow via
+        // getLastExecutionUrl, which re-invokes authenticate() (Keycloak resumes
+        // a CHALLENGED execution through authenticate(), not action()). This
+        // authenticator is therefore a suspend/resume step and must be
+        // re-entrant: if the callback already completed the out-of-band consent,
+        // finish the step instead of issuing a fresh picker-request — otherwise
+        // it redirects to /mcp/consent forever.
+        if (Boolean.parseBoolean(authSession.getAuthNote(AUTH_NOTE_PICKER_COMPLETED)))
+        {
+            log.infof("MCP picker resume: consent already recorded, completing "
+                    + "step client=%s realm=%s",
+                    authSession.getClient().getClientId(),
+                    context.getRealm().getName());
+            context.success();
+            return;
+        }
 
         // Short-circuit guard (spec §5.1) — SAFETY NET ONLY, not load-bearing.
         // Under the settled design, McpClientRegistrationPolicy (§5.8) binds this
