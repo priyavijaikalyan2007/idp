@@ -100,15 +100,19 @@ public final class McpClientRegistrationPolicy implements ClientRegistrationPoli
         //    routes the client's FIRST authorization through the tenant picker.
         bindBrowserFlow(realm, client);
 
-        // 4. Suppress Keycloak's built-in OAuth consent screen. The yourapp web
-        //    /mcp/consent wizard is the authoritative consent surface (it collects
-        //    the tenant + scope grants); Keycloak's own OAUTH_GRANT screen after it
-        //    is redundant double-consent (ERRATA-006). The mcp-hardening
-        //    consent-required client-policy executor sets consentRequired=true, but
-        //    it runs on the DynamicClientRegistered event (triggerOnEvent) BEFORE
-        //    this policy's afterRegister (triggerAfterRegister) — verified against
-        //    the 26.6.0 AbstractClientRegistrationProvider bytecode — so this
-        //    setter is the last word and wins.
+        // 4. Prefer Keycloak's built-in OAuth consent OFF — the yourapp web
+        //    /mcp/consent wizard is the authoritative consent surface, so Keycloak's
+        //    own OAUTH_GRANT screen would be redundant double-consent (ERRATA-006).
+        //    ⚠️ This setter alone is NOT sufficient: the mcp-hardening
+        //    'consent-required' executor's autoConfigure re-applies
+        //    consentRequired=true AFTER this policy (its representation change is
+        //    applied to the model post-afterRegister — confirmed in production, the
+        //    client reads consentRequired=true). The authoritative fix is a config
+        //    change: remove the 'consent-required' executor + CRP (setup guide D.6).
+        //    This line is retained as belt-and-suspenders — it takes effect once
+        //    those forcers are gone. Dropping Keycloak's consent does not weaken
+        //    enforcement: the picker + wizard are gated by the auth flow, not by
+        //    consentRequired.
         client.setConsentRequired(false);
 
         log.infof("Marked MCP client at registration client=%s realm=%s "

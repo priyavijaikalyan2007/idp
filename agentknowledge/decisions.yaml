@@ -364,3 +364,41 @@
     - "specs/keycloak-setup-guide.md"
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticatorFactory.java"
+
+- id: "ADR-016"
+  title: "Drop the consent-required executor/CRP for MCP clients; the CRP override does not win; consent is flow-enforced"
+  date: "2026-07-08"
+  status: "Accepted"
+  context: >-
+    Corrects the consent portion of ADR-014 (the scope-promotion portion of ADR-014
+    still stands). ADR-014 claimed the CRP's client.setConsentRequired(false) in
+    afterRegister wins over the mcp-hardening 'consent-required' executor because
+    triggerOnEvent fires before triggerAfterRegister. Production verification
+    (smoke-mcp.sh, new consentRequired assertion) proved this WRONG: the DCR'd client
+    reads consentRequired=true and Keycloak still shows its built-in "Grant Access"
+    screen on top of the yourapp /mcp/consent wizard (double consent). Mechanism: the
+    consent-required executor's autoConfigure mutates the client REPRESENTATION, which
+    is applied to the model AFTER the CRP's afterRegister, re-setting consentRequired
+    =true (and the ConsentRequiredClientRegistrationPolicy, if present as an anonymous
+    CRP, forces it too). The IT was green only because it strips all registration
+    policies, so no consent-forcer runs there. Decision: (1) the authoritative fix is a
+    CONFIG change — remove the 'consent-required' executor from the mcp-hardening
+    profile AND the 'consent-required' Client Registration Policy if present; (2) the
+    CRP's setConsentRequired(false) is retained as belt-and-suspenders (effective once
+    the forcers are gone) with an honest comment; (3) dropping Keycloak's consent does
+    NOT weaken enforcement — the tenant picker + /mcp/consent wizard are gated by the
+    authentication flow (the picker is REQUIRED and suspends; no token issues until the
+    app returns a valid HMAC-signed, jti-single-use, correlation-bound picker-result),
+    which is stronger and non-redundant with Keycloak's generic consent; (4) the one
+    control that actually prevents a consent bypass is grant-type restriction — an MCP
+    client must NOT allow Direct Access Grants (ROPC), which would skip the browser flow
+    entirely; smoke-mcp.sh now asserts directAccessGrantsEnabled=false, and the deferred
+    B1 (AllowedGrantTypes CRP, SPI design 5.8 beforeRegister stub) should enforce it
+    atomically at registration. Docs corrected: ERRATA-006, setup guide D.5/D.6,
+    keycloak.prd.md System-1/System-2 tables.
+  files:
+    - "specs/ERRATA-006-crp-scope-promotion-and-consent.md"
+    - "specs/keycloak-setup-guide.md"
+    - "specs/keycloak.prd.md"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/clientreg/McpClientRegistrationPolicy.java"
+    - "smoke-mcp.sh"

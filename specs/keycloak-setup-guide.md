@@ -780,7 +780,7 @@ Add each policy below: **Create policy** [?] → select provider → configure �
 | Provider | Configuration |
 |---|---|
 | `allowed-client-scopes` | **Edit the seeded one.** Add to the whitelist: `openid`, `offline_access`, `profile`, `email`, `mcp-default`, all six `yourapp:*` scopes |
-| `consent-required` | **Add if absent.** No config fields — just create the entry |
+| ~~`consent-required`~~ | ⚠️ **DO NOT add for MCP (ERRATA-006). Remove it if present.** It forces Keycloak's `consentRequired=true`, showing a redundant second "Grant Access" screen on top of the yourapp `/mcp/consent` wizard (double consent). It adds **no** security here: the tenant picker + wizard are enforced by the authentication flow itself (the picker is a `REQUIRED` step that suspends to `/mcp/consent`, and no token issues until the app returns a valid HMAC-signed picker-result), not by `consentRequired`. The control that actually prevents a consent bypass is restricting grant types (no Direct Grant / ROPC). |
 | `max-clients` | **Edit the seeded one.** See note below on choosing a value |
 
 **On `trusted-hosts` (seeded by default):** Keycloak pre-creates this policy and **requires at least one of its two toggles to be ON** — you'll get an error trying to turn both off, so a fully-permissive version isn't achievable. Don't delete it reflexively; instead configure it as: "Host Sending Client Registration Request Must Match" **OFF** (MCP clients register from unpredictable IPs), "Client URIs Must Match" **ON**, with the Trusted Hosts list containing the hostnames MCP redirect URIs will use — at minimum `localhost` for desktop/CLI clients.
@@ -815,7 +815,7 @@ After saving, the profile is editable. Add executors via **Add executor** [?].
 |---|---|---|
 | Enforce PKCE (S256) | `pkce-enforcer` | **Auto-configure: ON** (auto-stamps S256 on clients; rejects non-S256 auth requests). The old explicit "Code Challenge Method" field is gone in 26.6.0 — Auto-configure replaces it. |
 | Restrict response types to `code` (forbid implicit) | `secure-response-type` | **Auto-configure: ON.** ⚠️ **"Allow token response type": leave OFF** — ON would re-permit the insecure implicit flow (`token` response type), defeating the executor. OAuth 2.1 / MCP clients use auth-code + PKCE only. |
-| Force consent required | `consent-required` | **Auto-configure: ON** |
+| ~~Force consent required~~ | ~~`consent-required`~~ | ⚠️ **DO NOT add (ERRATA-006). Remove it if present.** Forces Keycloak's own "Grant Access" screen, duplicating the yourapp `/mcp/consent` wizard. This is what caused the observed double consent. The CRP's `setConsentRequired(false)` cannot override it (the executor's `autoConfigure` re-applies `consentRequired=true` after the CRP runs) — so it must be removed here. The picker + wizard remain flow-enforced; the real bypass control is grant-type restriction below. |
 | Enforce secure redirect URIs | **swap `secure-client-uris` → `secure-redirect-uris-enforcer`** | ⚠️ **The default `secure-client-uris` has NO loopback config and rejects all MCP desktop clients — you MUST swap it. See below.** |
 | Secure session binding | `secure-session` | **Auto-configure: ON** |
 | Disable client full-scope access | `full-scope-disabled` | **Auto-configure: ON** |
@@ -1065,8 +1065,8 @@ Cannot run until YourApp web's `/mcp/consent` sub-app is deployed. When ready, r
 - [ ] `browser-mcp-tenant-pick` flow exists with SPI Authenticator as Required final step (Test 15 green).
 - [ ] All six `yourapp:*` atomic Client Scopes configured (Test 16 green).
 - [ ] `mcp-default` Client Scope exists with three mappers: audience, tenant session note, scope override (Tests 17 and 29 green).
-- [ ] Client Registration Policies configured: `allowed-client-scopes`, `consent-required`, `trusted-hosts`, `max-clients`.
-- [ ] Client Policy profile `mcp-hardening` exists with PKCE + response type + consent + secure URI + secure session + full-scope-disabled executors.
+- [ ] Client Registration Policies configured: `allowed-client-scopes`, `trusted-hosts`, `max-clients`. **NOT `consent-required`** (removed per ERRATA-006 — the yourapp wizard is the consent surface).
+- [ ] Client Policy profile `mcp-hardening` exists with PKCE + response type + secure URI + secure session + full-scope-disabled executors. **NOT the `consent-required` executor** (ERRATA-006).
 - [ ] Client Policy `mcp-anonymous-dcr` exists with `client-updater-context: ByAnonymous` condition activating `mcp-hardening`.
 - [ ] Realm-default Client Scopes set: `mcp-default` + Author bundle as Default; `yourapp:admin` as Optional.
 - [ ] Browser flow binding configured (Option A: realm default = `browser-mcp-tenant-pick`, or Option B: post-DCR processing in YourApp web).
