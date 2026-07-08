@@ -1884,7 +1884,7 @@ Configure these under *Clients → Client Registration → Anonymous Access Poli
 |---|---|---|
 | `allowed-client-scopes` | Whitelist: `openid`, `offline_access`, `mcp-default`, `knobby:read`, `knobby:comment`, `knobby:curate`, `knobby:write`, `knobby:share`, `knobby:admin` | Prevents registration with privileged scopes like `realm-admin` or other clients' custom scopes |
 | `allowed-protocol-mapper-types` | Whitelist: `oidc-audience-mapper`, `oidc-usersessionmodel-note-mapper`, `knobby-mcp-scope-override` (your SPI's mapper), `oidc-sub-mapper`, `oidc-full-name-mapper`, `oidc-usermodel-attribute-mapper`, `oidc-usermodel-property-mapper`. Or skip this policy for v1 — the security-critical mappers (audience, tenant, scope override) are attached to the `mcp-default` Client Scope, not the client, so DCR'd clients can't override them. This policy only restricts what *additional* mappers a DCR'd client may attach to itself. | Prevents a DCR'd client from attaching mappers that forge claims like `sub`, `email`, `tenant`. |
-| `consent-required` | (no configuration — just add the entry) | Forces `consentRequired=true` on every DCR'd client. Belt-and-suspenders with the Client Policy version below. |
+| ~~`consent-required`~~ | **Removed — DO NOT add (ERRATA-006).** | ~~Forces `consentRequired=true`.~~ Superseded: forcing Keycloak's consent produces a redundant "Grant Access" screen on top of the knobby `/mcp/consent` wizard (double consent, §MCP consent below), and adds no security — the picker + wizard are enforced by the auth flow, not by `consentRequired`. The bypass control that matters is grant-type restriction (no Direct Grant / ROPC). |
 | `trusted-hosts` | Permissive initially (`*` or wide range); tighten later with Cloudflare WAF rate limiting in front | Limits which IPs can hit the DCR endpoint |
 | `max-clients` (`client-registration-max-clients`) | Sane upper bound, e.g., 10000 | Prevents one bad actor from creating millions of clients to exhaust storage |
 
@@ -1899,7 +1899,7 @@ Note: there are no PKCE, grant-type, redirect-URI, or auth-method entries in thi
 | `pkce-enforcer` | Code Challenge Method: `S256` only | Enforces PKCE on all matched clients |
 | `secure-redirect-uri-enforcer` | Mode: HTTPS only (with localhost exception for dev realm if needed) | Production: rejects HTTP redirect URIs; rejects wildcards |
 | `secure-response-type` | Default config | Forbids implicit response types (`token`, `id_token`) — only `code` permitted |
-| `consent-required` | Default config | Belt-and-suspenders with CRP `consent-required` |
+| ~~`consent-required`~~ | **Removed — DO NOT add (ERRATA-006).** | Duplicated the knobby `/mcp/consent` wizard (double consent) and adds no security — the picker/wizard are flow-enforced. The CRP's `setConsentRequired(false)` can't override this executor (its `autoConfigure` re-applies `true` after the CRP), so it must be dropped from the profile. |
 | `secure-session` | Default config | Enforces secure cookies and session binding |
 | `full-scope-disabled` | Default config | Prevents clients from receiving wider scope than their explicit configuration allows |
 

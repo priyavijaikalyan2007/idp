@@ -388,17 +388,32 @@ else
         fail "flow binding" "no per-client browser-flow override — bindBrowserFlow didn't run (web spec §7.5)"
     fi
 
-    # ERRATA-006: the CRP sets consentRequired=false so Keycloak's built-in
-    # OAUTH_GRANT screen doesn't double up the knobby /mcp/consent wizard. If this
-    # reads true, the mcp-hardening 'consent-required' executor is re-applying it
-    # (it fires on the post-register UPDATE too, which the CRP's afterUpdate no-op
-    # doesn't reset) — the fix is to drop that executor from the profile.
+    # ERRATA-006: Keycloak's built-in OAUTH_GRANT screen must NOT double up the
+    # knobby /mcp/consent wizard. The CRP's setConsentRequired(false) alone does
+    # NOT win — the mcp-hardening 'consent-required' executor's autoConfigure
+    # re-applies consentRequired=true (its representation change lands after the
+    # CRP's afterRegister). The authoritative fix is to DROP that executor from the
+    # mcp-hardening profile; the picker + wizard remain enforced by the flow (below).
     CONSENT_REQ=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
         "${KC_URL}/admin/realms/${REALM}/clients?clientId=${CLIENT_ID}" | jq -r '.[0].consentRequired // false')
     if [[ "$CONSENT_REQ" == "false" ]]; then
         pass "consent suppressed" "consentRequired=false (knobby wizard is the sole consent surface)"
     else
-        fail "consent suppressed" "consentRequired=true — Keycloak's built-in consent still fires; drop the mcp-hardening 'consent-required' executor (ERRATA-006)"
+        fail "consent suppressed" "consentRequired=true — drop the mcp-hardening 'consent-required' executor (ERRATA-006); CRP override alone can't win"
+    fi
+
+    # Security: an MCP client must NOT allow Direct Access Grants (ROPC / password
+    # grant). That grant issues tokens WITHOUT the browser flow — so it skips the
+    # tenant picker AND /mcp/consent entirely, bypassing app consent regardless of
+    # consentRequired. The picker/consent guarantee rests on MCP clients being
+    # authorization_code-only (SPI design B1 / AllowedGrantTypes). This is the
+    # control that actually matters once Keycloak's own consent screen is dropped.
+    DIRECT_GRANT=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+        "${KC_URL}/admin/realms/${REALM}/clients?clientId=${CLIENT_ID}" | jq -r '.[0].directAccessGrantsEnabled // false')
+    if [[ "$DIRECT_GRANT" == "false" ]]; then
+        pass "no direct-grant bypass" "directAccessGrantsEnabled=false (ROPC can't skip the picker/consent)"
+    else
+        fail "no direct-grant bypass" "directAccessGrantsEnabled=true — ROPC skips the browser flow (picker + /mcp/consent); restrict MCP clients to authorization_code (SPI design B1 / AllowedGrantTypes)"
     fi
 fi
 
