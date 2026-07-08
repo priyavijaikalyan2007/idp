@@ -1,4 +1,4 @@
-FROM quay.io/keycloak/keycloak:26.6.0 AS builder
+FROM quay.io/keycloak/keycloak:26.6.4 AS builder
 
 # Build-time settings (these get compiled into the artifact)
 ENV KC_DB=postgres
@@ -43,7 +43,7 @@ COPY ./target/themes/    /opt/keycloak/themes/
 
 RUN /opt/keycloak/bin/kc.sh build
 
-FROM quay.io/keycloak/keycloak:26.6.0
+FROM quay.io/keycloak/keycloak:26.6.4
 
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
 
@@ -99,7 +99,7 @@ LABEL org.opencontainers.image.title="yourapp-keycloak" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      io.yourapp.keycloak.base="quay.io/keycloak/keycloak:26.6.0" \
+      io.yourapp.keycloak.base="quay.io/keycloak/keycloak:26.6.4" \
       io.yourapp.keycloak.spi.version="${SPI_VERSION}" \
       io.yourapp.keycloak.theme.version="${THEME_VERSION}"
 

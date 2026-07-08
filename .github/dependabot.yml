@@ -15,6 +15,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "build"
+    ignore:
+      # jakarta.ws.rs-api is a `provided` dep pinned to what the Keycloak runtime
+      # supplies. Keycloak 26.6 is Jakarta EE 10 (JAX-RS 3.1); compiling the SPI
+      # against JAX-RS 4.0 (EE 11) would risk a runtime NoSuchMethodError. Bump it
+      # deliberately only when Keycloak itself moves to EE 11 — not via Dependabot.
+      - dependency-name: "jakarta.ws.rs:jakarta.ws.rs-api"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

@@ -43,12 +43,12 @@
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
 
         <!-- Pin to the base image's Keycloak version (Dockerfile FROM tag). -->
-        <keycloak.version>26.6.0</keycloak.version>
+        <keycloak.version>26.6.4</keycloak.version>
 
         <junit.version>5.10.2</junit.version>
-        <mockito.version>5.11.0</mockito.version>
+        <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>1.20.4</testcontainers.version>
-        <testcontainers-keycloak.version>3.5.1</testcontainers-keycloak.version>
+        <testcontainers-keycloak.version>4.2.1</testcontainers-keycloak.version>
         <rest-assured.version>5.5.0</rest-assured.version>
 
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
@@ -56,7 +56,7 @@
         <maven-surefire-plugin.version>3.2.5</maven-surefire-plugin.version>
         <maven-failsafe-plugin.version>3.2.5</maven-failsafe-plugin.version>
         <maven-dependency-plugin.version>3.6.1</maven-dependency-plugin.version>
-        <jacoco-maven-plugin.version>0.8.12</jacoco-maven-plugin.version>
+        <jacoco-maven-plugin.version>0.8.15</jacoco-maven-plugin.version>
     </properties>
 
     <dependencyManagement>

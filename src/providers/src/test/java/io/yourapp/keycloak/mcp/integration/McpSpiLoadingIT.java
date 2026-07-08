@@ -26,7 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Integration test verifying the SPI JAR loads into a real Keycloak 26.6.0
+ * Integration test verifying the SPI JAR loads into a real Keycloak 26.6.4
  * container and the {@code mcp-picker-callback} endpoint is reachable.
  *
  * <p>Failure modes this catches: JAR is malformed, classes fail to load,
@@ -51,7 +51,7 @@ class McpSpiLoadingIT
 {
     @Container
     static final KeycloakContainer keycloak =
-            new KeycloakContainer("quay.io/keycloak/keycloak:26.6.0")
+            new KeycloakContainer("quay.io/keycloak/keycloak:26.6.4")
                     .withProviderLibsFrom(findSpiJar());
 
     /**

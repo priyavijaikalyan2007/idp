@@ -7,6 +7,7 @@ Categories per Keep a Changelog: Added, Changed, Fixed, Removed, Deprecated, Sec
 
 ### Security
 
+- 2026-07-07 — Applied the actionable Dependabot updates: **Keycloak 26.6.0 → 26.6.4** (aligned across the Maven `keycloak.version`, the Dockerfile base image ×3, and both testcontainers ITs — a patch/security bump), **mockito 5.11.0 → 5.23.0**, **jacoco-maven-plugin 0.8.12 → 0.8.15**, and **testcontainers-keycloak 3.5.1 → 4.2.1** (a major bump; the ITs compile + pass against it). **Deliberately did NOT take the `jakarta.ws.rs-api` 3.1.0 → 4.0.0 bump**: it is a `provided` dep pinned to the Keycloak runtime, which is Jakarta EE 10 (JAX-RS 3.1); compiling the SPI against JAX-RS 4.0 (EE 11) would risk a runtime `NoSuchMethodError`. Added a `dependabot.yml` ignore rule (semver-major) so it stops being proposed until Keycloak itself moves to EE 11. 135 unit + 2 IT green against 26.6.4. Note: the Keycloak base-image bump changes the deployed runtime — it takes effect on the next image build/deploy.
 - 2026-07-04 — Added GitHub security automation for the IdP repo: Dependabot now covers Docker, Maven, and GitHub Actions; CodeQL and Dependency Review workflows were added; `SECURITY.md` now reflects the Keycloak IdP threat model instead of a UI-component library. Also enabled Dependabot alerts and automated security fixes through the GitHub API; GitHub secret scanning was unavailable for this private repo under current plan/settings.
 
 ### Changed
