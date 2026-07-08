@@ -53,6 +53,8 @@ The 3-step consent wizard entry point. The Keycloak SPI Authenticator redirects 
 **Authentication:**
 - Requires Knobby web session cookie. If not present, the auth middleware initiates a silent OIDC bootstrap (§3.1). This is automatic and transparent to the user — the middleware handles it before the route handler runs.
 
+> **⚠️ CORRECTED by ERRATA-007 (2026-07-08) — this session-cookie design is the confirmed cause of the fresh-session dead-end.** `/mcp/consent` must authenticate from the **signed `?token=` handoff JWT**, NOT a Knobby web session. The "silent OIDC bootstrap" (§3.1) **cannot** be silent during this flow: the MCP client's Keycloak auth flow is *suspended at the picker*, so no Keycloak SSO session exists yet — the bootstrap falls back to a full second interactive login, which then loses the `return_url` and lands on the app home page, so `mcp-picker-callback` is never posted and the flow hangs (proven in `chrome.har`). The token is HMAC-signed, `aud`-scoped to `knobby-web-mcp-consent`, single-use (`jti`), and already carries the user (`sub`/`knobby_sub`) — treat it as the authentication. Remove the session-cookie gate and the §3.1 bootstrap from this route. See `specs/ERRATA-007-mcp-consent-token-auth.md` for both flows (warm + cold) the fix must satisfy.
+
 **Behavior:**
 1. The auth middleware ensures a Knobby web session is established (silent bootstrap if needed).
 2. The route handler reads the `token` query param.
