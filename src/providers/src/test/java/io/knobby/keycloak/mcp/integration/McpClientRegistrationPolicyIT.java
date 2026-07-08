@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end proof of the atomic-at-registration behaviour (spec §5.8): a real
- * anonymous DCR against a real Keycloak 26.6.0, with the CRP registered as an
+ * anonymous DCR against a real Keycloak 26.6.4, with the CRP registered as an
  * anonymous Client Registration Policy, yields a client that is already
  * fully-marked — {@code knobby.mcp=true} attribute, the default + optional MCP
  * scopes, and a browser-flow override — <em>without</em> any {@code /mcp/consent}
@@ -66,7 +66,7 @@ class McpClientRegistrationPolicyIT
 
     @Container
     static final KeycloakContainer keycloak =
-            new KeycloakContainer("quay.io/keycloak/keycloak:26.6.0")
+            new KeycloakContainer("quay.io/keycloak/keycloak:26.6.4")
                     .withProviderLibsFrom(findSpiJar());
 
     @BeforeAll
