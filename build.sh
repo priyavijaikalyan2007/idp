@@ -3,8 +3,10 @@
 # ----------------------------------------------------------------------------
 # ⚓ COMPONENT: build.sh
 # 📜 PURPOSE: Compiles the Keycloak MCP SPI and builds the customised Keycloak
-#             Docker image with three tags (local, versioned, latest).
-# 🔗 RELATES: [[test.sh]], [[push.sh]], [[deploy.sh]], [[Dockerfile]]
+#             Docker image with three tags (local, versioned=timestamp-commit,
+#             latest). push.sh adds a fourth: the monotonic kc<ver>-<NNNNN>
+#             rollback tag (see revisions.sh / rollback.sh).
+# 🔗 RELATES: [[test.sh]], [[push.sh]], [[deploy.sh]], [[Dockerfile]], [[revisions.sh]]
 # ⚡ FLOW: [./build.sh] -> [mvn package] -> [stage /target/providers] -> [docker build]
 # ----------------------------------------------------------------------------
 
@@ -111,6 +113,7 @@ EOF
 echo ""
 echo "=== Build Complete ==="
 echo "Build info written to: ${BUILD_INFO}"
-echo "Run ./push.sh to push both tags to Artifact Registry:"
+echo "Run ./push.sh to push to Artifact Registry (versioned + latest + the"
+echo "monotonic kc${KEYCLOAK_VERSION}-<NNNNN> rollback tag it assigns from the registry):"
 echo "  ${REMOTE_TAG}"
 echo "  ${LATEST_TAG}"
