@@ -387,6 +387,19 @@ else
     else
         fail "flow binding" "no per-client browser-flow override — bindBrowserFlow didn't run (web spec §7.5)"
     fi
+
+    # ERRATA-006: the CRP sets consentRequired=false so Keycloak's built-in
+    # OAUTH_GRANT screen doesn't double up the knobby /mcp/consent wizard. If this
+    # reads true, the mcp-hardening 'consent-required' executor is re-applying it
+    # (it fires on the post-register UPDATE too, which the CRP's afterUpdate no-op
+    # doesn't reset) — the fix is to drop that executor from the profile.
+    CONSENT_REQ=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+        "${KC_URL}/admin/realms/${REALM}/clients?clientId=${CLIENT_ID}" | jq -r '.[0].consentRequired // false')
+    if [[ "$CONSENT_REQ" == "false" ]]; then
+        pass "consent suppressed" "consentRequired=false (knobby wizard is the sole consent surface)"
+    else
+        fail "consent suppressed" "consentRequired=true — Keycloak's built-in consent still fires; drop the mcp-hardening 'consent-required' executor (ERRATA-006)"
+    fi
 fi
 
 # ── optional: DB provisioned_at check ───────────────────────────────────────
