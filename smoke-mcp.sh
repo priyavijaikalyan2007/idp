@@ -98,8 +98,10 @@ MCP_DEFAULT_SCOPE="${MCP_DEFAULT_SCOPE:-mcp-default}"
 MCP_AUDIENCE="${MCP_AUDIENCE:-yourapp-mcp-api}"
 MCP_AUTHOR_BUNDLE_SCOPES=("yourapp:read" "yourapp:comment" "yourapp:curate" "yourapp:write" "yourapp:share")
 
-CALLBACK_PORT="${CALLBACK_PORT:-53789}"
-CALLBACK_URI="http://127.0.0.1:${CALLBACK_PORT}/callback"
+# Loopback callback port. Default: DYNAMIC — the OS hands us a free, bindable
+# port (resolved after the dependency check, since it needs python3). Override
+# with CALLBACK_PORT only if you need a fixed one. CALLBACK_URI is built there too.
+CALLBACK_PORT="${CALLBACK_PORT:-}"
 
 # Optional: a shell command that, given $CLIENT_ID in the environment, prints the
 # mcp_provisioned_clients row (or its provisioned_at). If unset, that check skips.
@@ -112,6 +114,18 @@ for bin in curl jq openssl python3; do
     command -v "$bin" >/dev/null 2>&1 || die "'$bin' is required but not found."
 done
 [[ -z "$ADMIN_CLIENT_SECRET" ]] && die "Set ADMIN_CLIENT_SECRET (admin-api service account secret)."
+
+# Resolve the loopback callback port. Hardcoding one (e.g. 53789) is fragile on
+# WSL2: Windows/Hyper-V reserves large "excluded" TCP port ranges (see
+# `netsh int ipv4 show excludedportrange tcp`) that NO WSL process can bind — so
+# bind() fails with "Address already in use" even though nothing is listening.
+# Asking the OS for port 0 always returns a port outside every excluded/in-use
+# range, which is why this defaults to a dynamic port instead of a fixed one.
+if [[ -z "${CALLBACK_PORT}" ]]; then
+    CALLBACK_PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()') \
+        || die "could not allocate a free loopback port"
+fi
+CALLBACK_URI="http://127.0.0.1:${CALLBACK_PORT}/callback"
 
 echo -e "${BOLD}MCP interactive end-to-end test${RESET}"
 echo -e "  ${DIM}env:${RESET}          ${YOURAPP_ENV}"
@@ -249,7 +263,19 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(("<html><body style='font-family:sans-serif;padding:3rem'>"
                           f"<h2>{msg}</h2></body></html>").encode())
     # stop after one request
-srv = http.server.HTTPServer(("127.0.0.1", port), H)
+import time
+class Server(http.server.HTTPServer):
+    allow_reuse_address = True   # rebind over a TIME_WAIT socket
+# Retry the bind briefly: the port was free when we picked it, but a transient
+# socket (e.g. this script's own outbound curls) could momentarily hold it.
+srv = None
+for _attempt in range(6):
+    try:
+        srv = Server(("127.0.0.1", port), H); break
+    except OSError:
+        time.sleep(0.5)
+if srv is None:
+    print(f'\t\tbind_failed:{port}'); sys.exit(0)
 srv.timeout = 600  # 10 min for the human
 srv.handle_request()
 print(f'{result["code"]}\t{result["state"]}\t{result["error"]}')
@@ -259,7 +285,9 @@ CODE=$(printf '%s' "$CAPTURED" | cut -f1)
 GOT_STATE=$(printf '%s' "$CAPTURED" | cut -f2)
 CB_ERROR=$(printf '%s' "$CAPTURED" | cut -f3)
 
-if [[ -n "$CB_ERROR" ]]; then
+if [[ "$CB_ERROR" == bind_failed:* ]]; then
+    fail "authorization" "could not bind the loopback listener on port ${CB_ERROR#bind_failed:} even after retries — set a different CALLBACK_PORT and re-run (on WSL2 check 'netsh int ipv4 show excludedportrange tcp' for reserved ranges)"
+elif [[ -n "$CB_ERROR" ]]; then
     fail "authorization" "callback returned error='${CB_ERROR}'"
 elif [[ -z "$CODE" ]]; then
     fail "authorization" "no code captured (listener timed out or redirect never arrived)"
