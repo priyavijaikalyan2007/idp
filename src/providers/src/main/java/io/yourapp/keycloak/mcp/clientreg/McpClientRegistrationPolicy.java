@@ -21,19 +21,28 @@
  *             yourapp /mcp/consent wizard is the sole consent surface. Because the
  *             mutations share the registration transaction, the client either
  *             registers fully-marked or the registration rolls back — no partial
- *             states, so no reconciliation logic is needed.
+ *             states, so no reconciliation logic is needed. beforeRegister /
+ *             beforeUpdate additionally REJECT any client requesting a non-
+ *             authorization-code grant (B1, §5.8/§13a.1): ROPC / implicit /
+ *             client_credentials / device / CIBA are refused with a 400.
  * 🔗 RELATES: [[McpClientRegistrationPolicyFactory]], [[McpTenantPickerAuthenticator]]
  * ⚡ FLOW: [anonymous DCR] -> [Keycloak registration tx]
+ *         -> [this.beforeRegister rejects bad grants]
  *         -> [this.afterRegister mutates ClientModel] -> [commit | rollback]
  * 🛡️ SECURITY: Bound as an ANONYMOUS CRP, so it governs only self-registered DCR
  *              clients, never admin-created first-party clients. A missing scope
  *              or flow throws (rolls back) rather than registering a half-marked
- *              client. No secrets touched; no PII logged (client id only).
+ *              client. B1 (beforeRegister) rejects Direct Access Grants (ROPC) and
+ *              other non-auth-code grants that would bypass the tenant picker +
+ *              /mcp/consent — the picker/consent are flow-enforced, so a non-browser
+ *              grant is the one real bypass (ADR-016). No secrets touched; no PII
+ *              logged (client id only).
  * ----------------------------------------------------------------------------
  */
 package io.yourapp.keycloak.mcp.clientreg;
 
 import java.util.List;
+import java.util.Map;
 
 import org.jboss.logging.Logger;
 import org.keycloak.models.AuthenticationFlowBindings;
@@ -43,6 +52,7 @@ import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.services.clientregistration.ClientRegistrationContext;
 import org.keycloak.services.clientregistration.ClientRegistrationProvider;
@@ -200,25 +210,90 @@ public final class McpClientRegistrationPolicy implements ClientRegistrationPoli
         return configured;
     }
 
-    // -------------------------------------------------------- no-op lifecycle
+    // ----------------------------------------- B1: allowed-grant-types guard
 
+    /**
+     * OIDC DCR maps the requested {@code grant_types} onto these client attributes
+     * (there is no dedicated flag on {@link ClientRepresentation} for them).
+     */
+    static final String ATTR_DEVICE_GRANT = "oauth2.device.authorization.grant.enabled";
+    static final String ATTR_CIBA_GRANT = "oidc.ciba.grant.enabled";
+
+    /**
+     * B1 (spec §5.8 / §13a.1). MCP DCR clients are <b>authorization-code (+
+     * refresh) only</b>. Any other grant is rejected at registration — most
+     * importantly Direct Access Grants (password / ROPC), which would let a client
+     * obtain tokens <b>without the browser flow</b>, bypassing the tenant picker
+     * AND the {@code /mcp/consent} wizard entirely. The picker + consent are
+     * enforced by the authentication flow, so a non-browser grant is the one real
+     * bypass of that enforcement (ERRATA-006 / ADR-016). Throwing here rolls the
+     * registration back with a 400 — fail-at-registration rather than register a
+     * client that can never legitimately use the grant it asked for.
+     *
+     * <p>This is a <b>security invariant, deliberately NOT admin-tunable</b>: a
+     * denylist you can loosen by config is a footgun. It also runs on update
+     * ({@link #beforeUpdate}) so a client cannot widen its grants after the fact.
+     */
     @Override
     public void beforeRegister(ClientRegistrationContext context)
     {
-        // Intentional no-op. The deferred grant-type rejection (register B1,
-        // spec §5.8) will live here when the DCR-hardening pass folds it in.
-    }
-
-    @Override
-    public void afterUpdate(ClientRegistrationContext context, ClientModel client)
-    {
-        // No-op: marking happens once, at registration.
+        rejectDisallowedGrants(context.getClient());
     }
 
     @Override
     public void beforeUpdate(ClientRegistrationContext context, ClientModel client)
     {
-        // No-op.
+        // Same guard on update — a client must not widen its grants post-registration.
+        rejectDisallowedGrants(context.getClient());
+    }
+
+    private static void rejectDisallowedGrants(ClientRepresentation client)
+    {
+        if (client == null)
+        {
+            return; // nothing proposed to validate
+        }
+        if (Boolean.TRUE.equals(client.isDirectAccessGrantsEnabled()))
+        {
+            throw new ClientRegistrationPolicyException(
+                    "Direct Access Grants (password / ROPC) are not permitted for MCP "
+                    + "clients — they would bypass the tenant picker and /mcp/consent. "
+                    + "Register with grant_types authorization_code (+ refresh_token) only.");
+        }
+        if (Boolean.TRUE.equals(client.isImplicitFlowEnabled()))
+        {
+            throw new ClientRegistrationPolicyException(
+                    "The implicit flow is not permitted for MCP clients — use "
+                    + "authorization_code + PKCE (OAuth 2.1).");
+        }
+        if (Boolean.TRUE.equals(client.isServiceAccountsEnabled()))
+        {
+            throw new ClientRegistrationPolicyException(
+                    "Client credentials / service accounts are not permitted for public "
+                    + "MCP DCR clients.");
+        }
+        Map<String, String> attributes = client.getAttributes();
+        if (attributes != null)
+        {
+            if ("true".equals(attributes.get(ATTR_DEVICE_GRANT)))
+            {
+                throw new ClientRegistrationPolicyException(
+                        "The device authorization grant is not permitted for MCP clients.");
+            }
+            if ("true".equals(attributes.get(ATTR_CIBA_GRANT)))
+            {
+                throw new ClientRegistrationPolicyException(
+                        "The CIBA grant is not permitted for MCP clients.");
+            }
+        }
+    }
+
+    // -------------------------------------------------------- no-op lifecycle
+
+    @Override
+    public void afterUpdate(ClientRegistrationContext context, ClientModel client)
+    {
+        // No-op: marking happens once, at registration.
     }
 
     @Override
