@@ -31,6 +31,7 @@ import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
+import org.keycloak.representations.idm.ClientRepresentation;
 import org.keycloak.services.clientregistration.ClientRegistrationContext;
 import org.keycloak.services.clientregistration.policy.ClientRegistrationPolicyException;
 
@@ -294,14 +295,97 @@ class McpClientRegistrationPolicyTest
         assertTrue(!hasFallback, "fallback scopes must be ignored when config overrides them");
     }
 
-    // ------------------------------------------------------- no-op lifecycle
+    // --------------------------------------- B1: allowed-grant-types guard
 
     @Test
-    void beforeRegister_isNoOp()
+    void beforeRegister_authCodeOnly_passes()
     {
-        // Placeholder for the future AllowedGrantTypes (B1) check; must not throw today.
+        // authorization_code (+ refresh) — the only permitted shape. No throw.
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setStandardFlowEnabled(true);
+        when(regContext.getClient()).thenReturn(rep);
+
+        policy.beforeRegister(regContext); // must not throw
+    }
+
+    @Test
+    void beforeRegister_nullClient_doesNotThrow()
+    {
+        when(regContext.getClient()).thenReturn(null);
         policy.beforeRegister(regContext);
     }
+
+    @Test
+    void beforeRegister_directAccessGrants_rejected()
+    {
+        // ROPC — the critical bypass: tokens without the browser flow.
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setDirectAccessGrantsEnabled(true);
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeRegister(regContext));
+    }
+
+    @Test
+    void beforeRegister_implicitFlow_rejected()
+    {
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setImplicitFlowEnabled(true);
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeRegister(regContext));
+    }
+
+    @Test
+    void beforeRegister_serviceAccounts_rejected()
+    {
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setServiceAccountsEnabled(true);
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeRegister(regContext));
+    }
+
+    @Test
+    void beforeRegister_deviceGrant_rejected()
+    {
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setAttributes(java.util.Map.of(
+                McpClientRegistrationPolicy.ATTR_DEVICE_GRANT, "true"));
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeRegister(regContext));
+    }
+
+    @Test
+    void beforeRegister_cibaGrant_rejected()
+    {
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setAttributes(java.util.Map.of(
+                McpClientRegistrationPolicy.ATTR_CIBA_GRANT, "true"));
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeRegister(regContext));
+    }
+
+    @Test
+    void beforeUpdate_directAccessGrants_rejected()
+    {
+        // The guard also runs on update — a client can't widen its grants later.
+        ClientRepresentation rep = new ClientRepresentation();
+        rep.setDirectAccessGrantsEnabled(true);
+        when(regContext.getClient()).thenReturn(rep);
+
+        assertThrows(ClientRegistrationPolicyException.class,
+                () -> policy.beforeUpdate(regContext, client));
+    }
+
+    // ------------------------------------------------------- no-op lifecycle
 
     @Test
     void afterUpdate_isNoOp_doesNotTouchClient()

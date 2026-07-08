@@ -1093,15 +1093,13 @@ These Client Registration Policies were removed (or never added) during initial 
 **The set (register rows B1–B3):**
 - **F.1 Trusted Hosts** (register B2) — constrain redirect-URI hosts.
 - **F.2 Allowed Protocol Mapper Types** (register B3) — constrain self-attached mappers.
-- **F.3 Custom `AllowedGrantTypesPolicy` SPI** (register B1) — reject disallowed grant types at registration. See below.
+- **F.3 Custom `AllowedGrantTypesPolicy` SPI** (register B1) — ✅ **IMPLEMENTED (2026-07-08)**, folded into the MCP CRP. Rejects disallowed grant types at registration. See F.0 below.
 
-## F.0 Custom grant-types registration policy (register B1)
+## F.0 Custom grant-types registration policy (register B1) — ✅ IMPLEMENTED (2026-07-08)
 
-**What:** a custom `ClientRegistrationPolicy` SPI provider that rejects a DCR registration requesting disallowed grant types (password/implicit/client_credentials on public clients) with a 400 — *fail-at-registration* instead of the current *fail-at-token-time*. Full spec in `KEYCLOAK_MCP_SPI_DESIGN.md` §13a.1 (interface, packaging, allowed-grants set).
+**What:** rejects a DCR registration requesting disallowed grant types (password/ROPC, implicit, client_credentials, device, CIBA) with a **400 at registration** — *fail-at-registration* instead of *fail-at-token-time*.
 
-**Important — this is NOT currently a security gap.** ROPC is already blocked by the disabled Direct Grant flow (D.10, verified by smoke Test 23). This SPI adds cleaner rejection ergonomics and broader registration-time enforcement (auth method, response types), and is the right home for the whole registration-time grant posture. It's deferred because (a) the existing control already provides the security property, and (b) it's a second SPI, doubling Keycloak-version-coupling maintenance.
-
-**Trigger:** the DCR-hardening milestone — build it alongside F.1 and F.2. When deployed, smoke Test 23 will flip from "registered 201 but ROPC unusable" to "registration rejected outright" automatically (no test change needed).
+**✅ Shipped (ADR-017).** Implemented not as a separate SPI but **folded into `McpClientRegistrationPolicy.beforeRegister`/`beforeUpdate`** (one provider for all DCR-time registration policy, per SPI design §5.8). No admin config needed — it applies automatically wherever that CRP is bound as the anonymous DCR policy. It reads the proposed client's flow flags + device/CIBA attributes and throws; the guard also runs on update, so a client can't widen its grants later. It is a **security invariant, not admin-tunable**. Now more than a convenience: with Keycloak's built-in consent dropped for MCP clients (ERRATA-006), the picker + `/mcp/consent` are enforced only by the *browser* flow, so a non-browser grant (ROPC) is the one real bypass — B1 closes it atomically. Defense-in-depth over the disabled realm Direct Grant flow (D.10). Verified by 7 unit tests + 1 real-DCR IT (`password`-grant DCR rejected 4xx) and by `smoke-mcp.sh` (`directAccessGrantsEnabled=false` on the live client). Full spec: SPI design §13a.1.
 
 ## F.1 Trusted Hosts — when and how to re-add
 

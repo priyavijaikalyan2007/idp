@@ -173,6 +173,29 @@ class McpClientRegistrationPolicyIT
                 + "does not double up the knobby consent wizard");
     }
 
+    @Test
+    void anonymousDcr_requestingPasswordGrant_isRejected()
+    {
+        // B1 (grant-type guard): a DCR requesting the password grant (ROPC) must be
+        // refused outright — ROPC issues tokens WITHOUT the browser flow, bypassing
+        // the tenant picker AND /mcp/consent. It must not register at all.
+        String dcrUrl = keycloak.getAuthServerUrl()
+                + "/realms/" + REALM + "/clients-registrations/openid-connect";
+        int status = RestAssured.given()
+                .contentType(ContentType.JSON)
+                .body(Map.of(
+                        "client_name", "it-mcp-ropc",
+                        "redirect_uris", List.of("https://client.example/callback"),
+                        "grant_types", List.of("authorization_code", "password"),
+                        "token_endpoint_auth_method", "none"))
+                .when()
+                .post(dcrUrl)
+                .then()
+                .extract().statusCode();
+        assertTrue(status >= 400 && status < 500,
+                "DCR requesting the password grant (ROPC) must be rejected with a 4xx; got " + status);
+    }
+
     /** Anonymous OIDC Dynamic Client Registration; returns the new client_id. */
     private static String registerViaDcr()
     {

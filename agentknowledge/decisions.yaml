@@ -402,3 +402,39 @@
     - "specs/keycloak.prd.md"
     - "src/providers/src/main/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicy.java"
     - "smoke-mcp.sh"
+
+- id: "ADR-017"
+  title: "B1 AllowedGrantTypes: reject non-authorization-code grants at DCR registration, folded into the MCP CRP"
+  date: "2026-07-08"
+  status: "Accepted"
+  context: >-
+    Once Keycloak's built-in consent screen is dropped for MCP clients (ADR-016),
+    the tenant picker + /mcp/consent are enforced purely by the browser authentication
+    flow. The one way to bypass that enforcement is a grant type that does not use the
+    browser flow — above all Direct Access Grants (password / ROPC), which issues
+    tokens with no picker and no wizard. Standard Keycloak client-policy executors
+    constrain authorize/response-type behaviour but do NOT reject a DCR registration
+    for its requested grant_types (a DCR requesting password returns 201). Decision:
+    implement B1 as the atomic fail-at-registration guard, folded into
+    McpClientRegistrationPolicy.beforeRegister (and beforeUpdate) per the one-provider
+    note in spec 5.8 — not a separate provider. It rejects, with a 400, any proposed
+    client enabling directAccessGrants (ROPC), implicit, serviceAccounts
+    (client_credentials), the device authorization grant, or CIBA, by reading the
+    ClientRepresentation flow flags (isDirectAccessGrantsEnabled/isImplicitFlowEnabled/
+    isServiceAccountsEnabled) and the device/CIBA grant attributes
+    (oauth2.device.authorization.grant.enabled, oidc.ciba.grant.enabled). It is a
+    SECURITY INVARIANT, deliberately NOT admin-tunable (a loosenable denylist is a
+    footgun), and runs on update too so a client cannot widen its grants after
+    registration. This is defense-in-depth over the disabled realm Direct Grant flow
+    (setup guide D.10) and adds fail-at-registration ergonomics + broader coverage
+    (implicit/client_credentials/device/CIBA). API verified via javap against 26.6.4
+    (ClientRegistrationContext.getClient -> ClientRepresentation; the flow-flag getters
+    and getAttributes). TDD: 7 unit tests (each disallowed grant rejected on register;
+    beforeUpdate rejects too; auth-code-only passes; null client is safe) + 1 real-DCR
+    testcontainers IT (a password-grant DCR is rejected with 4xx). 142 unit + 3 IT green.
+    smoke-mcp.sh also asserts the live client shape (directAccessGrantsEnabled=false).
+  files:
+    - "src/providers/src/main/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicy.java"
+    - "src/providers/src/test/java/io/knobby/keycloak/mcp/clientreg/McpClientRegistrationPolicyTest.java"
+    - "src/providers/src/test/java/io/knobby/keycloak/mcp/integration/McpClientRegistrationPolicyIT.java"
+    - "specs/keycloak.spi.mcp.md"

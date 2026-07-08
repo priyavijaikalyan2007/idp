@@ -731,7 +731,8 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
     }
 
     @Override public void afterUpdate(ClientRegistrationContext ctx, ClientModel client) { /* no-op */ }
-    @Override public void beforeRegister(ClientRegistrationContext ctx) { /* see note on B1 below */ }
+    @Override public void beforeRegister(ClientRegistrationContext ctx) { rejectDisallowedGrants(ctx.getClient()); } // B1 — see below
+    @Override public void beforeUpdate(ClientRegistrationContext ctx, ClientModel c) { rejectDisallowedGrants(ctx.getClient()); } // B1
     @Override public void beforeUpdate(ClientRegistrationContext ctx, ClientModel client) { }
     @Override public void beforeView(ClientRegistrationProvider p, ClientModel client) { }
     @Override public void beforeDelete(ClientRegistrationProvider p, ClientModel client) { }
@@ -748,7 +749,7 @@ Plus `McpClientRegistrationPolicyFactory implements ClientRegistrationPolicyFact
 
 **Interaction with `/mcp/consent` provisioning (web spec §7.5).** This CRP does the **bootstrap subset** — `mcp-default` + author bundle + flow binding — the minimum for the first authorization to route correctly. The app's `/mcp/consent` still runs for the **rest**: the tenant-picker wizard, tenant-specific setup, and the `mcp_provisioned_clients` record. Because both the CRP and `/mcp/consent` are idempotent (adding an already-present scope / setting an already-correct binding is a no-op), it's safe for both to touch the client. **This splits provisioning: scope+flow bootstrap moves to registration (this CRP); the wizard/tenant work stays at `/mcp/consent`.** See errata + web spec §7.5 for the app-side implication (the app no longer needs to do the scope/flow bootstrap itself, though doing so idempotently is harmless).
 
-**Relationship to the deferred `AllowedGrantTypesPolicy` (§13a.1 / register B1).** Both are `ClientRegistrationPolicy` providers. They can be **one provider**: this CRP's `beforeRegister` is the natural home for the grant-type/auth-method rejection (B1), while `afterRegister` does the marking. Folding them keeps all DCR-time registration policy in one SPI. When you build B1, add it here rather than as a separate provider.
+**B1 (`AllowedGrantTypes`) — IMPLEMENTED here (2026-07-08).** Rather than a separate `AllowedGrantTypesPolicy` provider, B1 was folded into this CRP: `beforeRegister` (and `beforeUpdate`) reject any client enabling a non-authorization-code grant (ROPC / implicit / client_credentials / device / CIBA) with a 400, while `afterRegister` does the marking. One provider holds all DCR-time registration policy. See §13a.1 for the full rationale and the security significance now that Keycloak's built-in consent is dropped.
 
 ```
 public class PickerRequestToken {
@@ -1327,7 +1328,7 @@ Additional SPI providers that belong in this same Maven module / JAR but are **d
 
 ### 13a.1 `AllowedGrantTypesPolicy` (Client Registration Policy SPI)
 
-**Status:** deferred to DCR-hardening phase. **Not currently a security gap** — ROPC is already blocked by the disabled realm Direct Grant flow (setup guide D.10), verified by smoke Test 23. This provider adds *fail-at-registration ergonomics* and broader grant/auth-method enforcement over that already-working control.
+**Status: IMPLEMENTED (2026-07-08).** Folded into `McpClientRegistrationPolicy.beforeRegister` (and `beforeUpdate`) rather than a separate provider, per the "one provider" note in §5.8. It rejects, with a 400 at registration, any client enabling a non-authorization-code grant: **Direct Access Grants (password/ROPC), implicit, client_credentials (service accounts), device authorization grant, and CIBA.** The checks read the proposed `ClientRepresentation`'s flow flags (`isDirectAccessGrantsEnabled` / `isImplicitFlowEnabled` / `isServiceAccountsEnabled`) and the device/CIBA grant attributes (`oauth2.device.authorization.grant.enabled`, `oidc.ciba.grant.enabled`). It is a **security invariant — deliberately NOT admin-tunable** (a loosenable denylist is a footgun). Runs on update too, so a client can't widen its grants post-registration. **Why it matters now:** with Keycloak's built-in consent dropped (ERRATA-006/ADR-016), the tenant picker + `/mcp/consent` are enforced purely by the *browser* auth flow — so a non-browser grant (ROPC) is the one real bypass, which this closes atomically. Defense-in-depth over the disabled realm Direct Grant flow (setup guide D.10). TDD: 7 unit tests (each disallowed grant rejected + auth-code-only passes + null-safe) + 1 real-DCR IT (a `password`-grant registration is rejected with 4xx). `smoke-mcp.sh` also asserts the live client shape (`directAccessGrantsEnabled=false`).
 
 **Problem it solves.** Standard Keycloak client policies have **no executor that rejects a DCR registration for its requested `grant_types`.** The `mcp-hardening` executors constrain authorize/response-type behavior, not registration grant types. So a DCR registration requesting `password` returns 201 (the client just can't *use* ROPC once the Direct Grant flow is disabled). A custom `ClientRegistrationPolicy` closes this by rejecting the registration outright with a 400.
 
