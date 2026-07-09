@@ -1,7 +1,7 @@
 # Errata 001 — MCP client bootstrapping via registration-time CRP
 
 **Date:** 2026-07-05
-**Status:** Design settled; CRP implementation pending.
+**Status:** Implemented 2026-07-06 (ADR-011); B1 grant-type guard folded in 2026-07-08 (ADR-017).
 **Scope of this errata:** the decision to bind the MCP browser flow and assign MCP scopes **atomically at client registration** via a custom `ClientRegistrationPolicy` (CRP), replacing the earlier plan of doing it in the app at `/mcp/consent` first-use. This is a **focused, self-contained change** — read this instead of diffing the full PRD/SPI/guide.
 
 ---
@@ -35,7 +35,7 @@ The end-to-end interactive test (2026-07-05) exposed a **bootstrapping gap**. A 
    - **At `/mcp/consent` (app):** the tenant-picker wizard, tenant-specific scope-override/consent recording, and the `mcp_provisioned_clients` record. The *wizard/tenant work*.
    - Both are idempotent; both touching the client is safe.
 
-6. **The deferred `AllowedGrantTypesPolicy` (register B1) folds into this CRP.** Both are `ClientRegistrationPolicy` providers — B1's grant-type rejection belongs in this CRP's `beforeRegister`. One SPI, not two.
+6. **B1 allowed-grant-types enforcement folds into this CRP.** Both concerns are `ClientRegistrationPolicy` work — B1's grant-type rejection belongs in this CRP's `beforeRegister` / `beforeUpdate`. One SPI, not two. This was implemented on 2026-07-08 (ADR-017).
 
 ---
 
@@ -59,15 +59,13 @@ The end-to-end interactive test (2026-07-05) exposed a **bootstrapping gap**. A 
 
 ---
 
-## What still needs doing (sequenced — NOT in this errata)
+## Current follow-up state
 
-> This errata covers only the **design + doc updates** for the CRP. The following are the follow-on work items, to be tackled step by step:
-
-1. **Build the `McpClientRegistrationPolicy` CRP** (Java, in the existing SPI Maven module). Verify the 26.6.0 model-API calls (`setAuthenticationFlowBindingOverride`, `getFlowByAlias`, `addClientScope`, `getClientScopeByName`). Deploy in the Keycloak image; register as an anonymous CRP.
-2. **App-side change (`/mcp/consent`)** — the app no longer needs to do the scope/flow *bootstrap* (the CRP does it). Decide whether to keep an idempotent re-assert as belt-and-suspenders, and ensure the wizard/tenant work + `mcp_provisioned_clients` record still run. (This is the "app side update" to scope next.)
-3. **Verify the `browser-mcp-tenant-pick` flow structure** is correct (the separate, still-open question — Required sub-flow with alternatives + picker; 26.6.0 nested-subflow constraint). The CRP binds *to* this flow, so the flow must itself be valid.
-4. **Re-run `mcp-e2e-interactive.sh`** — with the CRP deployed, a fresh DCR client should now route through the picker → `/mcp/consent` → full provisioning → tenant claim present. The three current failures (token tenant, default scopes, flow binding) should clear.
-5. **Fold in `AllowedGrantTypesPolicy` (B1)** into this CRP's `beforeRegister` when you do the DCR-hardening pass.
+1. **CRP implementation is shipped.** `McpClientRegistrationPolicy` lives in the existing SPI Maven module and marks anonymous-DCR MCP clients atomically at registration.
+2. **B1 is shipped in the same CRP.** `beforeRegister` and `beforeUpdate` reject non-authorization-code grants at DCR registration/update (ADR-017).
+3. **Post-broker fresh-login routing is config-only and documented.** ERRATA-005 settled the fresh/cookieless path by placing the same picker authenticator in a per-IdP Post Broker Login Flow.
+4. **The remaining launch blocker is app-side.** ERRATA-007 supersedes the old `/mcp/consent` follow-up: the app must authenticate the consent route from the signed handoff token, not from a YourApp app session.
+5. **The environment still needs the consent-forcer removed.** Per ERRATA-006/ADR-016, remove the `consent-required` executor and CRP from the MCP hardening profile so Keycloak's built-in consent screen does not double-up the YourApp wizard.
 
 ---
 
