@@ -1,7 +1,7 @@
 # Errata 006 — CRP must promote DCR-prebound scopes to default, and suppress the built-in consent
 
 **Date:** 2026-07-07
-**Status:** Root cause confirmed in production (`smoke-mcp.sh`); SPI-side fix applied + tested (unit + IT). **No app-side change.**
+**Status:** Scope-promotion SPI fix shipped and tested; built-in-consent suppression corrected to a Keycloak config fix (remove `consent-required` executor/CRP). B1 grant-type guard shipped 2026-07-08 (ADR-017). **No app-side change.**
 **Applies to:** `KEYCLOAK_MCP_SPI_DESIGN.md` (§5.8) and `KEYCLOAK_SETUP_GUIDE.md` (§D.6a, §D.7).
 **Companion to:** ERRATA-001 (the CRP itself) and ERRATA-004 (the resume loop). With ERRATA-004 the flow completes end-to-end; this errata fixes the two client-shape defects that surfaced once it did. Independent of **ERRATA-005** (post-broker tenant-picker hosting / fresh-session gap, still open) — that is about *which auth path reaches the picker*; this is about the *client shape* the CRP produces.
 
@@ -45,10 +45,10 @@ After the `/mcp/consent` wizard, Keycloak still shows its own `OAUTH_GRANT` "Gra
 - **§5.8** — the CRP now (a) removes any pre-existing binding before assigning each scope so default/optional placement is authoritative, and (b) sets `consentRequired=false`. Note the DCR-pre-binds-requested-scopes-as-optional behavior and the executor-vs-afterRegister ordering.
 
 ### `KEYCLOAK_SETUP_GUIDE.md`
-- **§D.6a** — note that for MCP (anonymous-DCR) clients the CRP deliberately overrides the `consent-required` executor back to `consentRequired=false`; the knobby wizard is the consent surface. (First-party clients are unaffected — they don't go through this CRP.)
+- **§D.5 / §D.6a** — remove `consent-required` from the anonymous Client Registration Policies and from the `mcp-hardening` Client Policy profile. The Knobby wizard is the consent surface; Keycloak's generic consent screen is redundant and the CRP cannot reliably override the executor.
 
 ### SPI code (applied)
-- `McpClientRegistrationPolicy.assignScopes` — remove-then-add. `afterRegister` — `setConsentRequired(false)`; log line + marker updated. 2 new unit tests (promotion removes-before-adds; consent suppressed) + no-op test tightened. IT now sends `scope` (reproduces the prod condition, clears all default registration policies so the scoped anonymous DCR reaches the CRP) and asserts default-scope placement + `consentRequired=false`.
+- `McpClientRegistrationPolicy.assignScopes` — remove-then-add. `afterRegister` still calls `setConsentRequired(false)` as belt-and-suspenders once the config forcers are removed; the production correction proved that call alone does not win against the `consent-required` executor. The B1 grant-type guard now lives in `beforeRegister` / `beforeUpdate` so non-browser grants cannot bypass the picker/wizard. Tests cover scope promotion, local consent suppression in the stripped-policy IT harness, and password-grant DCR rejection.
 
 ---
 

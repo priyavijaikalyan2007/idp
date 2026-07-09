@@ -219,3 +219,25 @@ Live GCP read-only check: active `gcloud` account is `priyavijai.kalyan2007@prot
 **Conclusion — CONFIG-ONLY.** No change to `McpTenantPickerAuthenticator` logic or `McpPickerCallbackResourceProvider`; **no app-side change** (picker-request/result contract + correlation claims + fixed `/mcp-picker-callback` URL are identical regardless of hosting flow). Code touch was documentation-only: §5.1 guard reclassified safety-net(browser)/load-bearing(post-broker) in the comment, factory help text + marker note both flows. Emphasized the per-execution `knobby.web.host` gotcha.
 
 **Deliverables.** ERRATA-005 spike write-up + status flip; SPI §5.1; setup guide new **D.2a** (create the flow + bind per-IdP + cookieless acceptance test); ADR-015; CHANGELOG/status/history/concepts/insight (1.7). Rejected a RequiredActionProvider alternative (one hook both paths) — would force changing the callback resume mechanism, larger/riskier than reusing the working authenticator. TD-010 is now resolved-by-ERRATA-005. 135 unit + 2 IT green (doc-only code touch). **App team: nothing to do.**
+
+---
+
+## 2026-07-08 — ERRATA-007, consent config correction, and B1 grant-type guard
+
+**Request.** Continue production MCP debugging after the post-broker picker started firing but the fresh-session flow still did not complete.
+
+**Diagnosis.** Keycloak/SPI was confirmed to be reaching `prod.knobby.io/mcp/consent?token=...` with a valid picker-request JWT. The remaining failure was app-side: `/mcp/consent` was gated on a Knobby web app session instead of the signed handoff token, causing a second login, losing the return URL, and never posting back to `mcp-picker-callback`. Captured as **ERRATA-007**; fix belongs in KnobbyApi.
+
+**Consent correction.** `smoke-mcp.sh` proved `consentRequired=true` still persisted on the DCR client. The earlier CRP override did not win against the `mcp-hardening` `consent-required` executor because that executor re-applies the representation after CRP `afterRegister`. Correct fix: remove the `consent-required` executor and CRP from the MCP hardening config. Dropping Keycloak's generic consent does not weaken enforcement because the tenant picker and Knobby wizard are flow-gated.
+
+**B1 implementation.** Folded allowed-grant-types enforcement into `McpClientRegistrationPolicy.beforeRegister` and `beforeUpdate` (ADR-017). DCR clients enabling password/ROPC, implicit, client_credentials, device authorization, or CIBA are rejected with 400. TDD: 7 unit tests plus a real-DCR integration test; 142 unit + 3 IT green. Keycloak/SPI side is complete including grant-type hardening. Remaining launch blocker: ERRATA-007 in KnobbyApi plus applying the `consent-required` config removal in the environment.
+
+---
+
+## 2026-07-09 — Continue prior conversation: documentation state sync
+
+**Request.** "continue the prior conversation"
+
+**Action.** Rehydrated repo context from README, agentknowledge, git log, status docs, and conversation history. The working tree was clean at commit `f0bff50` (`feat: B1 AllowedGrantTypes — reject non-auth-code grants at DCR registration`). No unfinished Java or shell change remained in this repo; the live blocker remains ERRATA-007 in the app repo.
+
+**Docs fixed.** Synchronized the stale in-repo handoff docs that still described B1 or the CRP as pending: `specs/keycloak-tech-debt.md`, `specs/ERRATA-001-mcp-registration-crp.md`, `specs/ERRATA-006-crp-scope-promotion-and-consent.md`, and SPI design §13a now agree that CRP bootstrap and B1 are shipped, consent suppression requires config removal of `consent-required`, and the active product blocker is app-side token-authenticated `/mcp/consent`.
