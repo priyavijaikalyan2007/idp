@@ -303,6 +303,60 @@ class McpTenantPickerAuthenticatorTest
         verify(context).failure(eq(AuthenticationFlowError.INTERNAL_ERROR));
     }
 
+    // ------------------------------------------ RT-011: web-host validation/allowlist
+
+    private void stubWebHost(String value)
+    {
+        Map<String, String> cfg = new HashMap<>();
+        cfg.put(McpTenantPickerAuthenticator.CONFIG_KEY_WEB_HOST, value);
+        when(authConfigModel.getConfig()).thenReturn(cfg);
+    }
+
+    @Test
+    void authenticate_webHostWithScheme_failsClosed()
+    {
+        stubWebHost("https://prod.knobby.io");
+        authenticator.authenticate(context);
+        verify(context).failure(eq(AuthenticationFlowError.INTERNAL_ERROR));
+        verify(context, never()).challenge(org.mockito.ArgumentMatchers.any(Response.class));
+    }
+
+    @Test
+    void authenticate_webHostWithPath_failsClosed()
+    {
+        stubWebHost("prod.knobby.io/evil");
+        authenticator.authenticate(context);
+        verify(context).failure(eq(AuthenticationFlowError.INTERNAL_ERROR));
+    }
+
+    @Test
+    void authenticate_webHostWithPort_failsClosed()
+    {
+        stubWebHost("prod.knobby.io:8443");
+        authenticator.authenticate(context);
+        verify(context).failure(eq(AuthenticationFlowError.INTERNAL_ERROR));
+    }
+
+    @Test
+    void authenticate_webHostNotAllowlistedForRealm_failsClosed()
+    {
+        // Syntactically valid, but not the pinned host for knobby-prod.
+        stubWebHost("evil.example.com");
+        authenticator.authenticate(context);
+        verify(context).failure(eq(AuthenticationFlowError.INTERNAL_ERROR));
+        verify(context, never()).challenge(org.mockito.ArgumentMatchers.any(Response.class));
+    }
+
+    // ------------------------------------------ RT-008: request-jti bound to session
+
+    @Test
+    void authenticate_storesRequestJtiOnAuthSession()
+    {
+        authenticator.authenticate(context);
+        verify(authSession).setAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_REQUEST_JTI, "fixed-jti-1234");
+    }
+
     // ----------------------------------------------- failure: HMAC key not configured
 
     @Test

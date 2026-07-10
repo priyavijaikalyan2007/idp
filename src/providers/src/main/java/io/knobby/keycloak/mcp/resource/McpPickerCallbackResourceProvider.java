@@ -37,8 +37,11 @@
 package io.knobby.keycloak.mcp.resource;
 
 import java.net.URI;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 
 import jakarta.ws.rs.GET;
@@ -52,6 +55,7 @@ import org.keycloak.models.ClientModel;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.resource.RealmResourceProvider;
 import org.keycloak.services.util.AuthenticationFlowURLHelper;
@@ -216,6 +220,48 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
             return badRequest("user_mismatch", null);
         }
 
+        // RT-008: bind the result to THIS specific picker-request, independent of
+        // the app echoing correctly. The authenticator stored the request jti on
+        // the auth session at suspend, and Keycloak holds the OAuth state as a
+        // client note. Requiring both to match means a compromised/buggy consent
+        // app cannot have a signed result for a DIFFERENT request accepted for
+        // this user/session — the HMAC signature alone is not sufficient binding.
+        String expectedRequestJti = authSession.getAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_REQUEST_JTI);
+        if (isBlank(expectedRequestJti)
+                || !expectedRequestJti.equals(token.getPickerRequestJti()))
+        {
+            log.warnf("Picker callback realm=%s picker_request_jti mismatch "
+                    + "(result echoed=%s)", realmName, token.getPickerRequestJti());
+            return badRequest("request_mismatch", null);
+        }
+        String expectedState = authSession.getClientNote(OIDCLoginProtocol.STATE_PARAM);
+        if (!Objects.equals(expectedState, token.getOauthState()))
+        {
+            log.warnf("Picker callback realm=%s oauth_state mismatch", realmName);
+            return badRequest("state_mismatch", null);
+        }
+
+        // RT-008: chosen_tenant_id flows into a token claim path — reject anything
+        // that isn't a well-formed identifier before it gets there.
+        if (!isValidTenantId(token.getChosenTenantId()))
+        {
+            log.warnf("Picker callback realm=%s malformed chosen_tenant_id", realmName);
+            return badRequest("invalid_tenant", null);
+        }
+
+        // RT-009: granted_scopes are written straight into the access-token `scope`
+        // (via McpScopeOverrideMapper). Require every granted scope to be one the
+        // client is actually assigned (default or optional) — a single bug in the
+        // consent service must not be able to mint arbitrary or elevated scopes.
+        List<String> badScopes = unassignedOrDuplicateScopes(client, token.getGrantedScopes());
+        if (!badScopes.isEmpty())
+        {
+            log.warnf("Picker callback realm=%s client=%s granted scopes not "
+                    + "assignable: %s", realmName, token.getKcClientId(), badScopes);
+            return badRequest("invalid_scopes", null);
+        }
+
         writeSessionNotes(authSession, token);
 
         log.infof("Picker-result accepted user=%s realm=%s tenant=%s scopes=%s",
@@ -275,6 +321,41 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
     private static boolean isBlank(String value)
     {
         return value == null || value.isBlank();
+    }
+
+    /** Non-blank, ≤128 chars, and only {@code [A-Za-z0-9._-]} (RT-008). */
+    private static boolean isValidTenantId(String tenantId)
+    {
+        return tenantId != null && !tenantId.isBlank()
+                && tenantId.length() <= 128
+                && tenantId.matches("[A-Za-z0-9._-]+");
+    }
+
+    /**
+     * Returns the granted scopes that the client is NOT assigned (as a default or
+     * optional client scope), plus a marker if any scope is null/blank or repeated.
+     * Empty result means every granted scope is legitimately assignable (RT-009).
+     */
+    private static List<String> unassignedOrDuplicateScopes(
+            ClientModel client, List<String> granted)
+    {
+        if (granted == null || granted.isEmpty())
+        {
+            return List.of();
+        }
+        Set<String> assigned = new HashSet<>(client.getClientScopes(true).keySet());
+        assigned.addAll(client.getClientScopes(false).keySet());
+
+        List<String> bad = new java.util.ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String scope : granted)
+        {
+            if (isBlank(scope) || !assigned.contains(scope) || !seen.add(scope))
+            {
+                bad.add(scope);
+            }
+        }
+        return bad;
     }
 
     private static Response badRequest(String error, String description)
