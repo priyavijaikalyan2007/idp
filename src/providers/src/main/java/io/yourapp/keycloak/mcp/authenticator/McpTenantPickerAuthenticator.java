@@ -45,9 +45,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 import jakarta.ws.rs.core.Response;
 
@@ -110,6 +112,15 @@ public final class McpTenantPickerAuthenticator implements Authenticator
      */
     public static final String AUTH_NOTE_PICKER_COMPLETED =
             "yourapp.mcp.picker.completed";
+
+    /**
+     * Auth-session note holding the picker-request's {@code jti}, written just
+     * before the redirect. The callback requires the picker-result to echo THIS
+     * value (RT-008) so a signed result for a different request cannot be accepted
+     * for this session — HMAC validity alone is not sufficient binding.
+     */
+    public static final String AUTH_NOTE_PICKER_REQUEST_JTI =
+            "yourapp.mcp.picker.request.jti";
 
     /** Constants required by YourApp web's picker-request validator. */
     static final String ISSUER = "keycloak-mcp-spi";
@@ -223,6 +234,10 @@ public final class McpTenantPickerAuthenticator implements Authenticator
             return;
         }
 
+        // RT-008: remember this request's jti so the callback can require the
+        // picker-result to echo it (request↔result binding).
+        authSession.setAuthNote(AUTH_NOTE_PICKER_REQUEST_JTI, request.getJti());
+
         URI redirect = buildRedirectUri(yourappWebHost, signed);
         log.infof("Emitting MCP picker request user=%s client=%s realm=%s jti=%s",
                 user.getId(), authSession.getClient().getClientId(),
@@ -286,6 +301,22 @@ public final class McpTenantPickerAuthenticator implements Authenticator
                 || client.getClientScopes(false).containsKey(MCP_CLIENT_SCOPE);
     }
 
+    /**
+     * Per-realm allowlist of the ONLY host a signed picker-request may be sent to
+     * (RT-011), pinned in code for internet-facing realms so a misconfigured or
+     * compromised admin cannot redirect handoff tokens (which carry user / client /
+     * auth-session metadata + OAuth state) to an attacker-controlled host. Realms
+     * not listed here (test / local) fall back to strict syntax validation only.
+     * Adding a new production-facing realm means adding it here.
+     */
+    static final Map<String, String> ALLOWED_HOSTS_BY_REALM = Map.of(
+            "yourapp-prod", "prod.yourapp.com",
+            "yourapp-dev", "dev.yourapp.com");
+
+    /** A single LDH hostname label (letters/digits/hyphen, no leading/trailing hyphen). */
+    private static final Pattern HOSTNAME_LABEL =
+            Pattern.compile("[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?");
+
     private String resolveWebHost(AuthenticationFlowContext context, String realmName)
     {
         AuthenticatorConfigModel authConfig = context.getAuthenticatorConfig();
@@ -301,7 +332,50 @@ public final class McpTenantPickerAuthenticator implements Authenticator
             context.failure(AuthenticationFlowError.INTERNAL_ERROR);
             return null;
         }
+        host = host.trim();
+
+        // RT-011: fail closed on anything that isn't a bare hostname. The redirect
+        // URI is built by string concatenation (https://<host>/mcp/consent), so a
+        // value carrying a scheme, port, path, userinfo, or whitespace is a
+        // redirect-forgery vector.
+        if (!isValidHostname(host))
+        {
+            log.errorf("Authenticator config %s=%s realm=%s is not a bare hostname "
+                    + "(no scheme/port/path/userinfo/whitespace) — refusing (RT-011).",
+                    CONFIG_KEY_WEB_HOST, host, realmName);
+            context.failure(AuthenticationFlowError.INTERNAL_ERROR);
+            return null;
+        }
+
+        // RT-011: for internet-facing realms the host is pinned in code; reject any
+        // other value even if it is a syntactically valid hostname.
+        String pinned = ALLOWED_HOSTS_BY_REALM.get(realmName);
+        if (pinned != null && !pinned.equals(host))
+        {
+            log.errorf("Authenticator config %s=%s realm=%s is not the allowlisted "
+                    + "host %s — refusing (RT-011).",
+                    CONFIG_KEY_WEB_HOST, host, realmName, pinned);
+            context.failure(AuthenticationFlowError.INTERNAL_ERROR);
+            return null;
+        }
         return host;
+    }
+
+    /** True iff {@code host} is a dot-separated series of LDH labels, total ≤253. */
+    private static boolean isValidHostname(String host)
+    {
+        if (host.length() > 253)
+        {
+            return false;
+        }
+        for (String label : host.split("\\.", -1))
+        {
+            if (!HOSTNAME_LABEL.matcher(label).matches())
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     private PickerRequestToken buildRequest(UserModel user, AuthenticationSessionModel authSession)

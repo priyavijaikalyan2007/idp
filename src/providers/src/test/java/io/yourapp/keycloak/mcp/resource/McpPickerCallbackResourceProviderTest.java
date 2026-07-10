@@ -28,10 +28,12 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.sessions.AuthenticationSessionModel;
 
@@ -66,6 +68,7 @@ class McpPickerCallbackResourceProviderTest
     @Mock private UserModel currentUser;
     @Mock private AuthenticationSessionModel authSession;
     @Mock private AuthenticationSessionManager sessionManager;
+    @Mock private ClientScopeModel scopeMock;
 
     private HandoffTokenSigner signer;
     private HandoffTokenValidator validator;
@@ -85,6 +88,24 @@ class McpPickerCallbackResourceProviderTest
         when(keycloakSession.getContext()).thenReturn(keycloakContext);
         when(keycloakContext.getRealm()).thenReturn(realm);
         when(realm.getName()).thenReturn("yourapp-prod");
+
+        // Defaults so happy-path tests satisfy the RT-008/009 checks. The valid
+        // result echoes picker_request_jti=req-jti-1, oauth_state=oauth-state-xyz,
+        // and grants yourapp:read — all consistent with these stubs. Individual
+        // tests override to exercise the mismatch/rejection paths. (LENIENT.)
+        when(authSession.getAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_REQUEST_JTI))
+                .thenReturn("req-jti-1");
+        when(authSession.getClientNote(OIDCLoginProtocol.STATE_PARAM))
+                .thenReturn("oauth-state-xyz");
+        Map<String, ClientScopeModel> assignedScopes = new HashMap<>();
+        for (String s : List.of("mcp-default", "yourapp:read", "yourapp:comment",
+                "yourapp:curate", "yourapp:write", "yourapp:share", "yourapp:admin"))
+        {
+            assignedScopes.put(s, scopeMock);
+        }
+        when(client.getClientScopes(true)).thenReturn(assignedScopes);
+        when(client.getClientScopes(false)).thenReturn(Map.of());
 
         Function<KeycloakSession, AuthenticationSessionManager> managerFactory =
                 s -> sessionManager;
@@ -439,6 +460,94 @@ class McpPickerCallbackResourceProviderTest
                 .jti("res-jti-1")
                 .iat(T0 - 10)
                 .exp(T0 + 60);
+    }
+
+    // --------------------------------------------- RT-008/009 hardening tests
+
+    /** Stubs a recoverable auth session with the echoed user — the common prefix. */
+    private void stubValidSession()
+    {
+        when(realm.getClientByClientId("mcp-client-abc")).thenReturn(client);
+        when(sessionManager.getCurrentAuthenticationSession(realm, client, "tab-1"))
+                .thenReturn(authSession);
+        when(authSession.getAuthenticatedUser()).thenReturn(currentUser);
+        when(currentUser.getId()).thenReturn("user-sub-123");
+    }
+
+    @Test
+    void handleCallback_requestJtiMismatch_returns400RequestMismatch()
+    {
+        // RT-008: the auth session remembers a DIFFERENT request jti than the one
+        // the result echoes — a result signed for another request must be refused.
+        String jwt = signer.sign(validResultBuilder().build(), "yourapp-prod");
+        stubValidSession();
+        when(authSession.getAuthNote(
+                McpTenantPickerAuthenticator.AUTH_NOTE_PICKER_REQUEST_JTI))
+                .thenReturn("a-different-request-jti");
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("request_mismatch", error(response));
+        verify(authSession, never()).setUserSessionNote(eq("yourapp_scopes"), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void handleCallback_oauthStateMismatch_returns400StateMismatch()
+    {
+        String jwt = signer.sign(validResultBuilder().build(), "yourapp-prod");
+        stubValidSession();
+        when(authSession.getClientNote(OIDCLoginProtocol.STATE_PARAM))
+                .thenReturn("a-different-state");
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("state_mismatch", error(response));
+    }
+
+    @Test
+    void handleCallback_malformedTenantId_returns400InvalidTenant()
+    {
+        String jwt = signer.sign(
+                validResultBuilder().chosenTenantId("bad tenant!").build(), "yourapp-prod");
+        stubValidSession();
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("invalid_tenant", error(response));
+    }
+
+    @Test
+    void handleCallback_grantedScopeNotAssignedToClient_returns400InvalidScopes()
+    {
+        // RT-009: the result grants a scope the client is NOT assigned — a consent
+        // service bug must not mint arbitrary/elevated scopes into the token.
+        String jwt = signer.sign(
+                validResultBuilder().grantedScopes(List.of("yourapp:read", "realm-admin"))
+                        .build(), "yourapp-prod");
+        stubValidSession();
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("invalid_scopes", error(response));
+        verify(authSession, never()).setUserSessionNote(eq("yourapp_scopes"), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void handleCallback_duplicateGrantedScopes_returns400InvalidScopes()
+    {
+        String jwt = signer.sign(
+                validResultBuilder().grantedScopes(List.of("yourapp:read", "yourapp:read"))
+                        .build(), "yourapp-prod");
+        stubValidSession();
+
+        Response response = provider.handleCallback(jwt);
+
+        assertEquals(400, response.getStatus());
+        assertEquals("invalid_scopes", error(response));
     }
 
     @SuppressWarnings("unchecked")

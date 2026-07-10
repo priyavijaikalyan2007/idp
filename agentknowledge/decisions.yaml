@@ -438,3 +438,39 @@
     - "src/providers/src/test/java/io/yourapp/keycloak/mcp/clientreg/McpClientRegistrationPolicyTest.java"
     - "src/providers/src/test/java/io/yourapp/keycloak/mcp/integration/McpClientRegistrationPolicyIT.java"
     - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-018"
+  title: "MCP handoff defense-in-depth: request-bound results, scope subset validation, host allowlist, replay invariant (RT-008/009/010/011)"
+  date: "2026-07-09"
+  status: "Accepted"
+  context: >-
+    Red-team review (specs/security-red-team-report-2026-07-04.md) flagged that the
+    SPI trusts YourApp web (the /mcp/consent app) to echo/constrain everything, with
+    only HMAC signature + jti replay + user_sub_echo + kc_* correlation as binding.
+    Hardened four things, defense-in-depth against a compromised or buggy consent app
+    (a large TCB before public MCP): (RT-008) McpTenantPickerAuthenticator stores the
+    picker-request jti in auth-session note yourapp.mcp.picker.request.jti at suspend;
+    McpPickerCallbackResourceProvider requires token.picker_request_jti to equal it AND
+    token.oauth_state to equal the auth session's STATE_PARAM client note, so a signed
+    result for a DIFFERENT request cannot be accepted for this session; chosen_tenant_id
+    is format-validated ([A-Za-z0-9._-], <=128) before writing to the token path.
+    (RT-009) granted_scopes are subset-validated against the client's assigned client
+    scopes (getClientScopes(true|false).keySet()) and rejected on unknown/blank/duplicate
+    scopes, so a consent-service bug cannot mint arbitrary/elevated token scopes.
+    (RT-011) resolveWebHost strictly validates yourapp.web.host as a bare hostname (LDH
+    labels only; no scheme/port/path/userinfo/whitespace) and enforces an in-code
+    per-realm allowlist for internet-facing realms (yourapp-prod->prod.yourapp.com,
+    yourapp-dev->dev.yourapp.com), failing closed; unlisted realms (test/local) require
+    valid syntax only. Pinned in code, not admin-tunable, because the threat is admin
+    misconfig/compromise redirecting handoff tokens. (RT-010) ReplayCache logs a
+    single startup WARN that it is in-memory single-instance and Cloud Run maxScale=1
+    is a security invariant until the replay store is externalized. New rejection error
+    codes on the callback: request_mismatch, state_mismatch, invalid_tenant,
+    invalid_scopes. TDD: 5 new callback unit tests + 5 new authenticator unit tests;
+    152 unit + 3 IT green. No app-side change (the app already echoes these claims; the
+    SPI now enforces them independently).
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/util/ReplayCache.java"
+    - "specs/security-red-team-report-2026-07-04.md"

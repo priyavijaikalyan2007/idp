@@ -26,6 +26,8 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import org.jboss.logging.Logger;
+
 /**
  * Synchronised bounded LRU mapping {@code jti -> expiry epoch-seconds}. Lazy
  * eviction of expired entries on each call. Single cache across all realms —
@@ -35,6 +37,8 @@ import java.util.Map;
  */
 public final class ReplayCache
 {
+    private static final Logger log = Logger.getLogger(ReplayCache.class);
+
     /** Hard cap on cached entries. Beyond this, LRU eviction kicks in. */
     public static final int MAX_SIZE = 10_000;
 
@@ -45,6 +49,14 @@ public final class ReplayCache
     public ReplayCache()
     {
         this(Clock.systemUTC());
+        // RT-010: this replay guard is per-JVM (in-memory). It only holds across a
+        // multi-instance / scaled deployment if the state is externalized. Until
+        // then, Cloud Run maxScale=1 is a SECURITY INVARIANT — a scaled-out or
+        // freshly-restarted instance could accept a replayed picker-result. Logged
+        // once at startup (the production ctor); the test ctor stays silent.
+        log.warn("MCP handoff replay cache is in-memory and single-instance — "
+                + "Cloud Run maxScale=1 is a security invariant; externalize the "
+                + "replay store before scaling out (RT-010).");
     }
 
     /** Test seam: inject a fixed clock to test expiry and rotation windows. */
