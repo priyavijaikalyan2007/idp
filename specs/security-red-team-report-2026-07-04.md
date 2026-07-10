@@ -6,6 +6,31 @@
 **Reviewer role:** Red-team security lead  
 **Scope reviewed:** repository history, tracked files, local untracked artifacts, Keycloak setup guide, Cloud Run revision YAML, shell scripts, Dockerfile, Maven SPI build, MCP SPI Java implementation, smoke-test posture, deferred hardening registers, and current upstream Keycloak release/security status.
 
+## Remediation Status (updated 2026-07-09)
+
+Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md` (2026-07-07…09) and ADR-016/017/018.
+
+| # | Status | Note |
+|---|---|---|
+| RT-001 | ✅ Fixed | Keycloak 26.6.0 → **26.6.4**; base image now **digest-pinned** (TD-007). |
+| RT-002 | ✅ Confirmed | `keycloak_neon.dump` deleted from the workspace (owner-confirmed). |
+| RT-003 | ✅ Code done / ⏳ deploy | Both `KC_BOOTSTRAP_ADMIN_*` removed from `cloudrun.yaml` + smoke Test 30; operator to redeploy & rotate the bootstrap secret. |
+| RT-004 | ⏳ Ops | Instructions added in `cloudrun.yaml`; operator creates the `keycloak-runner` SA + IAM and swaps it in. |
+| RT-005 | ✅ Mostly | Trusted Hosts kept ON; B1/AllowedGrantTypes shipped. Allowed Protocol Mapper Types = accepted v1 deferral (mappers live on the scope). |
+| RT-006 | ✅ Ops (owner) | Cloudflare thin proxy + WAF — owner reports done. |
+| RT-007 | ✅ Fixed | D.4 type → `None`, E.2 checklist corrected, smoke guard (web client must not carry `mcp-default`). |
+| RT-008 | ✅ Fixed | Request↔result binding: `picker_request_jti` + `oauth_state` matched to server state; tenant-id format-validated (ADR-018). |
+| RT-009 | ✅ Fixed | `granted_scopes` subset-validated against the client's assigned scopes (ADR-018). |
+| RT-010 | 🟡 Mitigated | `maxScale=1` invariant + startup warning; externalize before scale-out. |
+| RT-011 | ✅ Fixed | `knobby.web.host` strict validation + per-realm allowlist, fail-closed (ADR-018). |
+| RT-012 | ✅ Reconciled | `manage-clients` no longer on the MCP critical path (CRP provisions); split-by-duty recommended. |
+| RT-013 | ✅ Fixed | Dependabot: Docker + Maven + GitHub Actions. |
+| RT-014 | ✅ Fixed | `SECURITY.md` rewritten for the IdP. |
+
+**Remaining = operator actions:** RT-003 redeploy + secret rotation, RT-004 create the dedicated SA. Accepted deferrals: RT-005 (Allowed Protocol Mapper Types), RT-010 (externalized replay store, gated by `maxScale=1`).
+
+---
+
 ## Executive Summary
 
 The implementation has several strong security decisions already in place: per-realm HMAC keys, Secret Manager bindings instead of plaintext Cloud Run secrets, OAuth/MCP specs with explicit threat modeling, PKCE/DCR hardening intent, and tests around the SPI token validation path.
