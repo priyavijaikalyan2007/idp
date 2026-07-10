@@ -1052,6 +1052,24 @@ else
         else
             record_fail "Web client audience mapper" "no oidc-audience-mapper found on the web client or its default scopes - token will carry aud=account and the app's ValidateAudience check is meaningless (§8.3, §17.7)"
         fi
+
+        # RT-007: the web client must NOT carry mcp-default (default or optional). If
+        # it does, the SPI's fallback MCP-client discriminator misfires and normal web
+        # logins get routed into the tenant picker / MCP consent path. (Primary
+        # discriminator is the knobby.mcp attribute, but mcp-default is still a
+        # fallback signal — and mcp-default must never be a realm-default scope.)
+        if [[ -n "$WEB_INTERNAL_ID" && "$WEB_INTERNAL_ID" != "null" ]]; then
+            WEB_MCP_TAINT=$( { curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/clients/${WEB_INTERNAL_ID}/default-client-scopes" 2>/dev/null | jq -r '.[].name';
+                curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+                    "${KC_URL}/admin/realms/${REALM}/clients/${WEB_INTERNAL_ID}/optional-client-scopes" 2>/dev/null | jq -r '.[].name'; } \
+                | grep -xc "mcp-default" || true)
+            if [[ "${WEB_MCP_TAINT:-0}" -gt 0 ]]; then
+                record_fail "Web client not MCP-tainted" "${WEB_CLIENT_ID} carries mcp-default - it will be misdetected as an MCP client and routed into the tenant picker/consent (RT-007). Remove mcp-default from this client and ensure it is not a realm-default scope (setup guide D.4/E.2)."
+            else
+                record_pass "Web client not MCP-tainted" "${WEB_CLIENT_ID} does not carry mcp-default (RT-007)"
+            fi
+        fi
         fi
     fi
 fi

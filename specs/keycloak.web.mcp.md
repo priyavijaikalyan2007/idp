@@ -646,7 +646,9 @@ on GET /mcp/consent (after picker-request token validated, §3.2):
     proceed to wizard
 ```
 
-**7.5.4 Auth for the Admin API calls.** `assignMcpScopes` and `bindBrowserFlow` use the `knobby-{env}-admin-api` service account via client-credentials (§7.2). That service account needs **`manage-clients`** (to set flow-binding overrides and scope assignments) in addition to the view roles it already has (PRD §11.13). Verify this role is present, or the calls 403.
+**7.5.4 Auth for the Admin API calls.** `assignMcpScopes` and `bindBrowserFlow` use the `knobby-{env}-admin-api` service account via client-credentials (§7.2).
+
+> **⚠️ UPDATED (RT-012, 2026-07-08): `manage-clients` is no longer required for the MCP critical path.** The scope + flow **bootstrap moved to the `McpClientRegistrationPolicy` CRP**, which runs *inside* Keycloak at registration with model access — no Admin API call, no `manage-clients` (ERRATA-001/006, ADR-011). The app's idempotent re-assert (§7.5) is now **optional** (only heals clients DCR'd before the CRP existed) and is the *only* thing that would need `manage-clients`. **Recommendation: do NOT grant `manage-clients` to the general `admin-api` service account** (it already holds broad user + IdP roles — a leaked secret should not also be able to mutate clients/flow-bindings). If you keep the optional re-assert, give it a **separate, least-privilege client-provisioner service account** scoped to just `manage-clients`, or drop the re-assert entirely and rely on the CRP. Splitting the admin clients by duty (read-only drift, user-management, client-provisioner) is the RT-012 hardening.
 
 **7.5.5 Failure modes & handling.**
 | Failure | Behavior |

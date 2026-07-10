@@ -735,7 +735,7 @@ Per scope:
 
 - **Name:** `mcp-default`
 - **Description:** "Audience binding and tenant/scope claims for MCP clients"
-- **Type:** **Default** [?] (so it can be assigned as realm-default in §D.7)
+- **Type:** **None** [?] ⚠️ **(RT-007 — NOT `Default`).** Do **not** make this (or the `knobby:*` scopes) a realm-default scope. The `McpClientRegistrationPolicy` CRP assigns `mcp-default` + the author bundle **per DCR'd MCP client** at registration (§D.8). If it were realm-default, *every* client — including `knobby-{env}-web` — would carry it, polluting non-MCP clients (the `knobby.mcp` attribute is the primary MCP discriminator, but `mcp-default` is still a fallback signal). See §D.7 and the warning there.
 - **Protocol:** **OpenID Connect**
 - **Display on consent screen:** **Off** (the consent wizard handles UX)
 - **Include in token scope:** **Off** (we don't want `mcp-default` itself appearing as a scope value)
@@ -1068,8 +1068,8 @@ Cannot run until Knobby web's `/mcp/consent` sub-app is deployed. When ready, ru
 - [ ] Client Registration Policies configured: `allowed-client-scopes`, `trusted-hosts`, `max-clients`. **NOT `consent-required`** (removed per ERRATA-006 — the knobby wizard is the consent surface).
 - [ ] Client Policy profile `mcp-hardening` exists with PKCE + response type + secure URI + secure session + full-scope-disabled executors. **NOT the `consent-required` executor** (ERRATA-006).
 - [ ] Client Policy `mcp-anonymous-dcr` exists with `client-updater-context: ByAnonymous` condition activating `mcp-hardening`.
-- [ ] Realm-default Client Scopes set: `mcp-default` + Author bundle as Default; `knobby:admin` as Optional.
-- [ ] Browser flow binding configured (Option A: realm default = `browser-mcp-tenant-pick`, or Option B: post-DCR processing in Knobby web).
+- [ ] `mcp-default` + the `knobby:*` scopes exist with **assigned type `None`** (RT-007) — **NOT** realm-default. The CRP assigns them **per-client at registration**; `knobby-{env}-web` must NOT carry `mcp-default` (smoke Test checks this).
+- [ ] MCP scope + browser-flow binding is done by the `McpClientRegistrationPolicy` CRP at registration (§D.8) — not realm-wide, and not post-DCR in the app. (The old "Option A / Option B" split is superseded.)
 - [ ] Refresh token rotation enabled (Test 19 green).
 - [ ] Direct Grant flow disabled (Test 23 green).
 - [ ] HMAC handoff key present in Secret Manager (Test 20 green).
