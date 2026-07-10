@@ -36,6 +36,24 @@ metadata:
 spec:
   containerConcurrency: 10
   timeoutSeconds: 300
+  # RT-004: replace the default compute SA (over-privileged, shared across
+  # workloads) with a dedicated least-privilege runtime SA. If Keycloak or its
+  # container is compromised, the blast radius is then only the two secrets it
+  # actually needs, not project-wide compute IAM. One-time setup:
+  #
+  #   PROJECT=stellar-zoo-478023-v4
+  #   gcloud iam service-accounts create keycloak-runner \
+  #     --project="$PROJECT" --display-name="Keycloak Cloud Run runtime"
+  #   SA="keycloak-runner@${PROJECT}.iam.gserviceaccount.com"
+  #   # grant secretAccessor on ONLY the secrets it reads (per-secret, not project-wide):
+  #   for S in knobby-keycloak-db-password-prod knobby-mcp-handoff-hmac-key-knobby-prod; do
+  #     gcloud secrets add-iam-policy-binding "$S" --project="$PROJECT" \
+  #       --member="serviceAccount:${SA}" --role="roles/secretmanager.secretAccessor"
+  #   done
+  #   # then set it below and redeploy; afterwards remove broad roles from the
+  #   # default compute SA (871965503155-compute@developer.gserviceaccount.com).
+  #
+  # serviceAccountName: keycloak-runner@stellar-zoo-478023-v4.iam.gserviceaccount.com
   serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
   containers:
   - name: keycloak-1
@@ -62,8 +80,13 @@ spec:
       value: "true"
     - name: KC_METRICS_ENABLED
       value: "true"
-    - name: KC_BOOTSTRAP_ADMIN_USERNAME
-      value: admin
+    # RT-003: bootstrap admin credentials removed from steady-state runtime. They
+    # are only needed for the very first admin creation on an empty database; a real
+    # admin now exists. Keycloak also REJECTS a username without a password
+    # ("bootstrap-admin-username available only when bootstrap admin password is
+    # set"), so both KC_BOOTSTRAP_ADMIN_USERNAME and KC_BOOTSTRAP_ADMIN_PASSWORD must
+    # be removed together (never one alone). Delete/rotate the
+    # knobby-keycloak-bootstrap-password secret after this is deployed.
     - name: KC_CACHE
       value: local
     - name: KC_DB_PASSWORD
@@ -71,11 +94,6 @@ spec:
         secretKeyRef:
           key: latest
           name: knobby-keycloak-db-password-prod
-    - name: KC_BOOTSTRAP_ADMIN_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          key: latest
-          name: knobby-keycloak-bootstrap-password
     - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD
       valueFrom:
         secretKeyRef:
