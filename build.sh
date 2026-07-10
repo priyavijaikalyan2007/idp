@@ -30,7 +30,9 @@ REPO_NAME="idp"
 IMAGE_NAME="keycloak"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
 
-KEYCLOAK_VERSION=$(grep -oP '^FROM quay.io/keycloak/keycloak:\K[^ ]+' "${SCRIPT_DIR}/Dockerfile" | head -n 1)
+# Version only — stop at '@' so a digest-pinned FROM (image:tag@sha256:...) still
+# yields the bare tag (e.g. 26.6.4) for labels + the kc<ver>-<NNNNN> revision tag.
+KEYCLOAK_VERSION=$(grep -oP '^FROM quay.io/keycloak/keycloak:\K[^ @]+' "${SCRIPT_DIR}/Dockerfile" | head -n 1)
 GIT_COMMIT=$(git -C "${SCRIPT_DIR}" rev-parse --short=7 HEAD)
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 

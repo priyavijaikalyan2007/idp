@@ -2207,6 +2207,28 @@ else
     fi
 fi
 
+# ----- test 30: bootstrap admin env vars must be gone from prod (RT-003) -----
+section "Test 30: bootstrap admin credentials removed from Cloud Run (RT-003)"
+if [[ "$YOURAPP_ENV" != "prod" ]]; then
+    record_skip "Bootstrap creds removed" "only checked in prod (YOURAPP_ENV=${YOURAPP_ENV})"
+elif ! command -v gcloud >/dev/null 2>&1; then
+    record_skip "Bootstrap creds removed" "gcloud not installed — verify manually that KC_BOOTSTRAP_ADMIN_* are absent from the Cloud Run service"
+else
+    CR_PROJECT="${CLOUD_RUN_PROJECT:-your-gcp-project-id}"
+    CR_REGION="${CLOUD_RUN_REGION:-your-region}"
+    CR_SERVICE="${CLOUD_RUN_SERVICE:-yourappauth}"
+    CR_ENV=$(gcloud run services describe "$CR_SERVICE" --region "$CR_REGION" \
+        --project "$CR_PROJECT" \
+        --format='value(spec.template.spec.containers[0].env[].name)' 2>/dev/null || true)
+    if [[ -z "$CR_ENV" ]]; then
+        record_skip "Bootstrap creds removed" "could not describe Cloud Run service ${CR_SERVICE} (permissions? wrong project/region?) — verify manually"
+    elif echo "$CR_ENV" | grep -qE "KC_BOOTSTRAP_ADMIN_(USERNAME|PASSWORD)"; then
+        record_fail "Bootstrap creds removed" "KC_BOOTSTRAP_ADMIN_* still present on ${CR_SERVICE} — remove BOTH username and password (Keycloak rejects username without password) and rotate/delete the bootstrap-password secret (RT-003)"
+    else
+        record_pass "Bootstrap creds removed" "no KC_BOOTSTRAP_ADMIN_* env vars on ${CR_SERVICE} (RT-003)"
+    fi
+fi
+
 # ----- summary -----
 section "Automated test summary"
 for line in "${RESULTS[@]}"; do
