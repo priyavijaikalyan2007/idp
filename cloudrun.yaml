@@ -5,8 +5,8 @@ metadata:
   namespace: 123456789012
   selfLink: /apis/serving.knative.dev/v1/namespaces/123456789012/services/yourappauth
   uid: 4805a74a-95e2-481d-abcf-a3a72e302867
-  resourceVersion: AAZWToOgek0
-  generation: 42
+  resourceVersion: AAZWVx8a7bo
+  generation: 44
   creationTimestamp: "2026-05-25T17:03:15.280797Z"
   labels:
     run.googleapis.com/satisfiesPzs: "true"
@@ -15,7 +15,7 @@ metadata:
     serving.knative.dev/creator: operator@example.com
     serving.knative.dev/lastModifier: operator@example.com
     run.googleapis.com/client-name: cloud-console
-    run.googleapis.com/operation-id: 80cd5048-57e3-4067-9d25-2d85b53582f3
+    run.googleapis.com/operation-id: 53a1cec6-8124-4a0e-a51b-d6a53a617999
     run.googleapis.com/ingress: all
     run.googleapis.com/ingress-status: all
     run.googleapis.com/invoker-iam-disabled: "true"
@@ -26,7 +26,7 @@ spec:
   template:
     metadata:
       labels:
-        client.knative.dev/nonce: 3a80f882-e1fe-44eb-9a31-cdc5d4112d8b
+        client.knative.dev/nonce: 23a9b727-d2d0-4628-a485-47409a03cdd9
         run.googleapis.com/startupProbeType: Custom
       annotations:
         autoscaling.knative.dev/maxScale: 1
@@ -38,10 +38,10 @@ spec:
     spec:
       containerConcurrency: 10
       timeoutSeconds: 300
-      serviceAccountName: 123456789012-compute@developer.gserviceaccount.com
+      serviceAccountName: keycloak-runner@your-gcp-project-id.iam.gserviceaccount.com
       containers:
       - name: keycloak-1
-        image: your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak@sha256:6e40bef20ba227f2fa27c97509978ad6a407bf59d4cae130a2368807b170ea78
+        image: your-region-docker.pkg.dev/your-gcp-project-id/idp/keycloak@sha256:585dad4e87e2fed2338c817c500b3ee670feb0e339f95daef94dd693ee1bb4f2
         ports:
         - name: http1
           containerPort: 8080
@@ -98,21 +98,23 @@ spec:
   - percent: 100
     latestRevision: true
 status:
-  observedGeneration: 42
+  observedGeneration: 44
   conditions:
   - type: Ready
-    status: "True"
-    lastTransitionTime: "2026-07-11T04:44:36.034125Z"
+    status: Unknown
+    message: Provisioning revision instances to receive traffic.
+    lastTransitionTime: "2026-07-11T15:00:44.184205Z"
   - type: ConfigurationsReady
     status: "True"
-    lastTransitionTime: "2026-07-11T04:44:01.811246Z"
+    lastTransitionTime: "2026-07-11T15:00:44.143182Z"
   - type: RoutesReady
-    status: "True"
-    lastTransitionTime: "2026-07-11T04:44:35.963912Z"
-  latestReadyRevisionName: yourappauth-00039-nks
-  latestCreatedRevisionName: yourappauth-00039-nks
+    status: Unknown
+    message: Provisioning revision instances to receive traffic.
+    lastTransitionTime: "2026-07-11T15:00:44.184205Z"
+  latestReadyRevisionName: yourappauth-00040-9pj
+  latestCreatedRevisionName: yourappauth-00041-2wf
   traffic:
-  - revisionName: yourappauth-00039-nks
+  - revisionName: yourappauth-00040-9pj
     percent: 100
     latestRevision: true
   url: https://yourappauth-5qvdsp73la-as.a.run.app
