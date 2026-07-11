@@ -47,6 +47,11 @@ A per-client browser flow reaches its post-authentication steps only on the **Co
 
 **Principle**: A challenge/resume authenticator keyed on the auth session + `getLastExecutionUrl` is portable across flows for free — reuse it in the Post Broker Login Flow to cover brokered logins rather than re-architecting. But since detection guards in a per-IdP flow are shared with web logins, the "is this my client?" short-circuit becomes load-bearing there, not decorative.
 
+### 1.8 Don't build a replay cache Keycloak already ships — `SingleUseObjectProvider` is the distributed one-shot store (2026-07-11)
+The MCP handoff needed one-time consumption of a `picker_result` `jti`. The first cut was a hand-rolled in-memory bounded LRU (`ReplayCache`) — correct only while `maxScale=1`, which quietly made a scaling knob into a **security invariant** (RT-010). Keycloak already provides `session.singleUseObjects()` (`SingleUseObjectProvider`): an Infinispan-backed, TTL-aware, cluster-wide, restart-durable key store used internally for exactly this (auth codes, action tokens). `putIfAbsent(key, lifespanSeconds)` returns `true` on first insert / `false` if present — a ready-made atomic consume-once. Wiring it behind a tiny `@FunctionalInterface` seam (`ReplayGuard (jti, ttl) -> boolean`) kept the validator unit-testable with an in-memory map while production gets the distributed guarantee, and keying the TTL to the token's remaining time-to-`exp` makes entries self-expire with no reaper. Verified the method signature via `javap` against the 26.6.4 JARs before depending on it (it's an "internal" SPI Keycloak may change — the same class of API behind the `KC-SERVICES0047` warnings).
+
+**Principle**: Before writing infrastructure (caches, locks, one-shot stores, schedulers) for a platform SPI, check whether the platform already exposes a distributed, durable version of it — a local reimplementation usually smuggles a single-instance assumption into your threat model. When you do lean on an internal SPI, pin the exact method against the shipped JAR, not the docs.
+
 ---
 
 ## 2. Test harness

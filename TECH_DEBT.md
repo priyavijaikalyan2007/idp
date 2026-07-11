@@ -156,7 +156,7 @@ Documented in `specs/keycloak-themeing-guide.md`. Build pipeline:
 
 ### What we have now
 
-Five concepts catalogued (`McpTenantPickerFlow`, `McpHandoffJwt`, `HmacKeyRotation`, `McpScopeOverride`, `McpDefaultClientScope`, `McpSpiConfig`, `HandoffTokenValidator`, `McpTenantPickerAuthenticator`, `McpPickerCallbackResourceProvider`). Missing: `PickerRequestToken`/`PickerResultToken` POJOs, `ReplayCache`, the Authenticator/ResourceProvider factory classes, `HandoffTokenSigner`. The omissions are mostly small utility types that don't add much value to a concept lookup.
+Nine concepts catalogued (`McpTenantPickerFlow`, `McpHandoffJwt`, `HmacKeyRotation`, `McpScopeOverride`, `McpDefaultClientScope`, `McpSpiConfig`, `HandoffTokenValidator`, `McpTenantPickerAuthenticator`, `McpPickerCallbackResourceProvider`) plus `McpClientRegistrationPolicy`. Missing: `PickerRequestToken`/`PickerResultToken` POJOs, the Authenticator/ResourceProvider factory classes, `HandoffTokenSigner`, and the `ReplayGuard` seam (the old `ReplayCache` was deleted in RT-010/ADR-019 — replay is now backed by Keycloak's distributed `SingleUseObjectProvider`). The omissions are mostly small utility types that don't add much value to a concept lookup.
 
 ### Implementation plan
 
