@@ -2,96 +2,135 @@
 
 # Keycloak Security Hardening Runbook
 
-**Status:** operator action pending  
-**Last verified:** 2026-07-11  
-**Endpoint:** `https://auth.yourapp.com`  
+**Status:** operator action pending
+**Last verified:** 2026-07-11
+**Endpoint:** `https://auth.yourapp.com`
 **Primary realm:** `yourapp-prod`
+**Audience:** solo developer/operator, not a security team
 
-This runbook is intentionally explicit. It assumes you are doing the work in browser consoles, not from memory.
+This runbook is written for the current setup:
 
-The 2026-07-11 exploratory pass did **not** find an unauthenticated token, admin-data, DCR, or OAuth bypass. It did find two things to harden before broad publication:
+- One Cloudflare account.
+- One Keycloak admin account.
+- Keycloak admin account already has TOTP enabled.
+- `auth.yourapp.com` is a public hostname for Keycloak.
+- You want normal app login/OIDC to keep working.
 
-1. Public users can reach the Keycloak admin UI and `master` realm URLs.
-2. Some Keycloak endpoints answer CORS preflights for arbitrary origins.
+The goal is narrow:
 
-The fix is mostly edge configuration. Keep normal `yourapp-prod` OIDC endpoints public; protect only admin-only surfaces.
+1. Keep public `yourapp-prod` OIDC endpoints public.
+2. Put Cloudflare Access in front of Keycloak admin-only paths.
+3. Keep Keycloak admin username/password and Keycloak TOTP exactly as they are.
+4. Let `./smoke.sh` keep working by using a Cloudflare Access service token.
 
 ---
 
-## 0. Mental Model
+## 0. Read This First
 
-### What Cloudflare Access does here
+### Do not create a Cloudflare SaaS application
 
-Cloudflare Access is an **outer gate** in front of selected paths.
-
-Request flow after this guide:
+For this task, the correct Cloudflare product is:
 
 ```text
-Browser
-  -> Cloudflare Access check for /admin/* or /realms/master/*
-  -> Keycloak admin login
-  -> Keycloak admin TOTP
-  -> Keycloak admin console
+Zero Trust -> Access controls -> Applications -> Create new application
+-> Self-hosted and private -> Add public hostname
 ```
 
-Cloudflare Access does **not** replace Keycloak admin login. It decides whether the request is allowed to reach Keycloak at all. Once it reaches Keycloak, Keycloak still asks for the admin username/login and still enforces Keycloak TOTP.
+Do **not** choose **SaaS**.
 
-### Do not do these
+A SaaS application is for using Cloudflare as an identity layer for third-party SaaS apps. That is not what this Keycloak deployment needs.
 
-- Do **not** create a Cloudflare **SaaS application** for this.
-- Do **not** disable Keycloak admin login.
-- Do **not** disable Keycloak TOTP.
-- Do **not** configure Keycloak to trust Cloudflare's token as an admin login token.
-- Do **not** protect all of `auth.yourapp.com`; that would break normal OIDC login, token, DCR, and discovery flows.
-- Do **not** protect `/resources/*`; Keycloak pages load scripts and styles from there.
+This Keycloak deployment needs a **self-hosted public hostname** Access application: Cloudflare sits in front of `auth.yourapp.com` and decides whether a request to selected paths is allowed to reach the origin.
 
-### What application type to create
+### Do not replace Keycloak login with Cloudflare login
 
-Create **Self-hosted public applications** in Cloudflare Access.
+Cloudflare Access is an outer gate. Keycloak admin login is still the inner gate.
 
-Depending on the exact Cloudflare UI revision, the path may be labelled one of these:
+After this guide, admin login should feel like this:
 
-- **Zero Trust -> Access -> Applications -> Add an application -> Self-hosted**
-- **Zero Trust -> Access controls -> Applications -> Add web application -> Self-hosted public application**
-- **Zero Trust -> Access controls -> Applications -> Self-hosted and private -> Add public hostname**
+```text
+Open https://auth.yourapp.com/admin/master/console/
+  -> Cloudflare Access asks for your email / one-time PIN
+  -> Keycloak asks for your admin username/password
+  -> Keycloak asks for your existing TOTP
+  -> Keycloak admin console opens
+```
 
-These labels point to the same kind of Access app: a policy in front of a public hostname/path.
+That is intentional. Cloudflare does **not** mint the token that logs you into Keycloak admin. It only decides whether your browser can reach the admin path at all.
+
+### What to keep enabled
+
+Keep:
+
+- Your Keycloak admin username/password.
+- Your Keycloak admin TOTP.
+- Your normal `yourapp-prod` OIDC discovery, authorization, token, JWKS, and DCR endpoints.
+
+Do not:
+
+- Disable Keycloak admin login.
+- Disable Keycloak TOTP.
+- Configure Keycloak to trust a Cloudflare token as the Keycloak admin session.
+- Put Cloudflare Access in front of all of `auth.yourapp.com`.
+- Protect `/resources/*`; Keycloak pages need static scripts and styles from there.
 
 ---
 
-## 1. Prerequisites
+## 1. Cloudflare Identity Choice for a Solo Developer
 
-### 1.1 Confirm Cloudflare proxy is enabled
+For a solo setup, use Cloudflare Access **One-time PIN** first. It is simple and does not require Google Workspace, Microsoft Entra, Okta, or another identity provider.
 
-Cloudflare Access only enforces on traffic that actually passes through Cloudflare.
+Use this identity model:
 
-**Path:** Cloudflare dashboard -> Websites -> `yourapp.com` -> DNS -> Records
+| Layer | What authenticates you | Why it exists |
+|---|---|---|
+| Cloudflare Access | Email one-time PIN to your owner/admin email | Blocks anonymous scanners before they reach admin paths |
+| Keycloak admin | Keycloak admin username/password | Actual Keycloak administrator identity |
+| Keycloak admin MFA | Existing Keycloak TOTP | Inner MFA for privileged Keycloak actions |
 
-Find the DNS record for `auth.yourapp.com`.
+Use the same email address you control for Cloudflare Access. It can be the same email you use for your Cloudflare account, but the important thing is that the Access policy allows only your exact email.
+
+### Enable One-time PIN in Cloudflare
+
+1. Open the Cloudflare dashboard.
+2. Select your account.
+3. Open **Zero Trust**.
+4. In the left navigation, open **Integrations**.
+5. Open **Identity providers**.
+6. Under **Your identity providers**, select **Add new identity provider**.
+7. Select **One-time PIN**.
+8. Save the identity provider.
+
+If Cloudflare asks you to configure an identity provider and you do not want to do that yet, use **One-time PIN**. Do not block this hardening task on SSO setup.
+
+Later, if you add Google/Microsoft/GitHub login, that is fine. The rest of this guide stays the same.
+
+---
+
+## 2. Confirm Cloudflare Can Enforce on `auth.yourapp.com`
+
+Cloudflare Access only works when traffic passes through Cloudflare.
+
+1. Open the Cloudflare dashboard.
+2. Select the `yourapp.com` website/zone.
+3. Go to **DNS** -> **Records**.
+4. Find the record for `auth.yourapp.com`.
 
 Required state:
 
-| Field | Value |
+| Field | Required value |
 |---|---|
 | Name | `auth` or `auth.yourapp.com` |
 | Type | usually `CNAME` |
 | Proxy status | **Proxied** / orange cloud |
 
-If it is **DNS only** / grey cloud, Cloudflare Access will not protect `auth.yourapp.com`.
+If the record is **DNS only** / grey cloud, Cloudflare Access will not protect the hostname.
 
-### 1.2 Disable Cloudflare optimizations for `auth.yourapp.com`
+### Disable Cloudflare page optimizations for Keycloak
 
-This is important because Keycloak's admin console is a JavaScript SPA and Cloudflare optimizations have broken it before.
+Keycloak admin console is a JavaScript application. Do not let Cloudflare rewrite or optimize it.
 
-**Path:** Cloudflare dashboard -> Websites -> `yourapp.com`
-
-Create configuration rules, or use the equivalent product pages, scoped to:
-
-```text
-Hostname equals auth.yourapp.com
-```
-
-Set:
+For `auth.yourapp.com`, turn these off:
 
 | Feature | Required value |
 |---|---|
@@ -99,81 +138,110 @@ Set:
 | Auto Minify JavaScript | Off |
 | Auto Minify CSS | Off |
 | Auto Minify HTML | Off |
-| Aggressive bot/challenge features | Off for `/resources/*`, `/admin/*`, and normal OIDC endpoints |
+| Zaraz | Off |
+| APO / caching product features | Off |
+| Broad bot/challenge rules | Off for `/resources/*`, normal OIDC paths, and admin login paths |
 
-Keep Cloudflare proxying/DDoS/TLS on. Turn off content rewriting and blanket challenges.
-
-### 1.3 Confirm Cloudflare Access login method
-
-Cloudflare Access needs some identity method for the outer gate.
-
-**Path:** Cloudflare Zero Trust -> Settings -> Authentication
-
-Acceptable for this outer gate:
-
-- Google login for your admin email.
-- Microsoft/Entra login for your admin email.
-- GitHub login for your admin account.
-- One-time PIN to your admin email, if you have not set up an identity provider yet.
-
-Keycloak TOTP remains the inner MFA control. If Cloudflare Access also has MFA through Google/Microsoft/GitHub, good; if not, the outer gate is still useful because it prevents anonymous scanners from reaching admin paths.
+Keep proxying, TLS, and normal DDoS protection on.
 
 ---
 
-## 2. Protect `/admin/*`
+## 3. Create the Human Admin Access Application
 
-### 2.1 Create the Access application
+This protects browser access to admin-only Keycloak paths.
 
-**Path:** Cloudflare Zero Trust -> Access -> Applications -> Add an application
+### 3.1 Start the application
 
-Choose:
+1. Open the Cloudflare dashboard.
+2. Open **Zero Trust**.
+3. In the left navigation, open **Access controls**.
+4. Open **Applications**.
+5. Click **Create new application**.
+6. Choose **Self-hosted and private**.
+7. Click **Add public hostname**.
 
-```text
-Self-hosted public application
-```
+Do **not** choose **SaaS**.
 
-Do **not** choose:
+### 3.2 Application basics
 
-```text
-SaaS application
-```
-
-Fill the application form:
+Use these values:
 
 | Field | Value |
 |---|---|
-| Application name | `YourApp Keycloak Admin` |
-| Application domain / hostname | `auth.yourapp.com` |
-| Path | `/admin*` |
+| Application name | `YourApp Keycloak Private Admin Surfaces` |
 | Session duration | `8h` |
-| App Launcher visibility | Off, if the UI asks |
+| Application launcher visibility | Off, if shown |
 
-Leave CORS settings at defaults unless the UI forces a choice. This app is only an access gate for admin paths.
+If Cloudflare asks for a logo, skip it.
 
-### 2.2 Create the allow policy
+### 3.3 Public hostnames / paths
 
-On the same application, add a policy:
+Add these public hostname entries.
+
+| Public hostname | Path |
+|---|---|
+| `auth.yourapp.com` | `admin/*` |
+| `auth.yourapp.com` | `admin` |
+| `auth.yourapp.com` | `realms/master/*` |
+| `auth.yourapp.com` | `realms/master` |
+
+Important path notes:
+
+- Cloudflare's path examples do not use a leading slash. Enter `admin/*`, not `https://auth.yourapp.com/admin/*`.
+- If your Cloudflare UI automatically shows the slash, that is fine. The route should still mean `/admin/*`.
+- The wildcard path `admin/*` protects child paths such as `/admin/master/console/`.
+- Wildcards do not always protect the parent path. That is why this guide includes both `admin/*` and `admin`.
+- Same for `realms/master/*` and `realms/master`.
+
+If the UI only lets you add one hostname/path per application, create four Access applications with the same settings and the same policies:
+
+1. `YourApp Keycloak Admin Wildcard` -> `auth.yourapp.com` / `admin/*`
+2. `YourApp Keycloak Admin Parent` -> `auth.yourapp.com` / `admin`
+3. `YourApp Keycloak Master Wildcard` -> `auth.yourapp.com` / `realms/master/*`
+4. `YourApp Keycloak Master Parent` -> `auth.yourapp.com` / `realms/master`
+
+Using one application with four public hostnames is easier to maintain, but either shape is acceptable.
+
+### 3.4 Human allow policy
+
+Add a policy to the application.
+
+Use:
 
 | Field | Value |
 |---|---|
-| Policy name | `allow-keycloak-admins` |
+| Policy name | `allow-owner-email` |
 | Action | `Allow` |
-| Include | Your exact admin email address, or an Access Group containing only Keycloak admins |
-| Require | Optional: login method is your chosen IdP; optional: country/device posture if you already use those |
-| Exclude | Empty, unless you need to block a specific account |
+| Include selector | `Emails` |
+| Include value | `<your exact owner/admin email>` |
+| Require | Empty for now |
+| Exclude | Empty |
 
-For a solo admin setup, the simplest safe policy is:
+For the login method, select **One-time PIN** if the UI asks which identity provider applies to the app.
 
-```text
-Action: Allow
-Include: Emails -> <your admin email>
-```
+If the UI offers **Instant Auth**, turn it on. With only one login method, this avoids an extra provider selection screen.
 
-Do not add a broad `Bypass` policy. Bypass means Cloudflare Access is not enforcing for matching traffic.
+If the UI offers **Independent MFA**, leave it off for now. Your Keycloak admin account already has TOTP. You can add Cloudflare-side MFA later after the basic gate is working.
 
-### 2.3 Save and test immediately
+### 3.5 What not to add
 
-Open a private/incognito browser window and visit:
+Do not add:
+
+- A `Bypass` policy.
+- `Everyone`.
+- A whole email domain such as `*@yourapp.com`.
+- Country-only access as the only control.
+- Device posture/WARP requirements unless you already use WARP and know it works.
+
+For a solo developer, exact email allowlisting is enough for this first hardening pass.
+
+---
+
+## 4. Test Browser Admin Access
+
+Use a private/incognito browser window so old cookies do not hide mistakes.
+
+Open:
 
 ```text
 https://auth.yourapp.com/admin/master/console/
@@ -181,72 +249,36 @@ https://auth.yourapp.com/admin/master/console/
 
 Expected sequence:
 
-1. Cloudflare Access login/approval screen appears first.
-2. After you pass Cloudflare Access, Keycloak's normal admin login appears.
-3. After Keycloak login, Keycloak still asks for TOTP if the admin account has TOTP enabled.
+1. Cloudflare Access appears first and asks for your email/one-time PIN.
+2. After Cloudflare Access succeeds, Keycloak admin login appears.
+3. After Keycloak admin login, Keycloak TOTP still appears.
 4. The admin console loads.
 
-If you go straight to Keycloak without seeing Cloudflare Access first, check:
+Bad results and fixes:
 
-- DNS record is orange-cloud proxied.
-- Access app hostname is exactly `auth.yourapp.com`.
-- Access app path is exactly `/admin*`.
-- The request URL starts with `/admin`.
+| Result | Likely cause | Fix |
+|---|---|---|
+| You go straight to Keycloak admin without Cloudflare Access | DNS is grey-cloud/DNS-only, or path is wrong | Set `auth.yourapp.com` to Proxied and recheck `admin/*` |
+| You cannot load Keycloak styles/scripts | You protected `/resources/*` or enabled aggressive challenges | Remove `/resources/*` from Access/challenge rules |
+| Admin console loads blank or broken | Cloudflare optimization rewrote JS/CSS | Turn off Rocket Loader, Auto Minify, Zaraz, APO for `auth.yourapp.com` |
+| You pass Cloudflare but Keycloak rejects login | This is a Keycloak credential/TOTP issue, not Cloudflare | Use the normal Keycloak admin recovery path |
 
----
-
-## 3. Protect `/realms/master/*`
-
-The `master` realm should not be a public application realm. Protect it separately.
-
-### 3.1 Create the Access application
-
-**Path:** Cloudflare Zero Trust -> Access -> Applications -> Add an application
-
-Choose:
-
-```text
-Self-hosted public application
-```
-
-Fill:
-
-| Field | Value |
-|---|---|
-| Application name | `YourApp Keycloak Master Realm` |
-| Application domain / hostname | `auth.yourapp.com` |
-| Path | `/realms/master*` |
-| Session duration | `8h` |
-| App Launcher visibility | Off, if the UI asks |
-
-### 3.2 Add the same allow policy
-
-Use the same policy shape:
-
-```text
-Action: Allow
-Include: Emails -> <your admin email>
-```
-
-or reuse the same `keycloak-admins` Access Group if you created one.
-
-### 3.3 Test immediately
-
-From a private/incognito window:
+Now test the master realm URL in a new incognito window:
 
 ```text
 https://auth.yourapp.com/realms/master/.well-known/openid-configuration
 ```
 
-Expected result: Cloudflare Access appears first, or Cloudflare denies the request if the user is not allowed.
+Expected:
 
-After passing Cloudflare Access, Keycloak may show JSON or a Keycloak page. That is fine. The goal is that anonymous public users cannot reach it.
+- Cloudflare Access appears first, or Cloudflare blocks the request.
+- Anonymous public users should not get raw JSON for the `master` realm.
 
 ---
 
-## 4. Confirm You Did Not Break Public OIDC
+## 5. Confirm Public OIDC Still Works
 
-These paths must remain public because apps and MCP clients use them.
+These paths must remain public. Do not put Access in front of them.
 
 Run:
 
@@ -270,9 +302,9 @@ curl -i 'https://auth.yourapp.com/realms/yourapp-prod/protocol/openid-connect/au
 Expected:
 
 - A Keycloak/OIDC response.
-- Usually `400` because required OAuth parameters are missing.
-- **Not** a Cloudflare Access login page.
-- **Not** a Cloudflare Access 403.
+- Usually `400` because OAuth parameters are missing.
+- Not a Cloudflare Access login page.
+- Not a Cloudflare Access 403.
 
 Run:
 
@@ -283,155 +315,168 @@ curl -s -o /dev/null -w "%{http_code}\n" \
 
 Expected:
 
-- `200`, `301`, `302`, or `404` from Keycloak is acceptable.
-- A Cloudflare Access login page is **not** acceptable for `/resources/*`.
+- Any normal Keycloak response such as `200`, `301`, `302`, or `404` is acceptable.
+- A Cloudflare Access login page is not acceptable for `/resources/*`.
 
 ---
 
-## 5. Verify Edge Protection With Curl
+## 6. Add a Cloudflare Access Service Token for Smoke Tests
 
-From a terminal that is not carrying browser cookies:
-
-```bash
-curl -i https://auth.yourapp.com/admin/master/console/ | sed -n '1,25p'
-```
-
-Good outcomes:
-
-- `302` redirect to a Cloudflare Access login URL.
-- `403` from Cloudflare Access.
-- HTML that clearly says Cloudflare Access, not Keycloak.
-
-Bad outcome:
-
-- `200` with Keycloak admin console HTML.
-
-Now test the master realm:
-
-```bash
-curl -i https://auth.yourapp.com/realms/master/.well-known/openid-configuration | sed -n '1,25p'
-```
-
-Good outcomes:
-
-- `302` to Cloudflare Access.
-- `403` from Cloudflare Access.
-- Cloudflare Access login HTML.
-
-Bad outcome:
-
-- `200` with JSON containing `"issuer":"https://auth.yourapp.com/realms/master"`.
-
----
-
-## 6. Smoke Test Caveat
-
-`./smoke.sh` currently calls Keycloak Admin REST endpoints under:
+`./smoke.sh` calls Keycloak Admin REST endpoints under:
 
 ```text
 /admin/realms/<realm>/...
 ```
 
-It authenticates to Keycloak with:
+After `/admin/*` is protected, smoke tests need a machine credential for the Cloudflare outer gate.
 
-```text
-Authorization: Bearer <Keycloak admin-api token>
-```
+Use a Cloudflare Access **service token**. Do not use a broad bypass policy.
 
-It can send Cloudflare Access service-token headers when you export the `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` env vars. After you protect `/admin/*`, smoke tests that call Admin REST through `https://auth.yourapp.com` must use those env vars, or they may fail with a Cloudflare Access page or 403 even though Keycloak is healthy.
+### 6.1 Create the service token
 
-Use a Cloudflare Access **service token** for smoke tests. Do not use a broad bypass.
+1. Open Cloudflare **Zero Trust**.
+2. Open **Access controls**.
+3. Open **Service credentials**.
+4. Open **Service Tokens**.
+5. Click **Create Service Token**.
+6. Name it:
 
-Cloudflare side:
+   ```text
+   yourapp-keycloak-smoke
+   ```
 
-1. Zero Trust -> Access -> Service Auth -> Service Tokens.
-2. Create token: `yourapp-keycloak-smoke`.
-3. Copy the generated Client ID and Client Secret.
-4. Add a policy to both Access applications:
+7. Set a reasonable expiration. For now, use 1 year and calendar a rotation.
+8. Copy the generated **Client ID** and **Client Secret** immediately.
 
-   | Field | Value |
-   |---|---|
-   | Policy name | `allow-smoke-service-token` |
-   | Action | `Service Auth` |
-   | Include | Service Token -> `yourapp-keycloak-smoke` |
+The Client Secret is only shown once.
 
-Store the service-token values in Secret Manager. Suggested names:
+### 6.2 Allow the service token on the Access application
+
+Go back to the `YourApp Keycloak Private Admin Surfaces` Access application.
+
+Add a second policy:
+
+| Field | Value |
+|---|---|
+| Policy name | `allow-smoke-service-token` |
+| Action | `Service Auth` |
+| Include selector | `Service Token` |
+| Include value | `yourapp-keycloak-smoke` |
+
+Policy order should not matter for the simple setup, but keep both policies:
+
+1. `allow-smoke-service-token` with action `Service Auth`.
+2. `allow-owner-email` with action `Allow`.
+
+Do not replace the human allow policy with the service-token policy. You need both.
+
+### 6.3 Store the service token in Secret Manager
+
+Use names that make the secret purpose obvious:
 
 ```text
 yourapp-cloudflare-access-smoke-client-id-prod
 yourapp-cloudflare-access-smoke-client-secret-prod
 ```
 
-Run smoke with:
+Create them:
+
+```bash
+printf '%s' '<cloudflare-access-client-id>' \
+  | gcloud secrets create yourapp-cloudflare-access-smoke-client-id-prod \
+      --replication-policy=automatic \
+      --data-file=-
+
+printf '%s' '<cloudflare-access-client-secret>' \
+  | gcloud secrets create yourapp-cloudflare-access-smoke-client-secret-prod \
+      --replication-policy=automatic \
+      --data-file=-
+```
+
+If the secrets already exist, add new versions instead:
+
+```bash
+printf '%s' '<cloudflare-access-client-id>' \
+  | gcloud secrets versions add yourapp-cloudflare-access-smoke-client-id-prod \
+      --data-file=-
+
+printf '%s' '<cloudflare-access-client-secret>' \
+  | gcloud secrets versions add yourapp-cloudflare-access-smoke-client-secret-prod \
+      --data-file=-
+```
+
+Do not paste either value into this repository.
+
+### 6.4 Run smoke tests with the service token
+
+Export the Keycloak admin API secret and the Cloudflare Access service token:
 
 ```bash
 export YOURAPP_ENV=prod
-export ADMIN_CLIENT_SECRET=$(gcloud secrets versions access latest \
-  --secret=yourapp-keycloak-admin-api-client-secret-prod)
-export CF_ACCESS_CLIENT_ID=$(gcloud secrets versions access latest \
-  --secret=yourapp-cloudflare-access-smoke-client-id-prod)
-export CF_ACCESS_CLIENT_SECRET=$(gcloud secrets versions access latest \
-  --secret=yourapp-cloudflare-access-smoke-client-secret-prod)
+
+export ADMIN_CLIENT_SECRET="$(gcloud secrets versions access latest \
+  --secret=yourapp-keycloak-admin-api-client-secret-prod)"
+
+export CF_ACCESS_CLIENT_ID="$(gcloud secrets versions access latest \
+  --secret=yourapp-cloudflare-access-smoke-client-id-prod)"
+
+export CF_ACCESS_CLIENT_SECRET="$(gcloud secrets versions access latest \
+  --secret=yourapp-cloudflare-access-smoke-client-secret-prod)"
+
 ./smoke.sh
 ```
 
-`smoke.sh` also accepts the longer aliases:
+`smoke.sh` also accepts these longer aliases:
 
 ```text
 CLOUDFLARE_ACCESS_CLIENT_ID
 CLOUDFLARE_ACCESS_CLIENT_SECRET
 ```
 
-The script adds these headers to curl requests when the env vars are present:
+When the env vars are present, the script sends:
 
 ```text
 CF-Access-Client-Id: <service-token-client-id>
 CF-Access-Client-Secret: <service-token-client-secret>
 ```
 
-It does not print the secret. Do not add the token to the repo.
+The script does not print the secret.
 
-### Emergency alternative: temporary narrow IP bypass
+### 6.5 Quick service-token curl test
 
-Use this only if the service-token setup is broken and you need a one-off smoke run.
+Run:
 
-1. Find your current public IP:
+```bash
+curl -i \
+  -H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" \
+  -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}" \
+  https://auth.yourapp.com/admin/master/console/ \
+  | sed -n '1,25p'
+```
 
-   ```bash
-   curl -s https://ifconfig.me
-   ```
+Expected:
 
-2. In the `YourApp Keycloak Admin` Access application, add a policy above the allow policy:
+- A Keycloak response or redirect.
+- Not a Cloudflare Access login page.
+- Not a Cloudflare Access 403.
 
-   | Field | Value |
-   |---|---|
-   | Policy name | `temporary-smoke-ip-bypass` |
-   | Action | `Bypass` |
-   | Include | IP ranges -> `<your-public-ip>/32` |
-
-3. Run:
-
-   ```bash
-   ./smoke.sh
-   ```
-
-4. Delete `temporary-smoke-ip-bypass` immediately after the smoke run.
-
-This is less clean because bypassed requests do not get Access enforcement.
-
-### Private-origin alternative
-
-Only use this if you have a private/internal route to Keycloak that is not internet-accessible. Do not create a second public hostname just to bypass Cloudflare Access.
+If this fails but browser login works, the service-token policy is missing or attached to the wrong Access application/path.
 
 ---
 
-## 7. Keycloak CORS and Web Origins
+## 7. Keycloak Web Origins
 
-This section narrows browser-origin behavior for first-party clients. It does not replace the Cloudflare Access admin/master protection above.
+This section is separate from Cloudflare Access.
+
+Cloudflare Access protects admin-only paths. Keycloak Web Origins controls which browser origins Keycloak will answer with CORS headers for first-party web clients.
 
 ### 7.1 Configure `yourapp-prod-web`
 
-**Path:** Keycloak admin console -> realm `yourapp-prod` -> Clients -> `yourapp-prod-web` -> Settings
+Path:
+
+```text
+Keycloak admin console -> realm yourapp-prod -> Clients -> yourapp-prod-web -> Settings
+```
 
 Set:
 
@@ -440,21 +485,24 @@ Set:
 | Valid redirect URIs | `https://prod.yourapp.com/auth/callback` |
 | Valid post logout redirect URIs | `https://prod.yourapp.com/` |
 | Web origins | `https://prod.yourapp.com` |
-| Direct access grants | Off |
 | Standard flow | On |
+| Direct access grants | Off |
 | Implicit flow | Off |
 
 Do not use:
 
 - `*`
-- broad wildcard origins
 - `https://*.yourapp.com`
-
-If the UI currently has `+` for Web Origins, replace it with the explicit origin above. `+` derives origins from redirect URIs; explicit origins are easier to audit.
+- `+` in prod if the UI lets you enter the explicit origin instead
+- localhost origins in prod
 
 ### 7.2 Configure `yourapp-dev-web`
 
-**Path:** Keycloak admin console -> realm `yourapp-dev` -> Clients -> `yourapp-dev-web` -> Settings
+Path:
+
+```text
+Keycloak admin console -> realm yourapp-dev -> Clients -> yourapp-dev-web -> Settings
+```
 
 Set:
 
@@ -463,47 +511,91 @@ Set:
 | Valid redirect URIs | `https://dev.yourapp.com/auth/callback` |
 | Valid post logout redirect URIs | `https://dev.yourapp.com/` |
 | Web origins | `https://dev.yourapp.com` |
-| Direct access grants | Off |
 | Standard flow | On |
+| Direct access grants | Off |
 | Implicit flow | Off |
 
-For local development only, add local origins to the dev realm, not prod:
+For local development only, add local origins to dev or test realms:
 
 ```text
 http://localhost:3000
 http://localhost:5173
 ```
 
-Only add the local ports your app actually uses.
+Only add local ports the app actually uses.
 
-### 7.3 Configure future staging/test web clients
+### 7.3 Do not casually edit built-in Keycloak clients
 
-Use the same pattern:
-
-```text
-Valid redirect URIs: exact /auth/callback URL
-Valid post logout redirect URIs: exact app root URL
-Web origins: exact app origin only
-```
-
-Do not copy prod origins into dev, and do not copy dev/localhost origins into prod.
-
-### 7.4 Do not edit built-in Keycloak clients casually
-
-Do not change these unless you are deliberately debugging Keycloak internals:
+Avoid changing:
 
 - `security-admin-console`
 - `account-console`
 - `broker`
 - `realm-management`
 
-These clients are easy to break. The admin/master risk is handled at Cloudflare, not by trying to surgically change Keycloak's built-in console clients.
+Those are built-in Keycloak clients. The admin/master public-exposure issue is handled at Cloudflare, not by trying to surgically rewrite Keycloak's internal console clients.
 
 ---
 
-## 8. CORS Verification
+## 8. Verification Commands
 
-### 8.1 Admin REST preflight must be blocked by Cloudflare
+### 8.1 Admin path must be gated
+
+Run from a terminal that is not carrying browser cookies:
+
+```bash
+curl -i https://auth.yourapp.com/admin/master/console/ | sed -n '1,25p'
+```
+
+Good:
+
+- `302` redirect to Cloudflare Access.
+- `403` from Cloudflare Access.
+- HTML clearly from Cloudflare Access.
+
+Bad:
+
+- `200` with Keycloak admin console HTML.
+
+### 8.2 Master realm must be gated
+
+Run:
+
+```bash
+curl -i https://auth.yourapp.com/realms/master/.well-known/openid-configuration \
+  | sed -n '1,25p'
+```
+
+Good:
+
+- `302` to Cloudflare Access.
+- `403` from Cloudflare Access.
+- Cloudflare Access login HTML.
+
+Bad:
+
+- `200` with JSON containing:
+
+  ```text
+  "issuer":"https://auth.yourapp.com/realms/master"
+  ```
+
+### 8.3 Public prod discovery must stay public
+
+Run:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://auth.yourapp.com/realms/yourapp-prod/.well-known/openid-configuration
+```
+
+Expected:
+
+```text
+200
+```
+
+### 8.4 Admin REST evil-origin preflight must not reach raw Keycloak
 
 Run:
 
@@ -516,12 +608,12 @@ curl -i -X OPTIONS \
   | sed -n '1,40p'
 ```
 
-Expected after `/admin*` Access protection:
+Good:
 
 - Cloudflare Access blocks, challenges, or redirects.
-- You should **not** see a normal Keycloak `204`/`200` preflight response for this public unauthorised request.
+- You do not see a normal Keycloak `204`/`200` preflight response.
 
-Bad result:
+Bad:
 
 ```text
 access-control-allow-origin: https://evil.example.com
@@ -530,7 +622,7 @@ access-control-allow-credentials: true
 
 on a normal Keycloak response from `/admin/realms/...`.
 
-### 8.2 Production token endpoint evil-origin probe
+### 8.5 Token endpoint CORS probe
 
 Run:
 
@@ -543,38 +635,25 @@ curl -i -X OPTIONS \
   | sed -n '1,40p'
 ```
 
-Preferred result:
+Preferred:
 
 - No `access-control-allow-origin: https://evil.example.com`.
 
-If Keycloak still reflects the evil origin here, record it as residual Keycloak behavior and do **not** immediately add a Cloudflare response-header rewrite. Token endpoint CORS can be flow-sensitive; breaking it may break browser login. The higher-risk admin path is already protected by Access.
+If Keycloak still reflects the evil origin here, record it as residual Keycloak behavior and do not immediately add Cloudflare response-header rewrites. Token endpoint CORS is easy to break. The higher-risk admin path is already protected by Access.
 
-### 8.3 Production token endpoint legitimate-origin probe
+### 8.6 Real app login still works
 
-Run:
-
-```bash
-curl -i -X OPTIONS \
-  'https://auth.yourapp.com/realms/yourapp-prod/protocol/openid-connect/token' \
-  -H 'Origin: https://prod.yourapp.com' \
-  -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: content-type' \
-  | sed -n '1,40p'
-```
-
-Expected:
-
-- Compatible with the production app's login flow.
-- If the app exchanges tokens in the browser, `https://prod.yourapp.com` must be allowed.
-- If the app exchanges tokens only from the backend, the browser preflight can be stricter.
-
-The final check is a real browser login at:
+Open:
 
 ```text
 https://prod.yourapp.com
 ```
 
-If browser login works and admin evil-origin preflight is blocked, the important hardening objective is met.
+Expected:
+
+- Normal app login works.
+- Normal redirect to/from `auth.yourapp.com/realms/yourapp-prod/...` works.
+- No Cloudflare Access prompt appears during normal app login.
 
 ---
 
@@ -583,21 +662,25 @@ If browser login works and admin evil-origin preflight is blocked, the important
 Mark this done only when all are true:
 
 - [ ] `auth.yourapp.com` DNS record is Proxied / orange cloud.
-- [ ] Rocket Loader and Auto Minify are off for `auth.yourapp.com`.
-- [ ] Cloudflare Access application `YourApp Keycloak Admin` exists.
-- [ ] `YourApp Keycloak Admin` protects hostname `auth.yourapp.com`, path `/admin*`.
-- [ ] Cloudflare Access application `YourApp Keycloak Master Realm` exists.
-- [ ] `YourApp Keycloak Master Realm` protects hostname `auth.yourapp.com`, path `/realms/master*`.
-- [ ] Both apps allow only named Keycloak admin email(s) or a `keycloak-admins` Access Group.
-- [ ] Both apps allow the `yourapp-keycloak-smoke` Service Auth token.
-- [ ] No broad bypass policy exists.
-- [ ] Incognito visit to `/admin/master/console/` shows Cloudflare Access before Keycloak.
-- [ ] After Cloudflare Access, Keycloak still requires normal admin login and TOTP.
-- [ ] Incognito visit to `/realms/master/.well-known/openid-configuration` is blocked or gated by Cloudflare Access.
+- [ ] Rocket Loader, Auto Minify, Zaraz, and APO are off for `auth.yourapp.com`.
+- [ ] Access application uses **Self-hosted and private -> Add public hostname**.
+- [ ] No Cloudflare SaaS application was created for Keycloak.
+- [ ] `auth.yourapp.com` + `admin/*` is protected.
+- [ ] `auth.yourapp.com` + `admin` is protected.
+- [ ] `auth.yourapp.com` + `realms/master/*` is protected.
+- [ ] `auth.yourapp.com` + `realms/master` is protected.
+- [ ] Human policy allows only your exact owner/admin email.
+- [ ] One-time PIN is enabled as the Access login method.
+- [ ] No broad `Bypass` policy exists.
+- [ ] `yourapp-keycloak-smoke` service token exists.
+- [ ] Service-token policy is attached to the same Access app/path(s).
+- [ ] Incognito `/admin/master/console/` shows Cloudflare Access before Keycloak.
+- [ ] After Cloudflare Access, Keycloak still requires admin login and TOTP.
+- [ ] Incognito `/realms/master/.well-known/openid-configuration` is blocked or gated.
 - [ ] `yourapp-prod` OIDC discovery still returns `200`.
 - [ ] `prod.yourapp.com` login still works.
 - [ ] `yourapp-prod-web` Web Origins is exactly `https://prod.yourapp.com`.
-- [ ] Dev/localhost Web Origins exist only in dev/test realms, not prod.
+- [ ] Dev/localhost Web Origins exist only in dev/test realms.
 - [ ] Admin REST evil-origin preflight is blocked by Cloudflare Access.
 - [ ] `./smoke.sh` passes with `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` exported.
 
@@ -605,19 +688,38 @@ Mark this done only when all are true:
 
 ## 10. Rollback
 
-If login or admin access breaks:
+If normal app login breaks:
 
-1. In Cloudflare Zero Trust -> Access -> Applications, disable only:
-   - `YourApp Keycloak Admin`
-   - `YourApp Keycloak Master Realm`
-2. Do not change Keycloak realm/client settings during the first rollback.
-3. Confirm:
+1. In Cloudflare Zero Trust, open **Access controls** -> **Applications**.
+2. Disable only the Keycloak Access application(s) created in this runbook.
+3. Do not change Keycloak client settings during the first rollback.
+4. Confirm public discovery is back:
 
    ```bash
    curl -s -o /dev/null -w "%{http_code}\n" \
      https://auth.yourapp.com/realms/yourapp-prod/.well-known/openid-configuration
    ```
 
-4. Re-enable one Access application at a time and retest.
+5. Re-enable one path at a time and retest.
 
-If the admin console loads but looks broken, check Cloudflare optimizations first: Rocket Loader, Auto Minify, bot challenges, and rate limits on `/resources/*`.
+If the admin console loads but looks broken:
+
+1. Leave the Access application enabled.
+2. Check Cloudflare optimizations first:
+   - Rocket Loader
+   - Auto Minify
+   - Zaraz
+   - APO/caching
+   - broad challenge/bot rules
+3. Confirm `/resources/*` is not protected by Access.
+
+---
+
+## 11. References Checked
+
+Cloudflare documentation checked on 2026-07-11:
+
+- `https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/`
+- `https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/`
+- `https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/`
+- `https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/`
