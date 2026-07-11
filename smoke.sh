@@ -59,6 +59,11 @@
 #   28. Realm SSL requirement (§16.5)
 #   29. Scope override mapper attached to mcp-default (§16.8.4)
 #
+#   Infra / red-team hardening (Tests 30-32; prod-only, gcloud-gated where noted):
+#   30. Bootstrap admin creds removed from Cloud Run (RT-003)
+#   31. Cloud Run runs on a dedicated least-privilege SA, not default compute (RT-004)
+#   32. DCR rejects an attacker-domain (untrusted, HTTPS) redirect URI (RT-005)
+#
 #   Manual federation flows (Tests 30-35):
 #   30. Fallback picker (no kc_idp_hint)
 #   31. Google federation
@@ -2226,6 +2231,71 @@ else
         record_fail "Bootstrap creds removed" "KC_BOOTSTRAP_ADMIN_* still present on ${CR_SERVICE} — remove BOTH username and password (Keycloak rejects username without password) and rotate/delete the bootstrap-password secret (RT-003)"
     else
         record_pass "Bootstrap creds removed" "no KC_BOOTSTRAP_ADMIN_* env vars on ${CR_SERVICE} (RT-003)"
+    fi
+fi
+
+section "Test 31: Cloud Run runs on a dedicated least-privilege SA, not default compute (RT-004)"
+# The default compute SA (<project-number>-compute@developer.gserviceaccount.com)
+# is over-privileged and shared across workloads — a Keycloak compromise would
+# inherit all of its project IAM. RT-004 replaces it with a dedicated
+# keycloak-runner SA holding only per-secret secretAccessor (setup guide A.4).
+# An EMPTY serviceAccountName also means the default compute SA (Cloud Run's
+# fallback), so treat empty as a fail too.
+if [[ "$KNOBBY_ENV" != "prod" ]]; then
+    record_skip "Dedicated runtime SA" "only checked in prod (KNOBBY_ENV=${KNOBBY_ENV})"
+elif ! command -v gcloud >/dev/null 2>&1; then
+    record_skip "Dedicated runtime SA" "gcloud not installed — verify manually that the Cloud Run service runs as keycloak-runner@…, not …-compute@developer.gserviceaccount.com"
+else
+    CR_PROJECT="${CLOUD_RUN_PROJECT:-stellar-zoo-478023-v4}"
+    CR_REGION="${CLOUD_RUN_REGION:-asia-southeast1}"
+    CR_SERVICE="${CLOUD_RUN_SERVICE:-knobbyauth}"
+    CR_SA=$(gcloud run services describe "$CR_SERVICE" --region "$CR_REGION" \
+        --project "$CR_PROJECT" \
+        --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true)
+    if ! gcloud run services describe "$CR_SERVICE" --region "$CR_REGION" \
+            --project "$CR_PROJECT" --format='value(metadata.name)' >/dev/null 2>&1; then
+        record_skip "Dedicated runtime SA" "could not describe Cloud Run service ${CR_SERVICE} (permissions? wrong project/region?) — verify manually"
+    elif [[ -z "$CR_SA" ]]; then
+        record_fail "Dedicated runtime SA" "serviceAccountName is empty on ${CR_SERVICE} — Cloud Run falls back to the default compute SA (over-privileged). Set it to keycloak-runner@${CR_PROJECT}.iam.gserviceaccount.com (RT-004, setup guide A.4)"
+    elif [[ "$CR_SA" == *"-compute@developer.gserviceaccount.com" ]]; then
+        record_fail "Dedicated runtime SA" "runs as the default compute SA (${CR_SA}) — over-privileged and shared. Swap to the dedicated keycloak-runner@${CR_PROJECT}.iam.gserviceaccount.com with only per-secret secretAccessor (RT-004, setup guide A.4)"
+    else
+        record_pass "Dedicated runtime SA" "runs as dedicated SA ${CR_SA} (not the default compute SA) (RT-004)"
+    fi
+fi
+
+section "Test 32: DCR rejects an attacker-domain (untrusted, HTTPS) redirect URI (RT-005)"
+# RT-005 negative regression: anonymous DCR is an internet-facing control plane.
+# The Trusted Hosts CRP (+ the secure-redirect-uris-enforcer domain allowlist)
+# must stop a client from registering a redirect URI on attacker-controlled
+# infrastructure. We use an HTTPS URL on an untrusted host so the http-scheme
+# rule can't be what rejects it — a rejection here proves HOST constraints are
+# live, not merely scheme constraints (that's Test 22's job). Keep Trusted Hosts
+# ON (register B2); this test fails closed if it's disabled.
+if [[ -z "$AUTH_ENDPOINT" ]]; then
+    record_fail "DCR rejects attacker-domain redirect" "skipped - no AUTH_ENDPOINT"
+else
+    DCR_ENDPOINT="${REALM_BASE}/clients-registrations/openid-connect"
+    ATTACKER_REDIRECT_BODY='{"client_name":"smoke-test-attacker-redirect","redirect_uris":["https://attacker.example.com/callback"],"grant_types":["authorization_code"],"response_types":["code"],"token_endpoint_auth_method":"none","scope":"openid knobby:read"}'
+
+    ATTACKER_RESP=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+        -X POST "$DCR_ENDPOINT" \
+        -H "Content-Type: application/json" \
+        -d "$ATTACKER_REDIRECT_BODY")
+    ATTACKER_STATUS=$(echo "$ATTACKER_RESP" | grep "HTTP_STATUS:" | cut -d: -f2)
+    ATTACKER_BODY=$(echo "$ATTACKER_RESP" | sed '$d')
+
+    if [[ "$ATTACKER_STATUS" == "400" || "$ATTACKER_STATUS" == "403" ]]; then
+        record_pass "DCR rejects attacker-domain redirect" "HTTP ${ATTACKER_STATUS} as expected — an untrusted HTTPS host was refused (Trusted Hosts / redirect-domain allowlist is live) (RT-005)"
+    elif [[ "$ATTACKER_STATUS" == "201" ]]; then
+        ACCIDENTAL_CLIENT_ID=$(echo "$ATTACKER_BODY" | jq -r '.client_id // empty')
+        ACCIDENTAL_RAT=$(echo "$ATTACKER_BODY" | jq -r '.registration_access_token // empty')
+        if [[ -n "$ACCIDENTAL_CLIENT_ID" && -n "$ACCIDENTAL_RAT" ]]; then
+            curl -s -X DELETE "${DCR_ENDPOINT}/${ACCIDENTAL_CLIENT_ID}" -H "Authorization: Bearer $ACCIDENTAL_RAT" >/dev/null 2>&1 || true
+        fi
+        record_fail "DCR rejects attacker-domain redirect" "an attacker-controlled HTTPS redirect (https://attacker.example.com) was ACCEPTED (HTTP 201). Anonymous DCR is not constraining redirect hosts — re-enable/repair the Trusted Hosts CRP (Clients → Client registration → Anonymous Access Policies → Trusted Hosts, 'Client URIs Must Match' ON) and/or set 'Allow permitted domains' on secure-redirect-uris-enforcer. Do NOT disable Trusted Hosts (RT-005, setup guide D.6a/F.1)"
+    else
+        record_fail "DCR rejects attacker-domain redirect" "unexpected HTTP ${ATTACKER_STATUS} - ${ATTACKER_BODY:0:200}"
     fi
 fi
 
