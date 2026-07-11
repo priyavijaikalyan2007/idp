@@ -720,11 +720,11 @@ public class McpClientRegistrationPolicy implements ClientRegistrationPolicy {
         client.setAuthenticationFlowBindingOverride("browser", flow.getId());
 
         // 4. Suppress Keycloak's built-in OAUTH_GRANT consent — the yourapp
-        //    /mcp/consent wizard is the sole consent surface (ERRATA-006). Safe
-        //    against the mcp-hardening consent-required executor: client-policy
-        //    executors fire on triggerOnEvent BEFORE this policy's
-        //    triggerAfterRegister (verified in the 26.6.0
-        //    AbstractClientRegistrationProvider bytecode), so this write wins.
+        //    /mcp/consent wizard is the sole consent surface (ERRATA-006).
+        //    This setter is belt-and-suspenders only: it does NOT beat the
+        //    mcp-hardening consent-required executor/CRP when those are
+        //    configured. The authoritative fix is removing consent-required
+        //    from the MCP DCR policy/profile config (ADR-016).
         client.setConsentRequired(false);
 
         // Any throw here rolls back the ENTIRE registration transaction — atomic.
