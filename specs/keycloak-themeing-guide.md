@@ -1,9 +1,46 @@
 # Keycloak Theming Guide (knobby.io)
 
-**Status:** Draft v1.0
+**Status:** Draft v1.0 — **toolchain section SUPERSEDED 2026-07-11 (see banner)**
 **Owner:** PVSS
-**Last Updated:** 2026-06-02
+**Last Updated:** 2026-07-11
 **Companion to:** `KEYCLOAK_AUTH_PRD.md` (§9 references this document)
+
+---
+
+> ## ⚠️ Correction (2026-07-11) — read before using this guide
+>
+> The **toolchain recommendation in this guide is superseded.** This document was
+> written assuming the knobby design system is a **React `@knobby/design-system`
+> npm package** and therefore prescribes **Keycloakify** (React → FreeMarker) so the
+> theme could import shared React components and tokens. **That premise is false.**
+>
+> The design system is **`enterprise-bootstrap-theme` (repo `b2btheme`)** published to
+> **static.knobby.io** as a **Bootstrap 5.3.8 stylesheet (`custom.css`) + 116 vanilla-TS
+> web components**, consumed via plain `<link>`/`<script>`. There are no React components
+> to import. Keycloakify would re-bundle a second copy of Bootstrap and re-implement the
+> look in JSX, guaranteeing drift from the CDN — the opposite of the "visually identical"
+> goal (`/auth/login`, `/mcp/consent`).
+>
+> **Current decision (ADR-020):** use a **plain FreeMarker theme** (`parent=keycloak.v2`)
+> whose templates link the **live static.knobby.io CDN assets** the app already loads and
+> mirror the app's login-card markup. FreeMarker is Keycloak's native Apache-2.0 templating
+> substrate (Keycloakify itself compiles to it), so this is simpler *and* more faithful.
+>
+> **Cross-origin light/dark parity (ADR-021):** because Keycloak is on **auth.knobby.io**
+> (a different origin from prod.knobby.io), the app's localStorage theme preference is
+> invisible to it. Parity is achieved via a **`.knobby.io` theme cookie** + a **CDN pre-paint
+> `theme-init.js`** + **promoting the auth-card CSS to the CDN**. Keycloak's own consent/grant
+> screen is **bypassed by the SPI and not themed**.
+>
+> **Authoritative documents going forward:**
+> - **`specs/keycloak-theme-parity-requirements.md`** — UI-team requirements + acceptance criteria (the load-bearing spec).
+> - **ADR-020, ADR-021** in `agentknowledge/decisions.yaml`.
+>
+> The sections below on **§3 Keycloakify setup, §4 React design-system integration, §5 React
+> page components, §7 Keycloakify build, §11 Keycloakify CI** are retained for historical
+> context only and **do not reflect the current approach.** The scope (§2), deploy/caching
+> (§8), CSP (§12.3), and gotchas remain broadly valid — but add the **consent page and the
+> dark-mode cross-origin design** from the parity spec.
 
 ---
 
