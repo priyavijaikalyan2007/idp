@@ -15,7 +15,7 @@ Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md`
 | RT-001 | ✅ Fixed | Keycloak 26.6.0 → **26.6.4**; base image now **digest-pinned** (TD-007). |
 | RT-002 | ✅ Confirmed | `keycloak_neon.dump` deleted from the workspace (owner-confirmed). |
 | RT-003 | ✅ Code done / ⏳ deploy | Both `KC_BOOTSTRAP_ADMIN_*` removed from `cloudrun.yaml` + smoke Test 30; operator to redeploy & rotate the bootstrap secret. |
-| RT-004 | ⏳ Ops | Instructions added in `cloudrun.yaml`; operator creates the `keycloak-runner` SA + IAM and swaps it in. |
+| RT-004 | ⏳ Ops | Runbook in setup guide **A.4** (real secret names, swap + redeploy steps); operator creates the `keycloak-runner` SA + IAM and swaps it in for the default compute SA. |
 | RT-005 | ✅ Mostly | Trusted Hosts kept ON; B1/AllowedGrantTypes shipped. Allowed Protocol Mapper Types = accepted v1 deferral (mappers live on the scope). |
 | RT-006 | ✅ Ops (owner) | Cloudflare thin proxy + WAF — owner reports done. |
 | RT-007 | ✅ Fixed | D.4 type → `None`, E.2 checklist corrected, smoke guard (web client must not carry `mcp-default`). |
