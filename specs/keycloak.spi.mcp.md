@@ -874,7 +874,9 @@ class HandoffTokenValidator:
         return payload
 ```
 
-### 6.5 ReplayCache
+### 6.5 Replay defense — `ReplayGuard` over Keycloak's `SingleUseObjectProvider`
+
+> **⚠️ SUPERSEDED (RT-010, 2026-07-11).** The original in-memory `ReplayCache` below was **replaced** by a `ReplayGuard` functional interface whose production implementation delegates to Keycloak's built-in **`session.singleUseObjects().putIfAbsent(key, lifespanSeconds)`** — a distributed (Infinispan-backed), TTL-aware, restart-durable single-use store (the same mechanism Keycloak uses for its own action tokens). The `HandoffTokenValidator` takes a `ReplayGuard` per call; the callback builds it from its request session (key `mcp.picker.result.<jti>`, lifespan = the token's remaining validity). This **removes the `maxScale=1`-as-a-security-invariant** dependency — the replay guarantee now holds cluster-wide and across restarts. `ReplayCache` + `ReplayCacheTest` were deleted; tests use an in-memory `ReplayGuard`. See ADR-019. The pseudocode below is retained for historical context only.
 
 A bounded LRU cache mapping `jti` → expiry time. Used to prevent token replay.
 
@@ -906,7 +908,7 @@ class ReplayCache:
         return true
 ```
 
-For multi-instance Keycloak deployments (clustered), this cache would need to be backed by Infinispan or similar. For the single-instance Cloud Run / Hetzner deployment, an in-memory map is fine. Document this assumption in the JavaDoc.
+~~For multi-instance Keycloak deployments (clustered), this cache would need to be backed by Infinispan or similar. For the single-instance Cloud Run / Hetzner deployment, an in-memory map is fine.~~ **DONE (RT-010): replaced by `session.singleUseObjects()` (Infinispan-backed), so multi-instance is handled and `maxScale=1` is no longer required for replay safety.**
 
 ---
 

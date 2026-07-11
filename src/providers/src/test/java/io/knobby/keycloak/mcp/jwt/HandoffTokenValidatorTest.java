@@ -18,7 +18,7 @@ import java.util.Map;
 
 import io.knobby.keycloak.mcp.config.McpSpiConfig;
 import io.knobby.keycloak.mcp.jwt.HandoffValidationException.Code;
-import io.knobby.keycloak.mcp.util.ReplayCache;
+import io.knobby.keycloak.mcp.util.ReplayGuard;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -44,7 +44,7 @@ class HandoffTokenValidatorTest
         String jwt = newSigner(env).sign(original, "knobby-prod");
 
         PickerResultToken parsed = newValidator(env, T0)
-                .validatePickerResult(jwt, "knobby-prod");
+                .validatePickerResult(jwt, "knobby-prod", inMemoryGuard());
 
         assertEquals(original.getJti(), parsed.getJti());
         assertEquals(original.getChosenTenantId(), parsed.getChosenTenantId());
@@ -63,7 +63,7 @@ class HandoffTokenValidatorTest
         String tampered = tamperSignatureFirstChar(jwt);
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(tampered, "knobby-prod"));
+                () -> newValidator(env, T0).validatePickerResult(tampered, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.BAD_SIGNATURE, ex.getCode());
     }
 
@@ -79,7 +79,7 @@ class HandoffTokenValidatorTest
 
         // Replay against knobby-dev's validator endpoint: must fail at signature.
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(prodJwt, "knobby-dev"));
+                () -> newValidator(env, T0).validatePickerResult(prodJwt, "knobby-dev", inMemoryGuard()));
         assertEquals(Code.BAD_SIGNATURE, ex.getCode());
     }
 
@@ -97,7 +97,7 @@ class HandoffTokenValidatorTest
         envRotated.put("KNOBBY_MCP_HANDOFF_HMAC_KEY_PREVIOUS__KNOBBY_PROD", KEY_A);
 
         PickerResultToken parsed = newValidator(envRotated, T0)
-                .validatePickerResult(oldKeyJwt, "knobby-prod");
+                .validatePickerResult(oldKeyJwt, "knobby-prod", inMemoryGuard());
         assertEquals("res-jti-1", parsed.getJti());
     }
 
@@ -113,7 +113,7 @@ class HandoffTokenValidatorTest
         envCurrent.put("KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD", KEY_B);
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(envCurrent, T0).validatePickerResult(oldKeyJwt, "knobby-prod"));
+                () -> newValidator(envCurrent, T0).validatePickerResult(oldKeyJwt, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.BAD_SIGNATURE, ex.getCode());
     }
 
@@ -130,7 +130,7 @@ class HandoffTokenValidatorTest
                 "knobby-prod");
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod"));
+                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.BAD_ISSUER, ex.getCode());
     }
 
@@ -145,7 +145,7 @@ class HandoffTokenValidatorTest
                 "knobby-prod");
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod"));
+                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.BAD_AUDIENCE, ex.getCode());
     }
 
@@ -161,7 +161,7 @@ class HandoffTokenValidatorTest
                 "knobby-prod");
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod"));
+                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.EXPIRED, ex.getCode());
     }
 
@@ -177,7 +177,7 @@ class HandoffTokenValidatorTest
                 "knobby-prod");
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod"));
+                () -> newValidator(env, T0).validatePickerResult(jwt, "knobby-prod", inMemoryGuard()));
         assertEquals(Code.FUTURE_DATED, ex.getCode());
     }
 
@@ -191,11 +191,12 @@ class HandoffTokenValidatorTest
 
         String jwt = newSigner(env).sign(validResultBuilder().build(), "knobby-prod");
         HandoffTokenValidator validator = newValidator(env, T0);
+        ReplayGuard guard = inMemoryGuard(); // SAME guard across both calls
 
-        validator.validatePickerResult(jwt, "knobby-prod"); // first consume — OK
+        validator.validatePickerResult(jwt, "knobby-prod", guard); // first consume — OK
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
-                () -> validator.validatePickerResult(jwt, "knobby-prod"));
+                () -> validator.validatePickerResult(jwt, "knobby-prod", guard));
         assertEquals(Code.REPLAY, ex.getCode());
     }
 
@@ -209,7 +210,7 @@ class HandoffTokenValidatorTest
 
         HandoffValidationException ex = assertThrows(HandoffValidationException.class,
                 () -> newValidator(env, T0)
-                        .validatePickerResult("not-a-jwt", "knobby-prod"));
+                        .validatePickerResult("not-a-jwt", "knobby-prod", inMemoryGuard()));
         assertEquals(Code.MALFORMED, ex.getCode());
     }
 
@@ -266,9 +267,14 @@ class HandoffTokenValidatorTest
     private static HandoffTokenValidator newValidator(Map<String, String> env, long nowEpochSeconds)
     {
         McpSpiConfig config = new McpSpiConfig(env::get, () -> env);
-        ReplayCache replayCache = new ReplayCache(
+        return new HandoffTokenValidator(config,
                 Clock.fixed(Instant.ofEpochSecond(nowEpochSeconds), ZoneOffset.UTC));
-        return new HandoffTokenValidator(config, replayCache,
-                Clock.fixed(Instant.ofEpochSecond(nowEpochSeconds), ZoneOffset.UTC));
+    }
+
+    /** A fresh in-memory replay guard: true on a jti's first use, false on repeat. */
+    private static ReplayGuard inMemoryGuard()
+    {
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        return (jti, lifespanSeconds) -> seen.add(jti);
     }
 }

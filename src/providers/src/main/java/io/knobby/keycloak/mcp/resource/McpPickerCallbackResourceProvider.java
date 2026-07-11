@@ -91,6 +91,9 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
     /** User-session note read by {@code McpScopeOverrideMapper} to set `scope`. */
     static final String SESSION_NOTE_SCOPES = "knobby_scopes";
 
+    /** Namespace for picker-result jtis in the shared single-use store (RT-010). */
+    static final String SINGLE_USE_KEY_PREFIX = "mcp.picker.result.";
+
     /** Builds the resume URL for the suspended flow (test seam). */
     @FunctionalInterface
     interface ResumeUrlBuilder
@@ -160,7 +163,12 @@ public final class McpPickerCallbackResourceProvider implements RealmResourcePro
         PickerResultToken token;
         try
         {
-            token = validator.validatePickerResult(pickerResult, realmName);
+            // RT-010: replay defense via Keycloak's distributed, TTL-aware
+            // single-use store (cluster-wide + restart-durable) — not an in-memory
+            // per-JVM cache, so it no longer depends on maxScale=1.
+            token = validator.validatePickerResult(pickerResult, realmName,
+                    (jti, lifespanSeconds) -> session.singleUseObjects()
+                            .putIfAbsent(SINGLE_USE_KEY_PREFIX + jti, lifespanSeconds));
         }
         catch (HandoffValidationException ex)
         {
