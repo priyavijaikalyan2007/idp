@@ -506,3 +506,62 @@
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProviderFactory.java"
     - "specs/keycloak.spi.mcp.md"
+
+- id: "ADR-020"
+  title: "Theme the Keycloak pages with a plain FreeMarker theme that links the live static.yourapp.com CDN, not Keycloakify"
+  date: "2026-07-11"
+  status: "Accepted"
+  context: >-
+    specs/keycloak-themeing-guide.md (Draft v1.0) recommended Keycloakify (React ->
+    FreeMarker) so the theme could import a React @yourapp/design-system package and
+    share tokens/components with the app. That premise is false: the yourapp design
+    system is not React. It is enterprise-bootstrap-theme (repo b2btheme) published to
+    static.yourapp.com as a Bootstrap 5.3.8 stylesheet (custom.css) plus 116 vanilla-TS
+    web components consumed via plain <link>/<script>. There are no React components to
+    import. Following the guide would re-bundle a second copy of Bootstrap inside a
+    React app and re-implement the look in JSX, guaranteeing visual drift from the CDN
+    the moment static.yourapp.com changes - the opposite of the "visually identical"
+    goal. Decision: use a plain FreeMarker Keycloak theme (parent=keycloak.v2) whose
+    templates <link>/<script> the SAME live static.yourapp.com assets the app pages load,
+    and mirror the app's login-card markup. FreeMarker is Keycloak's native, Apache-2.0
+    templating substrate (every default Keycloak page is already .ftl; Keycloakify
+    itself compiles down to it), so this adds no exotic dependency and no Node/Vite/
+    Maven-for-JS toolchain. Only the IdP-picker fallback login and error/logout/link
+    edge pages are themed; Keycloak's own consent/grant screen is bypassed by the SPI
+    and not themed. Requirements this places on the UI team are captured in
+    specs/keycloak-theme-parity-requirements.md; the themeing guide is revised to match.
+  files:
+    - "specs/keycloak-theme-parity-requirements.md"
+    - "specs/keycloak-themeing-guide.md"
+
+- id: "ADR-021"
+  title: "Cross-origin light/dark parity for auth.yourapp.com via a .yourapp.com theme cookie + a CDN pre-paint theme-init script"
+  date: "2026-07-11"
+  status: "Accepted"
+  context: >-
+    The app's theme preference (ThemeManager, theme-manager.ts) lives in
+    localStorage['yourapp-theme'] (values light|dark|auto, also UIStateService-synced)
+    and is applied pre-paint by an app-local, localStorage-only admin-theme.js. All of
+    it is same-origin to prod.yourapp.com. Keycloak runs on auth.yourapp.com - a different
+    origin that cannot read that localStorage, and the shell's THEME_CHANGED postMessage
+    never reaches a top-level Keycloak navigation - so a dark-mode user would hit a light
+    Keycloak page. Decision (parity architecture): (1) the app mirrors the preference
+    into a cookie scoped to Domain=.yourapp.com (name yourapp-theme; value = mode; SameSite=
+    Lax; Secure; not HttpOnly; ~1y) written at the single choke point setTheme(); (2) a
+    dependency-free, CSP-safe pre-paint theme-init.js published on static.yourapp.com reads
+    cookie -> localStorage -> prefers-color-scheme, resolves auto, and sets data-bs-theme
+    before first paint (external script => no inline-script/nonce needed under Keycloak's
+    strict CSP); (3) the auth-card styles (.auth-card/.idp-button/.divider/.brand-logo),
+    today in app-local frontend/static/app.css, are promoted to the CDN (they already use
+    --bs-* tokens, so they dark-mode automatically) so one source drives both surfaces.
+    IDP-side: add static.yourapp.com to the realm CSP (script-src/style-src/font-src) and
+    bundle the brand logo (apps/frontend/logo.png) into the theme JAR. Verified 2026-07-11:
+    custom.css and all component CSS have zero @font-face (system font stack) and the
+    reference pages load icon fonts from public CDNs (jsdelivr/cdnjs), so no CORS change
+    is needed on static.yourapp.com PROVIDED the theme sources icons from those same public
+    CDNs and does not self-host from static.yourapp.com/icons (the CDN sets no CORS headers).
+    The cookie carries only a non-sensitive UI preference (SECRET_HANDLING.md). Full
+    requirements + acceptance criteria: specs/keycloak-theme-parity-requirements.md.
+  files:
+    - "specs/keycloak-theme-parity-requirements.md"
+    - "specs/keycloak-themeing-guide.md"
