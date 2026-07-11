@@ -1,114 +1,120 @@
 apiVersion: serving.knative.dev/v1
-kind: Revision
+kind: Service
 metadata:
-  name: knobbyauth-00020-p6v
+  name: knobbyauth
   namespace: 871965503155
-  selfLink: /apis/serving.knative.dev/v1/namespaces/871965503155/revisions/knobbyauth-00020-p6v
-  uid: 8ce65350-15d3-4965-984b-c7cf24b1fb8d
-  resourceVersion: AAZT4BZTvcw
-  generation: 1
-  creationTimestamp: "2026-06-10T06:08:21.241546Z"
+  selfLink: /apis/serving.knative.dev/v1/namespaces/871965503155/services/knobbyauth
+  uid: 4805a74a-95e2-481d-abcf-a3a72e302867
+  resourceVersion: AAZWToOgek0
+  generation: 42
+  creationTimestamp: "2026-05-25T17:03:15.280797Z"
   labels:
-    client.knative.dev/nonce: 9b5995d0-8756-425b-bf10-0ace12898ee8
-    serving.knative.dev/configuration: knobbyauth
-    serving.knative.dev/configurationGeneration: 20
-    serving.knative.dev/service: knobbyauth
-    serving.knative.dev/serviceUid: 4805a74a-95e2-481d-abcf-a3a72e302867
-    serving.knative.dev/route: knobbyauth
     run.googleapis.com/satisfiesPzs: "true"
     cloud.googleapis.com/location: asia-southeast1
-    run.googleapis.com/startupProbeType: Custom
   annotations:
-    autoscaling.knative.dev/maxScale: 1
-    autoscaling.knative.dev/minScale: 1
-    run.googleapis.com/client-name: cloud-console
-    run.googleapis.com/execution-environment: gen2
     serving.knative.dev/creator: priyavijai.kalyan2007@proton.me
-    run.googleapis.com/operation-id: ce5d9ff0-2173-4179-9ff6-132f535e7474
-    run.googleapis.com/startup-cpu-boost: "true"
-  ownerReferences:
-  - kind: Configuration
-    name: knobbyauth
-    uid: f681709d-ef2d-4152-99ef-0a627455472c
-    apiVersion: serving.knative.dev/v1
-    controller: true
-    blockOwnerDeletion: true
+    serving.knative.dev/lastModifier: priyavijai.kalyan2007@proton.me
+    run.googleapis.com/client-name: cloud-console
+    run.googleapis.com/operation-id: 80cd5048-57e3-4067-9d25-2d85b53582f3
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+    run.googleapis.com/invoker-iam-disabled: "true"
+    run.googleapis.com/maxScale: 1
+    run.googleapis.com/urls: "[\"https://knobbyauth-871965503155.asia-southeast1.run.app\"\
+      ,\"https://knobbyauth-5qvdsp73la-as.a.run.app\"]"
 spec:
-  containerConcurrency: 10
-  timeoutSeconds: 300
-  # RT-004: replace the default compute SA (over-privileged, shared across
-  # workloads) with a dedicated least-privilege runtime SA. If Keycloak or its
-  # container is compromised, the blast radius is then only the two secrets it
-  # actually needs, not project-wide compute IAM. One-time setup:
-  #
-  #   PROJECT=stellar-zoo-478023-v4
-  #   gcloud iam service-accounts create keycloak-runner \
-  #     --project="$PROJECT" --display-name="Keycloak Cloud Run runtime"
-  #   SA="keycloak-runner@${PROJECT}.iam.gserviceaccount.com"
-  #   # grant secretAccessor on ONLY the secrets it reads (per-secret, not project-wide):
-  #   for S in knobby-keycloak-db-password-prod knobby-mcp-handoff-hmac-key-knobby-prod; do
-  #     gcloud secrets add-iam-policy-binding "$S" --project="$PROJECT" \
-  #       --member="serviceAccount:${SA}" --role="roles/secretmanager.secretAccessor"
-  #   done
-  #   # then set it below and redeploy; afterwards remove broad roles from the
-  #   # default compute SA (871965503155-compute@developer.gserviceaccount.com).
-  #
-  # serviceAccountName: keycloak-runner@stellar-zoo-478023-v4.iam.gserviceaccount.com
-  serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
-  containers:
-  - name: keycloak-1
-    image: asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak@sha256:4fe81bb20107f175f59d8fe04833336465ffe2ad05655cf0cb52985fd1b01c52
-    ports:
-    - name: http1
-      containerPort: 8080
-    env:
-    - name: KC_DB
-      value: postgres
-    - name: KC_DB_URL
-      value: jdbc:postgresql://ep-solitary-bar-aodntij6-pooler.c-2.ap-southeast-1.aws.neon.tech/neondb?user=neondb_owner&sslmode=require&channelBinding=require
-    - name: KC_DB_USERNAME
-      value: neondb_owner
-    - name: KC_HOSTNAME
-      value: auth.knobby.io
-    - name: KC_HOSTNAME_STRICT
-      value: "true"
-    - name: KC_HTTP_ENABLED
-      value: "true"
-    - name: KC_PROXY_HEADERS
-      value: xforwarded
-    - name: KC_HEALTH_ENABLED
-      value: "true"
-    - name: KC_METRICS_ENABLED
-      value: "true"
-    # RT-003: bootstrap admin credentials removed from steady-state runtime. They
-    # are only needed for the very first admin creation on an empty database; a real
-    # admin now exists. Keycloak also REJECTS a username without a password
-    # ("bootstrap-admin-username available only when bootstrap admin password is
-    # set"), so both KC_BOOTSTRAP_ADMIN_USERNAME and KC_BOOTSTRAP_ADMIN_PASSWORD must
-    # be removed together (never one alone). Delete/rotate the
-    # knobby-keycloak-bootstrap-password secret after this is deployed.
-    - name: KC_CACHE
-      value: local
-    - name: KC_DB_PASSWORD
-      valueFrom:
-        secretKeyRef:
-          key: latest
-          name: knobby-keycloak-db-password-prod
-    - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD
-      valueFrom:
-        secretKeyRef:
-          key: latest
-          name: knobby-mcp-handoff-hmac-key-knobby-prod
-    resources:
-      limits:
-        cpu: 1000m
-        memory: 512Mi
-    startupProbe:
-      initialDelaySeconds: 30
-      timeoutSeconds: 240
-      periodSeconds: 240
-      failureThreshold: 5
-      httpGet:
-        path: /health/ready
-        port: 9000
-
+  template:
+    metadata:
+      labels:
+        client.knative.dev/nonce: 3a80f882-e1fe-44eb-9a31-cdc5d4112d8b
+        run.googleapis.com/startupProbeType: Custom
+      annotations:
+        autoscaling.knative.dev/maxScale: 1
+        run.googleapis.com/client-name: cloud-console
+        run.googleapis.com/execution-environment: gen2
+        autoscaling.knative.dev/minScale: 1
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/startup-cpu-boost: "true"
+    spec:
+      containerConcurrency: 10
+      timeoutSeconds: 300
+      serviceAccountName: 871965503155-compute@developer.gserviceaccount.com
+      containers:
+      - name: keycloak-1
+        image: asia-southeast1-docker.pkg.dev/stellar-zoo-478023-v4/idp/keycloak@sha256:6e40bef20ba227f2fa27c97509978ad6a407bf59d4cae130a2368807b170ea78
+        ports:
+        - name: http1
+          containerPort: 8080
+        env:
+        - name: KC_DB
+          value: postgres
+        - name: KC_DB_URL
+          value: jdbc:postgresql://aws-1-ap-southeast-1.pooler.supabase.com:5432/postgres?sslmode=require&prepareThreshold=0
+        - name: KC_DB_USERNAME
+          value: postgres.wsnwigozdnrznfrklamg
+        - name: KC_HOSTNAME
+          value: auth.knobby.io
+        - name: KC_HOSTNAME_STRICT
+          value: "true"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_PROXY_HEADERS
+          value: xforwarded
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        - name: KC_METRICS_ENABLED
+          value: "true"
+        - name: KC_CACHE
+          value: local
+        - name: KC_DB_POOL_MAX_SIZE
+          value: 8
+        - name: KC_DB_POOL_INITIAL_SIZE
+          value: 2
+        - name: KC_DB_POOL_MIN_SIZE
+          value: 2
+        - name: KC_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: knobby-keycloak-db-password-prod
+        - name: KNOBBY_MCP_HANDOFF_HMAC_KEY__KNOBBY_PROD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: knobby-mcp-handoff-hmac-key-prod
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        startupProbe:
+          initialDelaySeconds: 30
+          timeoutSeconds: 240
+          periodSeconds: 240
+          failureThreshold: 5
+          httpGet:
+            path: /health/ready
+            port: 9000
+  traffic:
+  - percent: 100
+    latestRevision: true
+status:
+  observedGeneration: 42
+  conditions:
+  - type: Ready
+    status: "True"
+    lastTransitionTime: "2026-07-11T04:44:36.034125Z"
+  - type: ConfigurationsReady
+    status: "True"
+    lastTransitionTime: "2026-07-11T04:44:01.811246Z"
+  - type: RoutesReady
+    status: "True"
+    lastTransitionTime: "2026-07-11T04:44:35.963912Z"
+  latestReadyRevisionName: knobbyauth-00039-nks
+  latestCreatedRevisionName: knobbyauth-00039-nks
+  traffic:
+  - revisionName: knobbyauth-00039-nks
+    percent: 100
+    latestRevision: true
+  url: https://knobbyauth-5qvdsp73la-as.a.run.app
+  address:
+    url: https://knobbyauth-5qvdsp73la-as.a.run.app
