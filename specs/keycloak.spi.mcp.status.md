@@ -4,9 +4,11 @@
 
 Companion to `keycloak.spi.mcp.md` (design spec, v0.4) and `keycloak.prd.md` §16. This file is the **per-application implementation tracker** required by `AGENTS.md`. It captures the slice roadmap, cross-cutting design decisions, and the detailed Plan for the current slice. Update as slices land.
 
-**Current status:** All six slices complete; SPI is deployable. `./test.sh` green with zero JVM warnings (108 unit + 1 IT, ~ 46s). `./build.sh` produces three tags (`keycloak:local`, `<registry>:YYYYMMDDhhmmss-<commit>`, `<registry>:latest`) with the SPI JAR baked into `/opt/keycloak/providers/` and OCI labels stamped. Knowledge base + insights + tech debt docs in place. All ten AGENTS.md-required scripts present. Ready to commit and push to `main`.
+**Current status:** All six slices complete; SPI is deployable and in production. `./test.sh` green with zero JVM warnings (**147 unit + 3 IT** as of 2026-07-11). `./build.sh` produces three tags (`keycloak:local`, `<registry>:YYYYMMDDhhmmss-<commit>`, `<registry>:latest`) with the SPI JAR baked into `/opt/keycloak/providers/` and OCI labels stamped. Knowledge base + insights + tech debt docs in place. All AGENTS.md-required scripts present.
 
-**Today:** 2026-06-09.
+> **⚠️ Superseded content below.** The slice tables, package trees, class signatures, and dependency lists in §§2, 4–7 describe the design **as of slice 1 (2026-06)** and are retained as the historical build record. Since then the design evolved through the ERRATA-001…007 and red-team (RT-001…014) tracks — the living sources of truth are `agentknowledge/decisions.yaml` (ADRs 001–019), `CONVERSATION.md`, `agentknowledge/history.jsonl`, and `specs/security-red-team-report-2026-07-04.md`. Most notably, **`ReplayCache` was removed in RT-010/ADR-019**: replay defence is now a caller-supplied `ReplayGuard` seam backed in production by Keycloak's distributed `SingleUseObjectProvider`, so wherever this file names `ReplayCache`, read `ReplayGuard` + `SingleUseObjectProvider`.
+
+**Today:** 2026-06-09 (header); last reconciled 2026-07-11.
 
 ---
 
