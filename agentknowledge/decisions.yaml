@@ -474,3 +474,35 @@
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/authenticator/McpTenantPickerAuthenticator.java"
     - "src/providers/src/main/java/io/yourapp/keycloak/mcp/util/ReplayCache.java"
     - "specs/security-red-team-report-2026-07-04.md"
+
+- id: "ADR-019"
+  title: "Replace the custom in-memory ReplayCache with Keycloak's distributed SingleUseObjectProvider (RT-010)"
+  date: "2026-07-11"
+  status: "Accepted"
+  context: >-
+    The picker-result replay guard was a custom per-JVM in-memory ReplayCache
+    (LinkedHashMap). At Cloud Run maxScale=1 it worked, but that made maxScale=1 a
+    SECURITY INVARIANT (a scaled-out or freshly-restarted instance could accept a
+    replayed picker-result within the token TTL) - a latent footgun (RT-010 in the
+    red-team report). Keycloak already ships the exact primitive we need:
+    SingleUseObjectProvider (session.singleUseObjects()), an Infinispan-backed,
+    TTL-aware, restart-durable single-use store used for its own action tokens, with
+    putIfAbsent(key, lifespanSeconds) returning true on first use / false on replay.
+    Decision: introduce a ReplayGuard functional interface (firstUse(jti,
+    lifespanSeconds) -> boolean) passed PER CALL to HandoffTokenValidator.validate-
+    PickerResult; the production McpPickerCallbackResourceProvider builds it from its
+    request session as (jti, ttl) -> session.singleUseObjects().putIfAbsent(
+    "mcp.picker.result."+jti, ttl) with lifespan = max(1, token.exp - now); tests pass
+    an in-memory ReplayGuard. Per-call (not constructor) injection is required because
+    singleUseObjects is per-KeycloakSession while the validator is a JVM singleton.
+    Deleted ReplayCache + ReplayCacheTest. Effect: replay defense is now cluster-wide
+    and restart-durable, and maxScale=1 is no longer a security invariant (it stays a
+    perf/cost choice). API verified via javap vs 26.6.4 (SingleUseObjectProvider.put-
+    IfAbsent(String,long):boolean; KeycloakSession.singleUseObjects()). 147 unit + 3 IT
+    green. Supersedes the consent/replay portion of the spec 6.5 and closes RT-010.
+  files:
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/util/ReplayGuard.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/jwt/HandoffTokenValidator.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProvider.java"
+    - "src/providers/src/main/java/io/yourapp/keycloak/mcp/resource/McpPickerCallbackResourceProviderFactory.java"
+    - "specs/keycloak.spi.mcp.md"

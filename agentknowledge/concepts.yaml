@@ -24,7 +24,7 @@
   related: ["McpHandoffJwt", "HmacKeyRotation"]
 
 - name: "HandoffTokenValidator"
-  definition: "Validates incoming picker_result JWTs against the active realm's current (and optional previous, during rotation) HMAC key. Checks signature via Keycloak's HMACProvider, then iss/aud/exp/iat claims, then consumes the jti via ReplayCache. Cross-realm replay defeats at the signature step because each realm holds a distinct HMAC key."
+  definition: "Validates incoming picker_result JWTs against the active realm's current (and optional previous, during rotation) HMAC key. Checks signature via Keycloak's HMACProvider, then iss/aud/exp/iat claims, then consumes the jti via a caller-supplied ReplayGuard (RT-010/ADR-019 — the callback backs it with Keycloak's distributed SingleUseObjectProvider; the guard's lifespan is the token's remaining time-to-exp so entries self-expire). Cross-realm replay defeats at the signature step because each realm holds a distinct HMAC key."
   anchor_file: "src/providers/src/main/java/io/yourapp/keycloak/mcp/jwt/HandoffTokenValidator.java"
   related: ["McpHandoffJwt", "McpSpiConfig", "McpPickerCallbackResourceProvider"]
 

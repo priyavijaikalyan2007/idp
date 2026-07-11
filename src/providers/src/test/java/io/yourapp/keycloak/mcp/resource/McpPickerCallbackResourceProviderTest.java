@@ -32,6 +32,7 @@ import org.keycloak.models.ClientScopeModel;
 import org.keycloak.models.KeycloakContext;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.models.SingleUseObjectProvider;
 import org.keycloak.models.UserModel;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
 import org.keycloak.services.managers.AuthenticationSessionManager;
@@ -42,13 +43,14 @@ import io.yourapp.keycloak.mcp.config.McpSpiConfig;
 import io.yourapp.keycloak.mcp.jwt.HandoffTokenSigner;
 import io.yourapp.keycloak.mcp.jwt.HandoffTokenValidator;
 import io.yourapp.keycloak.mcp.jwt.PickerResultToken;
-import io.yourapp.keycloak.mcp.util.ReplayCache;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -69,6 +71,7 @@ class McpPickerCallbackResourceProviderTest
     @Mock private AuthenticationSessionModel authSession;
     @Mock private AuthenticationSessionManager sessionManager;
     @Mock private ClientScopeModel scopeMock;
+    @Mock private SingleUseObjectProvider singleUseObjects;
 
     private HandoffTokenSigner signer;
     private HandoffTokenValidator validator;
@@ -82,12 +85,16 @@ class McpPickerCallbackResourceProviderTest
         McpSpiConfig config = new McpSpiConfig(env::get, () -> env);
         signer = new HandoffTokenSigner(config);
         Clock clock = Clock.fixed(Instant.ofEpochSecond(T0), ZoneOffset.UTC);
-        ReplayCache replayCache = new ReplayCache(clock);
-        validator = new HandoffTokenValidator(config, replayCache, clock);
+        validator = new HandoffTokenValidator(config, clock);
 
         when(keycloakSession.getContext()).thenReturn(keycloakContext);
         when(keycloakContext.getRealm()).thenReturn(realm);
         when(realm.getName()).thenReturn("yourapp-prod");
+
+        // RT-010: replay defense is the provider's ReplayGuard over
+        // session.singleUseObjects(). Default: firstUse succeeds (jti unseen).
+        when(keycloakSession.singleUseObjects()).thenReturn(singleUseObjects);
+        when(singleUseObjects.putIfAbsent(anyString(), anyLong())).thenReturn(true);
 
         // Defaults so happy-path tests satisfy the RT-008/009 checks. The valid
         // result echoes picker_request_jti=req-jti-1, oauth_state=oauth-state-xyz,
@@ -175,8 +182,10 @@ class McpPickerCallbackResourceProviderTest
     void handleCallback_replay_returns400InvalidHandoffReplay()
     {
         String jwt = signer.sign(validResultBuilder().build(), "yourapp-prod");
+        // The single-use store accepts the jti once, then reports it present.
+        when(singleUseObjects.putIfAbsent(anyString(), anyLong())).thenReturn(true, false);
 
-        // First call consumes the jti via the validator's ReplayCache.
+        // First call consumes the jti via session.singleUseObjects().
         provider.handleCallback(jwt);
 
         // Second call with the same token must be rejected as a replay.
@@ -196,7 +205,7 @@ class McpPickerCallbackResourceProviderTest
         Map<String, String> emptyEnv = new HashMap<>();
         McpSpiConfig emptyConfig = new McpSpiConfig(emptyEnv::get, () -> emptyEnv);
         HandoffTokenValidator badValidator = new HandoffTokenValidator(emptyConfig,
-                new ReplayCache(), Clock.fixed(Instant.ofEpochSecond(T0), ZoneOffset.UTC));
+                Clock.fixed(Instant.ofEpochSecond(T0), ZoneOffset.UTC));
         McpPickerCallbackResourceProvider badProvider =
                 new McpPickerCallbackResourceProvider(keycloakSession, badValidator,
                         s -> sessionManager, (s, r, a) -> MOCK_RESUME_URI);

@@ -14,20 +14,20 @@ Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md`
 |---|---|---|
 | RT-001 | ✅ Fixed | Keycloak 26.6.0 → **26.6.4**; base image now **digest-pinned** (TD-007). |
 | RT-002 | ✅ Confirmed | `keycloak_neon.dump` deleted from the workspace (owner-confirmed). |
-| RT-003 | ✅ Code done / ⏳ deploy | Both `KC_BOOTSTRAP_ADMIN_*` removed from `cloudrun.yaml` + smoke Test 30; operator to redeploy & rotate the bootstrap secret. |
+| RT-003 | ✅ Fixed | Both `KC_BOOTSTRAP_ADMIN_*` removed from `cloudrun.yaml` (owner redeployed; service healthy) + smoke Test 30. |
 | RT-004 | ⏳ Ops | Runbook in setup guide **A.4** (real secret names, swap + redeploy steps); operator creates the `keycloak-runner` SA + IAM and swaps it in for the default compute SA. |
 | RT-005 | ✅ Fixed | Trusted Hosts ON; B1/AllowedGrantTypes shipped; **Allowed Protocol Mapper Types applied** (setup guide F.2 — owner-confirmed). Optional remaining: negative regression smoke tests (attacker-domain redirect / non-whitelisted mapper). |
 | RT-006 | ✅ Ops (owner) | Cloudflare thin proxy + WAF — owner reports done. |
 | RT-007 | ✅ Fixed | D.4 type → `None`, E.2 checklist corrected, smoke guard (web client must not carry `mcp-default`). |
 | RT-008 | ✅ Fixed | Request↔result binding: `picker_request_jti` + `oauth_state` matched to server state; tenant-id format-validated (ADR-018). |
 | RT-009 | ✅ Fixed | `granted_scopes` subset-validated against the client's assigned scopes (ADR-018). |
-| RT-010 | 🟡 Mitigated | `maxScale=1` invariant + startup warning; externalize before scale-out. |
+| RT-010 | ✅ Fixed | Replaced the custom in-memory replay cache with Keycloak's distributed `SingleUseObjectProvider` (ADR-019) — cluster-wide + restart-durable; `maxScale=1` is no longer a security invariant. |
 | RT-011 | ✅ Fixed | `yourapp.web.host` strict validation + per-realm allowlist, fail-closed (ADR-018). |
 | RT-012 | ✅ Reconciled | `manage-clients` no longer on the MCP critical path (CRP provisions); split-by-duty recommended. |
 | RT-013 | ✅ Fixed | Dependabot: Docker + Maven + GitHub Actions. |
 | RT-014 | ✅ Fixed | `SECURITY.md` rewritten for the IdP. |
 
-**Remaining = operator actions:** RT-003 redeploy + secret rotation, RT-004 create the dedicated SA. Accepted deferrals: RT-005 (Allowed Protocol Mapper Types), RT-010 (externalized replay store, gated by `maxScale=1`).
+**Remaining = operator action:** RT-004 (create the dedicated `keycloak-runner` SA + swap it in — runbook in setup guide A.4). Everything else is closed.
 
 ---
 

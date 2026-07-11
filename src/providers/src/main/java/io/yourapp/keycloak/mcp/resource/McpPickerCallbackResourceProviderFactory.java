@@ -12,11 +12,11 @@
  * ⚓ COMPONENT: McpPickerCallbackResourceProviderFactory
  * 📜 PURPOSE: Keycloak SPI factory for McpPickerCallbackResourceProvider.
  *             Mounts the callback at /realms/{realm}/mcp-picker-callback.
- *             Owns the singleton McpSpiConfig + ReplayCache + HandoffToken-
- *             Validator (per-realm key cache + replay defence survive across
- *             requests).
+ *             Owns the singleton McpSpiConfig + HandoffTokenValidator (per-realm
+ *             key cache survives across requests). Replay defence is per-request
+ *             via Keycloak's SingleUseObjectProvider (RT-010), not owned here.
  * 🔗 RELATES: [[McpPickerCallbackResourceProvider]], [[McpSpiConfig]],
- *             [[HandoffTokenValidator]], [[ReplayCache]]
+ *             [[HandoffTokenValidator]]
  * ⚡ FLOW: [Keycloak SPI loader] -> [this.init / create]
  *         -> [Resource provider instances]
  * 🛡️ SECURITY: PROVIDER_ID component appears in the URL — keep stable; any
@@ -33,7 +33,6 @@ import org.keycloak.services.resource.RealmResourceProviderFactory;
 
 import io.yourapp.keycloak.mcp.config.McpSpiConfig;
 import io.yourapp.keycloak.mcp.jwt.HandoffTokenValidator;
-import io.yourapp.keycloak.mcp.util.ReplayCache;
 
 /**
  * Single instance per Keycloak JVM. Resulting URL:
@@ -65,8 +64,9 @@ public final class McpPickerCallbackResourceProviderFactory
     public void init(Config.Scope config)
     {
         McpSpiConfig spiConfig = new McpSpiConfig();
-        ReplayCache replayCache = new ReplayCache();
-        this.validator = new HandoffTokenValidator(spiConfig, replayCache);
+        // RT-010: replay defense is the per-request ReplayGuard the provider builds
+        // from session.singleUseObjects() (distributed) — no in-memory cache here.
+        this.validator = new HandoffTokenValidator(spiConfig);
     }
 
     @Override

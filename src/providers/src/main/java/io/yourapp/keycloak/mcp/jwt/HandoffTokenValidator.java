@@ -12,15 +12,16 @@
  * ⚓ COMPONENT: HandoffTokenValidator
  * 📜 PURPOSE: Verifies a picker-result JWT against the active realm's HMAC
  *             key (accepting the previous key during rotation overlap),
- *             checks iss/aud/exp/iat claims, consumes the jti via ReplayCache,
+ *             checks iss/aud/exp/iat claims, consumes the jti via a ReplayGuard,
  *             and returns the parsed PickerResultToken.
- * 🔗 RELATES: [[HandoffTokenSigner]], [[McpSpiConfig]], [[ReplayCache]],
+ * 🔗 RELATES: [[HandoffTokenSigner]], [[McpSpiConfig]], [[ReplayGuard]],
  *             [[HandoffValidationException]], [[McpPickerCallbackResourceProvider]]
  * ⚡ FLOW: [McpPickerCallbackResourceProvider] -> [this.validatePickerResult]
- *         -> [HMACProvider.verify | ReplayCache.tryConsume]
+ *         -> [HMACProvider.verify | ReplayGuard.firstUse]
  * 🛡️ SECURITY: Constant-time signature comparison via HMACProvider. Cross-realm
- *              replay rejected at signature step (per-realm keys). Replay cache
- *              prevents reuse within validity window.
+ *              replay rejected at signature step (per-realm keys). The ReplayGuard
+ *              (production: Keycloak's distributed SingleUseObjectProvider)
+ *              prevents reuse within the validity window, cluster-wide (RT-010).
  * ----------------------------------------------------------------------------
  */
 package io.yourapp.keycloak.mcp.jwt;
@@ -38,15 +39,16 @@ import org.keycloak.jose.jws.crypto.HMACProvider;
 
 import io.yourapp.keycloak.mcp.config.McpSpiConfig;
 import io.yourapp.keycloak.mcp.jwt.HandoffValidationException.Code;
-import io.yourapp.keycloak.mcp.util.ReplayCache;
+import io.yourapp.keycloak.mcp.util.ReplayGuard;
 
 /**
  * Validates picker-result tokens. One instance per JVM; thread-safe.
  *
  * <p>Caches are populated lazily and never invalidated for the JVM's lifetime
  * — removing the previous-key env var coincides with a container redeploy
- * (Plan §3.5). The replay cache is a global ReplayCache across all realms;
- * UUID v4 jti collisions across realms are astronomically unlikely.
+ * (Plan §3.5). Replay defense is delegated to the {@link ReplayGuard} passed per
+ * call; UUID v4 jti collisions across realms are astronomically unlikely, and the
+ * caller namespaces the single-use key.
  *
  * <p>Expected issuer / audience strings are constants per the design spec
  * (§6.2). Clock skew tolerance is {@value #CLOCK_SKEW_SECONDS} seconds for
@@ -61,22 +63,20 @@ public final class HandoffTokenValidator
     static final long CLOCK_SKEW_SECONDS = 60L;
 
     private final McpSpiConfig config;
-    private final ReplayCache replayCache;
     private final Clock clock;
     private final ConcurrentMap<String, byte[]> currentKeyByRealm;
     private final ConcurrentMap<String, Optional<byte[]>> previousKeyByRealm;
 
     /** Production constructor: uses the system UTC clock. */
-    public HandoffTokenValidator(McpSpiConfig config, ReplayCache replayCache)
+    public HandoffTokenValidator(McpSpiConfig config)
     {
-        this(config, replayCache, Clock.systemUTC());
+        this(config, Clock.systemUTC());
     }
 
     /** Test seam: inject a fixed clock for expiry / future-dated tests. */
-    public HandoffTokenValidator(McpSpiConfig config, ReplayCache replayCache, Clock clock)
+    public HandoffTokenValidator(McpSpiConfig config, Clock clock)
     {
         this.config = config;
-        this.replayCache = replayCache;
         this.clock = clock;
         this.currentKeyByRealm = new ConcurrentHashMap<>();
         this.previousKeyByRealm = new ConcurrentHashMap<>();
@@ -95,7 +95,8 @@ public final class HandoffTokenValidator
      * @throws io.yourapp.keycloak.mcp.config.McpSpiConfigException if the
      *     realm has no HMAC key configured.
      */
-    public PickerResultToken validatePickerResult(String jwt, String realmName)
+    public PickerResultToken validatePickerResult(
+            String jwt, String realmName, ReplayGuard replayGuard)
     {
         byte[] currentKey = currentKeyByRealm.computeIfAbsent(realmName, this::loadCurrentKey);
         Optional<byte[]> previousKey =
@@ -105,8 +106,9 @@ public final class HandoffTokenValidator
         verifySignatureOrThrow(input, currentKey, previousKey);
 
         PickerResultToken payload = readContentOrThrow(input);
-        verifyClaims(payload);
-        consumeJtiOrThrow(payload);
+        long now = Instant.now(clock).getEpochSecond();
+        verifyClaims(payload, now);
+        consumeJtiOrThrow(payload, now, replayGuard);
 
         return payload;
     }
@@ -149,7 +151,7 @@ public final class HandoffTokenValidator
         }
     }
 
-    private void verifyClaims(PickerResultToken payload)
+    private void verifyClaims(PickerResultToken payload, long now)
     {
         if (!EXPECTED_ISSUER.equals(payload.getIss()))
         {
@@ -159,7 +161,6 @@ public final class HandoffTokenValidator
         {
             throw new HandoffValidationException(Code.BAD_AUDIENCE);
         }
-        long now = Instant.now(clock).getEpochSecond();
         if (payload.getExp() < now)
         {
             throw new HandoffValidationException(Code.EXPIRED);
@@ -170,9 +171,12 @@ public final class HandoffTokenValidator
         }
     }
 
-    private void consumeJtiOrThrow(PickerResultToken payload)
+    private void consumeJtiOrThrow(PickerResultToken payload, long now, ReplayGuard replayGuard)
     {
-        if (!replayCache.tryConsume(payload.getJti(), payload.getExp()))
+        // Keep the single-use record alive at least as long as the token is valid,
+        // so a replay within its remaining lifetime is caught (min 1s).
+        long lifespanSeconds = Math.max(1L, payload.getExp() - now);
+        if (!replayGuard.firstUse(payload.getJti(), lifespanSeconds))
         {
             throw new HandoffValidationException(Code.REPLAY);
         }
