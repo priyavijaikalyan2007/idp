@@ -6,9 +6,9 @@
 **Reviewer role:** Red-team security lead  
 **Scope reviewed:** repository history, tracked files, local untracked artifacts, Keycloak setup guide, Cloud Run revision YAML, shell scripts, Dockerfile, Maven SPI build, MCP SPI Java implementation, smoke-test posture, deferred hardening registers, and current upstream Keycloak release/security status.
 
-## Remediation Status (updated 2026-07-09)
+## Remediation Status (updated 2026-07-11)
 
-Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md` (2026-07-07…09) and ADR-016/017/018.
+Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md` (2026-07-07...11) and ADR-016/017/018/019.
 
 | # | Status | Note |
 |---|---|---|
@@ -27,7 +27,18 @@ Reconciled against the codebase after the MCP hardening work. See `CHANGELOG.md`
 | RT-013 | ✅ Fixed | Dependabot: Docker + Maven + GitHub Actions. |
 | RT-014 | ✅ Fixed | `SECURITY.md` rewritten for the IdP. |
 
-**Remaining = none.** All 14 findings are closed; RT-004 (dedicated `keycloak-runner` SA) is deployed and now regression-guarded by smoke Tests 31–32.
+**Original RT-001 through RT-014 = closed.** RT-004 (dedicated `keycloak-runner` SA) is deployed and now regression-guarded by smoke Test 31; RT-005 attacker-domain DCR rejection is guarded by smoke Test 32.
+
+### Exploratory Follow-Up (2026-07-11)
+
+The later live exploratory pass against `https://auth.knobby.io` found no unauthenticated token issuance, admin-data access, DCR redirect bypass, OAuth grant bypass, or exposed health/metrics endpoint. It did identify two edge-hardening items that require operator configuration rather than SPI code changes.
+
+| # | Status | Note |
+|---|---|---|
+| EX-001 | ⚠️ Operator action pending | Public `/admin/*` and `/realms/master/*` surfaces are reachable. Protect with Cloudflare Access or equivalent WAF/IP policy. Detailed steps: `specs/keycloak-security-hardening.md`. |
+| EX-002 | ⚠️ Operator action pending | CORS preflight reflects arbitrary origins with credentials on some Keycloak endpoints. No unauthenticated data access was found, but admin/master edge protection and explicit Web Origins are required. Detailed steps: `specs/keycloak-security-hardening.md`. |
+
+The original findings below are retained for provenance. Treat the remediation table and exploratory follow-up above as the current state.
 
 ---
 

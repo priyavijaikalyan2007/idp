@@ -17,9 +17,10 @@
  *             configured default + optional MCP client scopes (removing any
  *             DCR-prebound binding first so default/optional placement is
  *             authoritative — ERRATA-006), (3) binds the browser flow override to
- *             browser-mcp-tenant-pick, and (4) sets consentRequired=false so the
- *             knobby /mcp/consent wizard is the sole consent surface. Because the
- *             mutations share the registration transaction, the client either
+ *             browser-mcp-tenant-pick, and (4) sets consentRequired=false as a
+ *             belt-and-suspenders default. The authoritative double-consent fix is
+ *             removing consent-required from the MCP DCR config (ADR-016). Because
+ *             the mutations share the registration transaction, the client either
  *             registers fully-marked or the registration rolls back — no partial
  *             states, so no reconciliation logic is needed. beforeRegister /
  *             beforeUpdate additionally REJECT any client requesting a non-
@@ -127,7 +128,7 @@ public final class McpClientRegistrationPolicy implements ClientRegistrationPoli
 
         log.infof("Marked MCP client at registration client=%s realm=%s "
                 + "(attribute + %d default / %d optional scopes + browser flow "
-                + "+ consent suppressed)",
+                + "+ consent default set)",
                 client.getClientId(), realm.getName(),
                 defaultScopes().size(), optionalScopes().size());
 

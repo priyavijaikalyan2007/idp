@@ -329,6 +329,8 @@ Migration when needed: export realms, stand up VM per Option B, import realms, r
 
 **Recommended posture for an IdP behind Cloudflare:** thin proxy — DNS proxy on (DDoS/TLS) but **Rocket Loader, Auto Minify, aggressive Bot Fight Mode OFF**, and rate-limits scoped narrowly to abuse-prone endpoints rather than blanket. Keycloak's admin console and asset pipeline don't tolerate Cloudflare's content optimizations. (knobby-prod currently runs `auth.knobby.io` **DNS-only** after this incident — the simplest safe posture pre-PMF.)
 
+**Public admin/master hardening:** before broad publication, protect `/admin/*` and `/realms/master/*` at the edge with Cloudflare Access or an equivalent WAF rule, and review browser-origin/CORS behavior. The detailed operator steps and verification commands live in `specs/keycloak-security-hardening.md`.
+
 ## A.12 Observability — metrics into Grafana Cloud (or GCP)
 
 > **Status:** operational hardening, not launch-blocking. But the DB-pool metric alone would have turned two multi-session debugging incidents (prepared-statement 500s, pool exhaustion) into a single glance at a graph — so it earns its place early.
@@ -1066,6 +1068,7 @@ Cannot run until Knobby web's `/mcp/consent` sub-app is deployed. When ready, ru
 - [ ] All secrets in Secret Manager.
 - [ ] (Option B only) UFW enabled; SSH password auth disabled; unattended-upgrades enabled.
 - [ ] DNS resolves; TLS valid.
+- [ ] Public admin/master surfaces protected per `specs/keycloak-security-hardening.md` (`/admin/*` and `/realms/master/*` are not public to unauthorised users).
 - [ ] Uptime check hits `/realms/knobby-prod/.well-known/openid-configuration`.
 - [ ] Runbook in `/docs/ops/keycloak-runbook.md` covers chosen path, secrets location, admin access, credential rotation, restore, version upgrade.
 - [ ] `./smoke.sh` Tests 1–13 all green.

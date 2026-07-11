@@ -255,3 +255,13 @@ Live GCP read-only check: active `gcloud` account is `priyavijai.kalyan2007@prot
 **KC-SERVICES0047.** Explained as benign: Keycloak flags four SPIs (`realm-restapi-extension`, `protocol-mapper`, `authenticator`, `client-registration-policy`) as "internal … may change without notice" whenever a third-party (`io.knobby.*`) provider binds them. Expected for our SPIs; no action.
 
 **Closeout (this session).** Reconciled the remaining housekeeping artifacts to the RT-010 file swap: `TECH_DEBT.md` TD-006 (drop the deleted `ReplayCache` from the concept-gap list, note the `ReplayGuard` seam), `specs/keycloak.spi.mcp.status.md` (current-status header refreshed to 147/3 + a superseded-content banner mapping `ReplayCache` → `ReplayGuard`/`SingleUseObjectProvider`), and this log. Confirmed `ReplayGuard.java` carries the copyright/SPDX header + full marker block. Open thread (not yet accepted by the user): triage the 3 moderate Dependabot alerts on `main`.
+
+---
+
+## 2026-07-11 (cont.) — Post-remediation endpoint hardening instructions
+
+**Request.** After the live exploratory scan, the user clarified: ignore the stale checked-in `cloudrun.yaml` because they will redownload it and keep it as a repave reference; fix the documentation/knowledge drift; and for the public admin/master exposure plus permissive CORS findings, write detailed setup instructions into `specs/keycloak-security-hardening.md` or `specs/keycloak-setup-guide.md`.
+
+**Action.** Left `cloudrun.yaml` untouched. Added `specs/keycloak-security-hardening.md`, a dedicated operator runbook for protecting `https://auth.knobby.io/admin/*` and `/realms/master/*` with Cloudflare Access or equivalent WAF rules, reviewing Keycloak Web Origins, and validating CORS behavior without breaking the public `knobby-prod` OIDC endpoints. Linked it from setup guide A.11 and the infrastructure checklist so a future repave does not miss the edge policy.
+
+**Drift fixed.** Corrected active knowledge/docs that still implied the CRP's `setConsentRequired(false)` overrides `consent-required`: `agentknowledge/concepts.yaml`, `AGENT_INSIGHTS.md`, SPI design pseudocode, and the `McpClientRegistrationPolicy` marker/log wording now say the setter is only belt-and-suspenders and the authoritative fix is removing the `consent-required` executor/CRP from MCP DCR configuration. The `McpClientRegistrationPolicy` concept now also reflects shipped `beforeRegister`/`beforeUpdate` grant-type rejection. Updated the red-team report so RT-001 through RT-014 remain closed, while the new exploratory items EX-001 (admin/master edge protection) and EX-002 (CORS/browser-origin hardening) are tracked as operator-action pending rather than hidden behind "remaining none." Updated the changelog accordingly.
