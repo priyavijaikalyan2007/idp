@@ -175,19 +175,31 @@ echo -n "YOUR_GOOGLE_CLIENT_SECRET" | gcloud secrets create google-oauth-client-
 
 ## A.4 Runtime service account
 
-```bash
-gcloud iam service-accounts create keycloak-runner --display-name="Keycloak Cloud Run runtime"
-SA="keycloak-runner@$(gcloud config get-value project).iam.gserviceaccount.com"
+⚠️ **RT-004 (red-team): prod currently runs on the default compute SA** (`<project-number>-compute@developer.gserviceaccount.com`), which is over-privileged and shared across workloads — if Keycloak or its container is compromised, the attacker inherits all of its project IAM. Replace it with a **dedicated least-privilege** runtime SA that can read **only** the two secrets Keycloak actually mounts.
 
-for SECRET in keycloak-db-password keycloak-bootstrap-password google-oauth-client-secret; do
-  gcloud secrets add-iam-policy-binding "$SECRET" \
+```bash
+PROJECT=stellar-zoo-478023-v4        # prod
+gcloud iam service-accounts create keycloak-runner \
+  --project="$PROJECT" --display-name="Keycloak Cloud Run runtime"
+SA="keycloak-runner@${PROJECT}.iam.gserviceaccount.com"
+
+# Grant secretAccessor on ONLY the secrets this service mounts (per-secret, not
+# project-wide). These are the exact names from cloudrun.yaml. Note: the bootstrap
+# password secret is intentionally NOT here — it was removed from runtime (RT-003).
+for SECRET in knobby-keycloak-db-password-prod knobby-mcp-handoff-hmac-key-prod; do
+  gcloud secrets add-iam-policy-binding "$SECRET" --project="$PROJECT" \
     --member="serviceAccount:$SA" --role="roles/secretmanager.secretAccessor"
 done
-
-# Cloud SQL only
-gcloud projects add-iam-policy-binding $(gcloud config get-value project) \
-  --member="serviceAccount:$SA" --role="roles/cloudsql.client"
 ```
+
+> No `roles/cloudsql.client` is needed — the DB is external Postgres (Supabase pooler over TLS), not Cloud SQL. No other project roles are required for steady-state runtime.
+
+**Then swap it in and redeploy:**
+1. In `cloudrun.yaml`, set `spec.template.spec.serviceAccountName: keycloak-runner@stellar-zoo-478023-v4.iam.gserviceaccount.com` (replacing the `…-compute@developer.gserviceaccount.com` value).
+2. `gcloud run services replace cloudrun.yaml --region=asia-southeast1 --project=stellar-zoo-478023-v4`
+3. Verify the service is healthy (`./smoke.sh`), then **review and strip broad roles from the default compute SA** so a future workload can't silently reuse them.
+
+> **⚠️ `cloudrun.yaml` is a live export** — re-exporting it (e.g. `gcloud run services describe … --format=export`) will overwrite the `serviceAccountName` and drop any comments. This runbook is the durable source of truth; re-apply the SA in the YAML after any re-export.
 
 ## A.5 Deploy
 
