@@ -15,6 +15,10 @@
 #     credential is the ADMIN_CLIENT_SECRET env var. No interactive login is
 #     required — this is service-to-service auth, the same path the knobby.io
 #     backend will use in production.
+#   - Optional Cloudflare Access edge gate: if auth.knobby.io /admin/* is
+#     protected by Cloudflare Access, set CF_ACCESS_CLIENT_ID and
+#     CF_ACCESS_CLIENT_SECRET to a Cloudflare Access service token. The script
+#     adds the CF-Access headers to curl without printing the secret.
 #   - GCP Secrets Manager (Test 9, prod/dev only): uses existing
 #     'gcloud auth login' session.
 #   - Azure / Microsoft Graph (Test 10, prod/dev only): uses existing
@@ -93,6 +97,11 @@
 #   export KNOBBY_ENV=prod
 #   export ADMIN_CLIENT_SECRET=$(gcloud secrets versions access latest \
 #       --secret=knobby-keycloak-admin-api-client-secret-prod)
+#   # Optional when Cloudflare Access protects /admin/*:
+#   export CF_ACCESS_CLIENT_ID=$(gcloud secrets versions access latest \
+#       --secret=knobby-cloudflare-access-smoke-client-id-prod)
+#   export CF_ACCESS_CLIENT_SECRET=$(gcloud secrets versions access latest \
+#       --secret=knobby-cloudflare-access-smoke-client-secret-prod)
 #   # Ensure 'az login' has put you in the knobby.io home Entra tenant
 #   ./keycloak-smoke-test.sh
 #
@@ -207,6 +216,21 @@ if [[ -z "${ADMIN_CLIENT_SECRET:-}" ]]; then
     exit 2
 fi
 
+# ----- optional Cloudflare Access service-token headers -----
+CF_ACCESS_CLIENT_ID="${CF_ACCESS_CLIENT_ID:-${CLOUDFLARE_ACCESS_CLIENT_ID:-}}"
+CF_ACCESS_CLIENT_SECRET="${CF_ACCESS_CLIENT_SECRET:-${CLOUDFLARE_ACCESS_CLIENT_SECRET:-}}"
+CF_ACCESS_ENABLED="false"
+
+if [[ -n "$CF_ACCESS_CLIENT_ID" || -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
+    if [[ -z "$CF_ACCESS_CLIENT_ID" || -z "$CF_ACCESS_CLIENT_SECRET" ]]; then
+        echo -e "${RED}ERROR: Cloudflare Access service token is incomplete${RESET}" >&2
+        echo "Set both CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET, or unset both." >&2
+        echo "Legacy aliases CLOUDFLARE_ACCESS_CLIENT_ID and CLOUDFLARE_ACCESS_CLIENT_SECRET are also accepted." >&2
+        exit 2
+    fi
+    CF_ACCESS_ENABLED="true"
+fi
+
 # ----- check required tools -----
 for tool in curl jq openssl; do
     if ! command -v "$tool" > /dev/null 2>&1; then
@@ -214,6 +238,22 @@ for tool in curl jq openssl; do
         exit 2
     fi
 done
+
+# Wrap curl so the Cloudflare Access service token is applied consistently to
+# every Keycloak request without logging the token or repeating headers at each
+# call site. Process substitution keeps the secret out of the curl process list.
+curl()
+{
+    if [[ "$CF_ACCESS_ENABLED" == "true" ]]; then
+        command curl --config <(
+            printf 'header = "CF-Access-Client-Id: %s"\n' "$CF_ACCESS_CLIENT_ID"
+            printf 'header = "CF-Access-Client-Secret: %s"\n' "$CF_ACCESS_CLIENT_SECRET"
+        ) "$@"
+        return
+    fi
+
+    command curl "$@"
+}
 
 REALM_BASE="${KC_URL}/realms/${REALM}"
 
@@ -235,6 +275,7 @@ echo -e "  ${DIM}ADMIN_CLIENT_ID:${RESET}     ${ADMIN_CLIENT_ID}"
 echo -e "  ${DIM}WEB_CLIENT_ID:${RESET}       ${WEB_CLIENT_ID}"
 echo -e "  ${DIM}WEB_REDIRECT_URI:${RESET}    ${WEB_REDIRECT_URI}"
 echo -e "  ${DIM}ADMIN_CLIENT_SECRET:${RESET} ${ADMIN_CLIENT_SECRET:0:6}... (truncated)"
+echo -e "  ${DIM}CF_ACCESS:${RESET}           ${CF_ACCESS_ENABLED}"
 if [[ "$KNOBBY_ENV" != "test" && -n "${GCP_PROJECT:-}" ]]; then
     echo -e "  ${DIM}GCP_PROJECT:${RESET}         ${GCP_PROJECT}"
 fi
@@ -251,6 +292,11 @@ echo -e "  ${DIM}        ${RESET}     as service account '${ADMIN_CLIENT_ID}'"
 echo -e "  ${DIM}        ${RESET}     credential from ADMIN_CLIENT_SECRET env var"
 echo -e "  ${DIM}        ${RESET}     (no interactive login - this is service-to-service auth,"
 echo -e "  ${DIM}        ${RESET}      same path knobby.io backend uses in production)"
+if [[ "$CF_ACCESS_ENABLED" == "true" ]]; then
+    echo -e "  ${DIM}Cloudflare:${RESET} service-token headers enabled (CF_ACCESS_CLIENT_SECRET hidden)"
+else
+    echo -e "  ${DIM}Cloudflare:${RESET} no Access service token configured"
+fi
 if [[ "$KNOBBY_ENV" != "test" ]]; then
     echo -e "  ${DIM}GCP:${RESET}         existing 'gcloud auth login' session (used by Test 9)"
     echo -e "  ${DIM}Azure:${RESET}       existing 'az login' session (used by Test 10)"

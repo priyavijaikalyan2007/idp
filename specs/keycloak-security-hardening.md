@@ -1,4 +1,4 @@
-<!-- AGENT: Operator hardening runbook for the public Knobby Keycloak endpoint. -->
+<!-- AGENT: Step-by-step operator hardening runbook for the public Knobby Keycloak endpoint. -->
 
 # Keycloak Security Hardening Runbook
 
@@ -7,213 +7,617 @@
 **Endpoint:** `https://auth.knobby.io`  
 **Primary realm:** `knobby-prod`
 
-This runbook covers hardening steps that sit outside the SPI JAR and smoke-test baseline. The 2026-07-11 exploratory pass did not find an unauthenticated token, admin-data, DCR, or OAuth bypass, but it did confirm two public attack-surface issues worth closing before broad publication:
+This runbook is intentionally explicit. It assumes you are doing the work in browser consoles, not from memory.
 
-1. The Keycloak admin console and `master` realm are reachable on the public hostname.
-2. CORS preflight responses on some Keycloak endpoints reflect arbitrary origins with credentials enabled.
+The 2026-07-11 exploratory pass did **not** find an unauthenticated token, admin-data, DCR, or OAuth bypass. It did find two things to harden before broad publication:
 
-The goal is not to hide Keycloak entirely. The production realm's normal OIDC endpoints must stay public. The goal is to remove public reachability for admin-only surfaces and keep browser-origin behavior narrow where feasible.
+1. Public users can reach the Keycloak admin UI and `master` realm URLs.
+2. Some Keycloak endpoints answer CORS preflights for arbitrary origins.
+
+The fix is mostly edge configuration. Keep normal `knobby-prod` OIDC endpoints public; protect only admin-only surfaces.
 
 ---
 
-## 1. Restrict `/admin/*` and `/realms/master/*`
+## 0. Mental Model
 
-### Finding
+### What Cloudflare Access does here
 
-External probes against `auth.knobby.io` showed:
+Cloudflare Access is an **outer gate** in front of selected paths.
 
-- `/admin/master/console/` returns the Keycloak Admin SPA.
-- `/realms/master/.well-known/openid-configuration` returns the master realm metadata.
-- `/realms/master/account/` returns the master account surface.
-
-No authentication bypass was found. Admin REST endpoints still require authentication. This is still unnecessary public attack surface: it advertises Keycloak, exposes the master realm issuer, and gives scanners a stable admin UI to target.
-
-### Recommended control: Cloudflare Access
-
-Use Cloudflare Zero Trust Access for human-admin surfaces. This avoids brittle Keycloak theme hacks and does not affect the production realm's login/token/DCR endpoints.
-
-1. In Cloudflare Zero Trust, open **Access -> Applications -> Add an application -> Self-hosted**.
-2. Create an app for the admin console:
-   - Application name: `Knobby Keycloak Admin`
-   - Domain: `auth.knobby.io`
-   - Path: `/admin*`
-   - Session duration: 8 to 12 hours is reasonable for admin work.
-3. Add an allow policy:
-   - Include only named admin emails or an identity-provider group.
-   - Require MFA in the upstream identity provider used by Cloudflare Access.
-   - Do not add service-token bypass unless a concrete automation flow needs it.
-4. Create a second self-hosted app, or add an equivalent policy, for the master realm:
-   - Domain: `auth.knobby.io`
-   - Path: `/realms/master*`
-   - Same allow policy as the admin app.
-5. Leave the production realm public:
-   - Do not protect `/realms/knobby-prod/.well-known/*`.
-   - Do not protect `/realms/knobby-prod/protocol/openid-connect/*`.
-   - Do not protect `/realms/knobby-prod/clients-registrations/*` unless you are deliberately pausing MCP DCR.
-   - Do not protect `/resources/*`; the login and admin SPAs load assets from there.
-
-### Alternative control: Cloudflare WAF custom rule
-
-If Cloudflare Access is not available, use a WAF custom rule that blocks or challenges admin-only paths unless the source is an approved admin IP range.
-
-Example intent:
+Request flow after this guide:
 
 ```text
-host is auth.knobby.io
-and (
-  path starts with /admin
-  or path starts with /realms/master
-)
-and source IP is not in the approved-admin list
-then block or managed-challenge
+Browser
+  -> Cloudflare Access check for /admin/* or /realms/master/*
+  -> Keycloak admin login
+  -> Keycloak admin TOTP
+  -> Keycloak admin console
 ```
 
-Prefer Access over static IP allowlists when admins move between networks. If you use IP allowlists, keep a break-glass path documented before enabling the rule.
+Cloudflare Access does **not** replace Keycloak admin login. It decides whether the request is allowed to reach Keycloak at all. Once it reaches Keycloak, Keycloak still asks for the admin username/login and still enforces Keycloak TOTP.
 
-### Keycloak-side posture
+### Do not do these
 
-- Do not place application clients or users in the `master` realm.
-- Keep only break-glass administrative accounts in `master`.
-- Require strong MFA on every account that can administer Keycloak through its upstream IdP or account policy.
-- Use named admin accounts. Do not share a single `admin` user.
+- Do **not** create a Cloudflare **SaaS application** for this.
+- Do **not** disable Keycloak admin login.
+- Do **not** disable Keycloak TOTP.
+- Do **not** configure Keycloak to trust Cloudflare's token as an admin login token.
+- Do **not** protect all of `auth.knobby.io`; that would break normal OIDC login, token, DCR, and discovery flows.
+- Do **not** protect `/resources/*`; Keycloak pages load scripts and styles from there.
 
-Keycloak does not provide a clean switch to make the master realm discovery document private while leaving other realms public. Put this control at the edge.
+### What application type to create
 
-### Verification
+Create **Self-hosted public applications** in Cloudflare Access.
 
-Run these from a network that is not covered by an admin bypass:
+Depending on the exact Cloudflare UI revision, the path may be labelled one of these:
 
-```bash
-curl -i https://auth.knobby.io/admin/master/console/
-curl -i https://auth.knobby.io/realms/master/.well-known/openid-configuration
-curl -i https://auth.knobby.io/realms/master/account/
+- **Zero Trust -> Access -> Applications -> Add an application -> Self-hosted**
+- **Zero Trust -> Access controls -> Applications -> Add web application -> Self-hosted public application**
+- **Zero Trust -> Access controls -> Applications -> Self-hosted and private -> Add public hostname**
+
+These labels point to the same kind of Access app: a policy in front of a public hostname/path.
+
+---
+
+## 1. Prerequisites
+
+### 1.1 Confirm Cloudflare proxy is enabled
+
+Cloudflare Access only enforces on traffic that actually passes through Cloudflare.
+
+**Path:** Cloudflare dashboard -> Websites -> `knobby.io` -> DNS -> Records
+
+Find the DNS record for `auth.knobby.io`.
+
+Required state:
+
+| Field | Value |
+|---|---|
+| Name | `auth` or `auth.knobby.io` |
+| Type | usually `CNAME` |
+| Proxy status | **Proxied** / orange cloud |
+
+If it is **DNS only** / grey cloud, Cloudflare Access will not protect `auth.knobby.io`.
+
+### 1.2 Disable Cloudflare optimizations for `auth.knobby.io`
+
+This is important because Keycloak's admin console is a JavaScript SPA and Cloudflare optimizations have broken it before.
+
+**Path:** Cloudflare dashboard -> Websites -> `knobby.io`
+
+Create configuration rules, or use the equivalent product pages, scoped to:
+
+```text
+Hostname equals auth.knobby.io
 ```
 
-Expected result after Access/WAF is active: each request is blocked, challenged, or redirected to Cloudflare Access.
+Set:
 
-Then confirm production OIDC remains public:
+| Feature | Required value |
+|---|---|
+| Rocket Loader | Off |
+| Auto Minify JavaScript | Off |
+| Auto Minify CSS | Off |
+| Auto Minify HTML | Off |
+| Aggressive bot/challenge features | Off for `/resources/*`, `/admin/*`, and normal OIDC endpoints |
 
-```bash
-curl -i https://auth.knobby.io/realms/knobby-prod/.well-known/openid-configuration
-curl -i https://auth.knobby.io/realms/knobby-prod/protocol/openid-connect/auth
+Keep Cloudflare proxying/DDoS/TLS on. Turn off content rewriting and blanket challenges.
+
+### 1.3 Confirm Cloudflare Access login method
+
+Cloudflare Access needs some identity method for the outer gate.
+
+**Path:** Cloudflare Zero Trust -> Settings -> Authentication
+
+Acceptable for this outer gate:
+
+- Google login for your admin email.
+- Microsoft/Entra login for your admin email.
+- GitHub login for your admin account.
+- One-time PIN to your admin email, if you have not set up an identity provider yet.
+
+Keycloak TOTP remains the inner MFA control. If Cloudflare Access also has MFA through Google/Microsoft/GitHub, good; if not, the outer gate is still useful because it prevents anonymous scanners from reaching admin paths.
+
+---
+
+## 2. Protect `/admin/*`
+
+### 2.1 Create the Access application
+
+**Path:** Cloudflare Zero Trust -> Access -> Applications -> Add an application
+
+Choose:
+
+```text
+Self-hosted public application
 ```
 
-Expected result: discovery returns `200`; the authorization endpoint returns a normal Keycloak/OIDC response such as `400` for missing parameters or a login redirect when parameters are supplied. It should not return a Cloudflare Access block.
+Do **not** choose:
 
-Finally run:
+```text
+SaaS application
+```
+
+Fill the application form:
+
+| Field | Value |
+|---|---|
+| Application name | `Knobby Keycloak Admin` |
+| Application domain / hostname | `auth.knobby.io` |
+| Path | `/admin*` |
+| Session duration | `8h` |
+| App Launcher visibility | Off, if the UI asks |
+
+Leave CORS settings at defaults unless the UI forces a choice. This app is only an access gate for admin paths.
+
+### 2.2 Create the allow policy
+
+On the same application, add a policy:
+
+| Field | Value |
+|---|---|
+| Policy name | `allow-keycloak-admins` |
+| Action | `Allow` |
+| Include | Your exact admin email address, or an Access Group containing only Keycloak admins |
+| Require | Optional: login method is your chosen IdP; optional: country/device posture if you already use those |
+| Exclude | Empty, unless you need to block a specific account |
+
+For a solo admin setup, the simplest safe policy is:
+
+```text
+Action: Allow
+Include: Emails -> <your admin email>
+```
+
+Do not add a broad `Bypass` policy. Bypass means Cloudflare Access is not enforcing for matching traffic.
+
+### 2.3 Save and test immediately
+
+Open a private/incognito browser window and visit:
+
+```text
+https://auth.knobby.io/admin/master/console/
+```
+
+Expected sequence:
+
+1. Cloudflare Access login/approval screen appears first.
+2. After you pass Cloudflare Access, Keycloak's normal admin login appears.
+3. After Keycloak login, Keycloak still asks for TOTP if the admin account has TOTP enabled.
+4. The admin console loads.
+
+If you go straight to Keycloak without seeing Cloudflare Access first, check:
+
+- DNS record is orange-cloud proxied.
+- Access app hostname is exactly `auth.knobby.io`.
+- Access app path is exactly `/admin*`.
+- The request URL starts with `/admin`.
+
+---
+
+## 3. Protect `/realms/master/*`
+
+The `master` realm should not be a public application realm. Protect it separately.
+
+### 3.1 Create the Access application
+
+**Path:** Cloudflare Zero Trust -> Access -> Applications -> Add an application
+
+Choose:
+
+```text
+Self-hosted public application
+```
+
+Fill:
+
+| Field | Value |
+|---|---|
+| Application name | `Knobby Keycloak Master Realm` |
+| Application domain / hostname | `auth.knobby.io` |
+| Path | `/realms/master*` |
+| Session duration | `8h` |
+| App Launcher visibility | Off, if the UI asks |
+
+### 3.2 Add the same allow policy
+
+Use the same policy shape:
+
+```text
+Action: Allow
+Include: Emails -> <your admin email>
+```
+
+or reuse the same `keycloak-admins` Access Group if you created one.
+
+### 3.3 Test immediately
+
+From a private/incognito window:
+
+```text
+https://auth.knobby.io/realms/master/.well-known/openid-configuration
+```
+
+Expected result: Cloudflare Access appears first, or Cloudflare denies the request if the user is not allowed.
+
+After passing Cloudflare Access, Keycloak may show JSON or a Keycloak page. That is fine. The goal is that anonymous public users cannot reach it.
+
+---
+
+## 4. Confirm You Did Not Break Public OIDC
+
+These paths must remain public because apps and MCP clients use them.
+
+Run:
 
 ```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://auth.knobby.io/realms/knobby-prod/.well-known/openid-configuration
+```
+
+Expected:
+
+```text
+200
+```
+
+Run:
+
+```bash
+curl -i 'https://auth.knobby.io/realms/knobby-prod/protocol/openid-connect/auth'
+```
+
+Expected:
+
+- A Keycloak/OIDC response.
+- Usually `400` because required OAuth parameters are missing.
+- **Not** a Cloudflare Access login page.
+- **Not** a Cloudflare Access 403.
+
+Run:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  https://auth.knobby.io/resources/
+```
+
+Expected:
+
+- `200`, `301`, `302`, or `404` from Keycloak is acceptable.
+- A Cloudflare Access login page is **not** acceptable for `/resources/*`.
+
+---
+
+## 5. Verify Edge Protection With Curl
+
+From a terminal that is not carrying browser cookies:
+
+```bash
+curl -i https://auth.knobby.io/admin/master/console/ | sed -n '1,25p'
+```
+
+Good outcomes:
+
+- `302` redirect to a Cloudflare Access login URL.
+- `403` from Cloudflare Access.
+- HTML that clearly says Cloudflare Access, not Keycloak.
+
+Bad outcome:
+
+- `200` with Keycloak admin console HTML.
+
+Now test the master realm:
+
+```bash
+curl -i https://auth.knobby.io/realms/master/.well-known/openid-configuration | sed -n '1,25p'
+```
+
+Good outcomes:
+
+- `302` to Cloudflare Access.
+- `403` from Cloudflare Access.
+- Cloudflare Access login HTML.
+
+Bad outcome:
+
+- `200` with JSON containing `"issuer":"https://auth.knobby.io/realms/master"`.
+
+---
+
+## 6. Smoke Test Caveat
+
+`./smoke.sh` currently calls Keycloak Admin REST endpoints under:
+
+```text
+/admin/realms/<realm>/...
+```
+
+It authenticates to Keycloak with:
+
+```text
+Authorization: Bearer <Keycloak admin-api token>
+```
+
+It can send Cloudflare Access service-token headers when you export the `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` env vars. After you protect `/admin/*`, smoke tests that call Admin REST through `https://auth.knobby.io` must use those env vars, or they may fail with a Cloudflare Access page or 403 even though Keycloak is healthy.
+
+Use a Cloudflare Access **service token** for smoke tests. Do not use a broad bypass.
+
+Cloudflare side:
+
+1. Zero Trust -> Access -> Service Auth -> Service Tokens.
+2. Create token: `knobby-keycloak-smoke`.
+3. Copy the generated Client ID and Client Secret.
+4. Add a policy to both Access applications:
+
+   | Field | Value |
+   |---|---|
+   | Policy name | `allow-smoke-service-token` |
+   | Action | `Service Auth` |
+   | Include | Service Token -> `knobby-keycloak-smoke` |
+
+Store the service-token values in Secret Manager. Suggested names:
+
+```text
+knobby-cloudflare-access-smoke-client-id-prod
+knobby-cloudflare-access-smoke-client-secret-prod
+```
+
+Run smoke with:
+
+```bash
+export KNOBBY_ENV=prod
+export ADMIN_CLIENT_SECRET=$(gcloud secrets versions access latest \
+  --secret=knobby-keycloak-admin-api-client-secret-prod)
+export CF_ACCESS_CLIENT_ID=$(gcloud secrets versions access latest \
+  --secret=knobby-cloudflare-access-smoke-client-id-prod)
+export CF_ACCESS_CLIENT_SECRET=$(gcloud secrets versions access latest \
+  --secret=knobby-cloudflare-access-smoke-client-secret-prod)
 ./smoke.sh
 ```
 
-If the smoke tests use the Admin REST API through `auth.knobby.io`, run them from an Access-authorized session/network or add a narrowly scoped operator bypass. Do not add a broad bypass for all clients.
+`smoke.sh` also accepts the longer aliases:
 
-### Rollback
+```text
+CLOUDFLARE_ACCESS_CLIENT_ID
+CLOUDFLARE_ACCESS_CLIENT_SECRET
+```
 
-Disable the Cloudflare Access app or WAF rule for `/admin*` and `/realms/master*`. Do not change Keycloak realm configuration during rollback unless the edge rule accidentally protected production realm paths.
+The script adds these headers to curl requests when the env vars are present:
+
+```text
+CF-Access-Client-Id: <service-token-client-id>
+CF-Access-Client-Secret: <service-token-client-secret>
+```
+
+It does not print the secret. Do not add the token to the repo.
+
+### Emergency alternative: temporary narrow IP bypass
+
+Use this only if the service-token setup is broken and you need a one-off smoke run.
+
+1. Find your current public IP:
+
+   ```bash
+   curl -s https://ifconfig.me
+   ```
+
+2. In the `Knobby Keycloak Admin` Access application, add a policy above the allow policy:
+
+   | Field | Value |
+   |---|---|
+   | Policy name | `temporary-smoke-ip-bypass` |
+   | Action | `Bypass` |
+   | Include | IP ranges -> `<your-public-ip>/32` |
+
+3. Run:
+
+   ```bash
+   ./smoke.sh
+   ```
+
+4. Delete `temporary-smoke-ip-bypass` immediately after the smoke run.
+
+This is less clean because bypassed requests do not get Access enforcement.
+
+### Private-origin alternative
+
+Only use this if you have a private/internal route to Keycloak that is not internet-accessible. Do not create a second public hostname just to bypass Cloudflare Access.
 
 ---
 
-## 2. Harden CORS and Browser-Origin Exposure
+## 7. Keycloak CORS and Web Origins
 
-### Finding
+This section narrows browser-origin behavior for first-party clients. It does not replace the Cloudflare Access admin/master protection above.
 
-Exploratory preflight probes observed `Access-Control-Allow-Origin` reflecting arbitrary origins with `Access-Control-Allow-Credentials: true` on several Keycloak endpoints, including OIDC and Admin REST paths.
+### 7.1 Configure `knobby-prod-web`
 
-No unauthenticated data access was found. Admin REST still returned `401` without credentials. The risk is browser-context abuse if an authenticated admin session can be driven from an attacker origin, especially while `/admin/*` remains public.
+**Path:** Keycloak admin console -> realm `knobby-prod` -> Clients -> `knobby-prod-web` -> Settings
 
-### Primary mitigation
+Set:
 
-Restrict `/admin/*` and `/realms/master/*` at the edge first. Once Cloudflare Access/WAF blocks those paths for non-admin contexts, permissive preflight behavior on admin endpoints is no longer reachable by the public web.
+| Field | Value |
+|---|---|
+| Valid redirect URIs | `https://prod.knobby.io/auth/callback` |
+| Valid post logout redirect URIs | `https://prod.knobby.io/` |
+| Web origins | `https://prod.knobby.io` |
+| Direct access grants | Off |
+| Standard flow | On |
+| Implicit flow | Off |
 
-### Keycloak client configuration
+Do not use:
 
-Review each first-party client in every realm:
+- `*`
+- broad wildcard origins
+- `https://*.knobby.io`
 
-1. Open **Clients -> `knobby-{env}-web` -> Settings**.
-2. Set **Valid Redirect URIs** to exact app callback origins and paths. Avoid broad wildcards.
-3. Set **Web Origins** explicitly:
-   - Production: `https://prod.knobby.io`
-   - Development: `https://dev.knobby.io`
-   - Staging/test: the exact deployed app origin for that environment
-4. Avoid `*` in Web Origins.
-5. Avoid `+` unless the redirect URI list is already exact and intentionally maintained. Explicit origins are easier to audit.
-6. Confirm Direct Access Grants remain disabled for browser clients.
+If the UI currently has `+` for Web Origins, replace it with the explicit origin above. `+` derives origins from redirect URIs; explicit origins are easier to audit.
 
-For MCP DCR clients, do not rely on browser CORS as the security boundary. The security controls are:
+### 7.2 Configure `knobby-dev-web`
 
-- Trusted Hosts / redirect-domain allowlisting.
-- Secure redirect URI enforcement.
-- Allowed Protocol Mapper Types.
-- The Knobby MCP Registration CRP grant-type guard.
-- PKCE and loopback redirect rules for native clients.
+**Path:** Keycloak admin console -> realm `knobby-dev` -> Clients -> `knobby-dev-web` -> Settings
 
-### Cloudflare response-header rules
+Set:
 
-Do not blanket-strip CORS headers from all Keycloak OIDC endpoints without first testing the web app. Some browser-based OIDC flows can require CORS on token or userinfo calls depending on whether the app exchanges tokens in the browser or through its backend.
+| Field | Value |
+|---|---|
+| Valid redirect URIs | `https://dev.knobby.io/auth/callback` |
+| Valid post logout redirect URIs | `https://dev.knobby.io/` |
+| Web origins | `https://dev.knobby.io` |
+| Direct access grants | Off |
+| Standard flow | On |
+| Implicit flow | Off |
 
-Safe edge strategy:
+For local development only, add local origins to the dev realm, not prod:
 
-1. Block or protect admin/master paths with Access/WAF.
-2. Leave production realm OIDC endpoints reachable.
-3. Only add response-header transforms for CORS after confirming the app does not need browser CORS on the affected endpoint.
+```text
+http://localhost:3000
+http://localhost:5173
+```
 
-### Verification
+Only add the local ports your app actually uses.
 
-Before and after hardening, test an attacker origin:
+### 7.3 Configure future staging/test web clients
+
+Use the same pattern:
+
+```text
+Valid redirect URIs: exact /auth/callback URL
+Valid post logout redirect URIs: exact app root URL
+Web origins: exact app origin only
+```
+
+Do not copy prod origins into dev, and do not copy dev/localhost origins into prod.
+
+### 7.4 Do not edit built-in Keycloak clients casually
+
+Do not change these unless you are deliberately debugging Keycloak internals:
+
+- `security-admin-console`
+- `account-console`
+- `broker`
+- `realm-management`
+
+These clients are easy to break. The admin/master risk is handled at Cloudflare, not by trying to surgically change Keycloak's built-in console clients.
+
+---
+
+## 8. CORS Verification
+
+### 8.1 Admin REST preflight must be blocked by Cloudflare
+
+Run:
 
 ```bash
 curl -i -X OPTIONS \
   'https://auth.knobby.io/admin/realms/knobby-prod/users' \
   -H 'Origin: https://evil.example.com' \
   -H 'Access-Control-Request-Method: GET' \
-  -H 'Access-Control-Request-Headers: authorization'
+  -H 'Access-Control-Request-Headers: authorization' \
+  | sed -n '1,40p'
+```
 
+Expected after `/admin*` Access protection:
+
+- Cloudflare Access blocks, challenges, or redirects.
+- You should **not** see a normal Keycloak `204`/`200` preflight response for this public unauthorised request.
+
+Bad result:
+
+```text
+access-control-allow-origin: https://evil.example.com
+access-control-allow-credentials: true
+```
+
+on a normal Keycloak response from `/admin/realms/...`.
+
+### 8.2 Production token endpoint evil-origin probe
+
+Run:
+
+```bash
 curl -i -X OPTIONS \
   'https://auth.knobby.io/realms/knobby-prod/protocol/openid-connect/token' \
   -H 'Origin: https://evil.example.com' \
   -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: content-type'
+  -H 'Access-Control-Request-Headers: content-type' \
+  | sed -n '1,40p'
 ```
 
-Expected after Access/WAF:
+Preferred result:
 
-- Admin REST preflight is blocked, challenged, or redirected by Cloudflare for unauthorised users.
-- Production realm token behavior depends on the app architecture. If token exchange happens in the browser, allow only the exact first-party app origin. If token exchange is backend-only, no arbitrary browser origin should be accepted.
+- No `access-control-allow-origin: https://evil.example.com`.
 
-Test the legitimate app origin:
+If Keycloak still reflects the evil origin here, record it as residual Keycloak behavior and do **not** immediately add a Cloudflare response-header rewrite. Token endpoint CORS can be flow-sensitive; breaking it may break browser login. The higher-risk admin path is already protected by Access.
+
+### 8.3 Production token endpoint legitimate-origin probe
+
+Run:
 
 ```bash
 curl -i -X OPTIONS \
   'https://auth.knobby.io/realms/knobby-prod/protocol/openid-connect/token' \
   -H 'Origin: https://prod.knobby.io' \
   -H 'Access-Control-Request-Method: POST' \
-  -H 'Access-Control-Request-Headers: content-type'
+  -H 'Access-Control-Request-Headers: content-type' \
+  | sed -n '1,40p'
 ```
 
-Expected result: compatible with the app's real login/token flow. Validate with a browser login, not only curl.
+Expected:
+
+- Compatible with the production app's login flow.
+- If the app exchanges tokens in the browser, `https://prod.knobby.io` must be allowed.
+- If the app exchanges tokens only from the backend, the browser preflight can be stricter.
+
+The final check is a real browser login at:
+
+```text
+https://prod.knobby.io
+```
+
+If browser login works and admin evil-origin preflight is blocked, the important hardening objective is met.
 
 ---
 
-## 3. Regression Checklist
+## 9. Final Checklist
 
-After changing Cloudflare or Keycloak client-origin settings:
+Mark this done only when all are true:
 
-- `./smoke.sh` passes.
-- OIDC discovery for `knobby-prod` returns `200`.
-- A normal web login from `https://prod.knobby.io` succeeds.
-- Anonymous DCR attacker-host negative test remains rejected.
-- MCP loopback DCR still works for approved loopback redirect URIs.
-- `/admin/*` and `/realms/master/*` are not public from an unauthorised network.
-- No Cloudflare optimization feature is rewriting Keycloak scripts or assets.
+- [ ] `auth.knobby.io` DNS record is Proxied / orange cloud.
+- [ ] Rocket Loader and Auto Minify are off for `auth.knobby.io`.
+- [ ] Cloudflare Access application `Knobby Keycloak Admin` exists.
+- [ ] `Knobby Keycloak Admin` protects hostname `auth.knobby.io`, path `/admin*`.
+- [ ] Cloudflare Access application `Knobby Keycloak Master Realm` exists.
+- [ ] `Knobby Keycloak Master Realm` protects hostname `auth.knobby.io`, path `/realms/master*`.
+- [ ] Both apps allow only named Keycloak admin email(s) or a `keycloak-admins` Access Group.
+- [ ] Both apps allow the `knobby-keycloak-smoke` Service Auth token.
+- [ ] No broad bypass policy exists.
+- [ ] Incognito visit to `/admin/master/console/` shows Cloudflare Access before Keycloak.
+- [ ] After Cloudflare Access, Keycloak still requires normal admin login and TOTP.
+- [ ] Incognito visit to `/realms/master/.well-known/openid-configuration` is blocked or gated by Cloudflare Access.
+- [ ] `knobby-prod` OIDC discovery still returns `200`.
+- [ ] `prod.knobby.io` login still works.
+- [ ] `knobby-prod-web` Web Origins is exactly `https://prod.knobby.io`.
+- [ ] Dev/localhost Web Origins exist only in dev/test realms, not prod.
+- [ ] Admin REST evil-origin preflight is blocked by Cloudflare Access.
+- [ ] `./smoke.sh` passes with `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` exported.
 
 ---
 
-## 4. Future Smoke-Test Hooks
+## 10. Rollback
 
-If the Access/WAF policy becomes a stable production requirement, add optional prod-only smoke checks:
+If login or admin access breaks:
 
-- Admin/master edge protection: unauthorised GET to `/admin/master/console/` and `/realms/master/.well-known/openid-configuration` must not return `200`.
-- Admin CORS preflight: unauthorised attacker-origin OPTIONS to `/admin/realms/knobby-prod/users` must be blocked before Keycloak.
+1. In Cloudflare Zero Trust -> Access -> Applications, disable only:
+   - `Knobby Keycloak Admin`
+   - `Knobby Keycloak Master Realm`
+2. Do not change Keycloak realm/client settings during the first rollback.
+3. Confirm:
 
-Keep those tests opt-in or environment-aware so local and pre-edge deployments do not fail by design.
+   ```bash
+   curl -s -o /dev/null -w "%{http_code}\n" \
+     https://auth.knobby.io/realms/knobby-prod/.well-known/openid-configuration
+   ```
+
+4. Re-enable one Access application at a time and retest.
+
+If the admin console loads but looks broken, check Cloudflare optimizations first: Rocket Loader, Auto Minify, bot challenges, and rate limits on `/resources/*`.
