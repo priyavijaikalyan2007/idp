@@ -45,7 +45,7 @@
         <!-- Pin to the base image's Keycloak version (Dockerfile FROM tag). -->
         <keycloak.version>26.6.4</keycloak.version>
 
-        <junit.version>5.10.2</junit.version>
+        <junit.version>6.1.1</junit.version>
         <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>1.20.4</testcontainers.version>
         <testcontainers-keycloak.version>4.2.1</testcontainers-keycloak.version>
