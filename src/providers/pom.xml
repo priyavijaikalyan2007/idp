@@ -48,7 +48,7 @@
         <junit.version>5.10.2</junit.version>
         <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>1.20.4</testcontainers.version>
-        <testcontainers-keycloak.version>4.2.1</testcontainers-keycloak.version>
+        <testcontainers-keycloak.version>4.3.0</testcontainers-keycloak.version>
         <rest-assured.version>5.5.0</rest-assured.version>
 
         <maven-compiler-plugin.version>3.13.0</maven-compiler-plugin.version>
