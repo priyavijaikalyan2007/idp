@@ -83,8 +83,8 @@ Specified in `specs/keycloak.web.mcp.md`. Key points the YourApp web team needs 
 
 ### Resolution
 
-The 2026-06-10 deploys (revisions through `yourappauth-00020`) ran with the corrected
-binding (`KC_BOOTSTRAP_ADMIN_PASSWORD` from Secret Manager `yourapp-keycloak-bootstrap-password`)
+The 2026-06-10 deploys (revisions through `your-keycloak-service-00020`) ran with the corrected
+binding (`KC_BOOTSTRAP_ADMIN_PASSWORD` from Secret Manager `yourapp-yourapp-keycloak-bootstrap-password`)
 and the operator logged into the admin console and switched realms during incident
 debugging — admin authentication works on the fixed configuration. Note the admin
 *user* predates the fix (bootstrap only creates the user when absent), so the binding
@@ -98,7 +98,7 @@ Until this session, `cloudrun.yaml` had `- name: KC_BOOTSTRAP_ADMIN_PASSWORD=` (
 
 On the next deploy after merging:
 1. Watch the Keycloak container logs at startup for any `KC_BOOTSTRAP_ADMIN_PASSWORD` related messages.
-2. Attempt admin login at https://auth.yourapp.com/admin with the credentials in `yourapp-keycloak-bootstrap-password` Secret Manager entry.
+2. Attempt admin login at https://auth.yourapp.com/admin with the credentials in `yourapp-yourapp-keycloak-bootstrap-password` Secret Manager entry.
 3. If login works, debt is resolved. If not, investigate how admin was actually being authenticated and document.
 
 ### Triggers to revisit

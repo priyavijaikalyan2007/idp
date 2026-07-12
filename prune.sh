@@ -16,7 +16,7 @@ PROJECT_ID="your-gcp-project-id"
 REGION="your-region"
 REPO_NAME="idp"
 IMAGE_NAME="keycloak"
-SERVICE_NAME="yourappauth"
+SERVICE_NAME="your-keycloak-service"
 
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
 KEEP_LAST_N="${KEEP_LAST_N:-5}"

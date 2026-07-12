@@ -149,9 +149,9 @@ The user approved installing Gitleaks and TruffleHog and asked for a full local 
 
 Scan results: Gitleaks found 5 redacted findings in git history and 3 in the working tree, all reviewed as documentation/config-example false positives (`YOUR_ACCESS_TOKEN` Auth0 examples and a JDBC env-var example). TruffleHog found 0 verified and 0 unverified secrets in both git-history and working-tree scans. The sensitive local `keycloak_neon.dump` finding remains because dumps are sensitive even when scanners do not detect token-like strings.
 
-GitHub repository changes: enabled Dependabot alerts and automated security fixes via GitHub API; GitHub secret scanning / push protection returned HTTP 422 ("Secret scanning is not available for this repository") for this private repo. Updated `.github/dependabot.yml` to cover Docker, Maven, and GitHub Actions; added `.github/workflows/codeql.yml`; added `.github/workflows/dependency-review.yml`; rewrote `SECURITY.md` for the Keycloak IdP instead of the old UI-library scope. YAML parsed successfully with PyYAML and `git diff --check` passed.
+GitHub repository changes: enabled Dependabot alerts and automated security fixes via GitHub API; GitHub secret scanning / push protection returned HTTP 422 ("Secret scanning is not available for this repository") for this repository. Updated `.github/dependabot.yml` to cover Docker, Maven, and GitHub Actions; added `.github/workflows/codeql.yml`; added `.github/workflows/dependency-review.yml`; rewrote `SECURITY.md` for the Keycloak IdP instead of the old UI-library scope. YAML parsed successfully with PyYAML and `git diff --check` passed.
 
-Live GCP read-only check: active `gcloud` account is `operator@example.com`; configured project is `your-gcp-project-id`. A read-only `gcloud run services describe yourappauth --region=your-region` succeeded and confirmed the latest service still has bootstrap admin env vars mounted and still uses the default compute service account.
+Live GCP read-only check: active `gcloud` account is `operator@example.com`; configured project is `your-gcp-project-id`. A read-only `gcloud run services describe your-keycloak-service --region=your-region` succeeded and confirmed the latest service still has bootstrap admin env vars mounted and still uses the default compute service account.
 
 ---
 
@@ -277,3 +277,11 @@ Live GCP read-only check: active `gcloud` account is `operator@example.com`; con
 **Request.** The user rejected the previous guide as still not good enough: the Cloudflare UI labels were wrong/stale, the authentication explanation was poor, and the guide was not written for the actual situation of a solo developer with one Cloudflare account and one Keycloak admin account.
 
 **Action.** Rewrote `specs/keycloak-security-hardening.md` around the current Cloudflare Access flow and the solo-owner model. The guide now says to create **Zero Trust -> Access controls -> Applications -> Create new application -> Self-hosted and private -> Add public hostname** applications, explicitly not SaaS. It recommends One-time PIN as the first-pass outer gate for a solo developer, while keeping Keycloak admin login and Keycloak TOTP enabled as the inner controls. It now uses exact path entries (`admin/*`, `admin`, `realms/master/*`, `realms/master`), explains why parent and wildcard paths are both listed, documents the human allow policy and smoke-test Service Auth policy, gives Secret Manager commands for the service token, and includes concrete browser/curl verification and rollback steps.
+
+---
+
+## 2026-07-12 — Open-source template cleanup
+
+**Request.** Prepare this repository for public release by removing product-specific endpoint names and production deployment metadata from the current tree and history. Scan scripts, tests, and config for inadvertent secret or endpoint references, remove stale branches so only `main` remains, and keep `Outcrop Inc` copyright/licensing references intact.
+
+**Action.** Genericized product-specific hostnames, realm names, package names, resource names, and deployment identifiers. Converted `cloudrun.yaml` from a live Cloud Run export into a reusable template, placeholderized live GCP project/region/service coordinates, generated Cloud Run URLs, operator email, Postgres host/user, and Secret Manager resource names. Kept `Outcrop Inc` copyright/licensing references intact. Pruned local stale branches and matching remote-tracking refs, leaving `main` as the only local branch.

@@ -24,7 +24,7 @@ REGION="your-region"
 REPO_NAME="idp"
 IMAGE_NAME="keycloak"
 REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}"
-SERVICE_NAME="yourappauth"
+SERVICE_NAME="your-keycloak-service"
 IMAGE="${REGISTRY}:${TAG}"
 
 # Fail fast if the tag doesn't exist, rather than letting Cloud Run reject it later.

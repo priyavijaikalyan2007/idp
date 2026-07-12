@@ -45,7 +45,7 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           # SARIF upload (code scanning) requires GitHub Advanced Security, which
-          # is not enabled on this private repo (plan limitation — same as secret
+          # is not enabled on this repository (plan limitation — same as secret
           # scanning). `upload: never` lets the analysis still run (findings appear
           # in this run's logs) while skipping the upload step that otherwise 403s
           # with "Code scanning is not enabled for this repository", turning every

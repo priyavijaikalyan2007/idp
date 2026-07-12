@@ -169,7 +169,7 @@ Rule of thumb: `KC_DB_POOL_MAX_SIZE` ≈ **50–66% of Supabase pool size** for 
 ## A.3 Secrets
 
 ```bash
-echo -n "$(openssl rand -base64 32)" | gcloud secrets create keycloak-bootstrap-password --data-file=-
+echo -n "$(openssl rand -base64 32)" | gcloud secrets create yourapp-keycloak-bootstrap-password --data-file=-
 echo -n "YOUR_GOOGLE_CLIENT_SECRET" | gcloud secrets create google-oauth-client-secret --data-file=-
 ```
 
@@ -181,7 +181,7 @@ echo -n "YOUR_GOOGLE_CLIENT_SECRET" | gcloud secrets create google-oauth-client-
 PROJECT=your-gcp-project-id        # prod
 gcloud iam service-accounts create keycloak-runner \
   --project="$PROJECT" --display-name="Keycloak Cloud Run runtime"
-SA="keycloak-runner@${PROJECT}.iam.gserviceaccount.com"
+SA="keycloak-runner@your-gcp-project-id.iam.gserviceaccount.com"
 
 # Grant secretAccessor on ONLY the secrets this service mounts (per-secret, not
 # project-wide). These are the exact names from cloudrun.yaml. Note: the bootstrap
@@ -211,13 +211,13 @@ SQL_CONN="$PROJECT:$REGION:yourapp-keycloak"
 gcloud run deploy keycloak \
   --image=quay.io/keycloak/keycloak:26.6.0 \
   --region=$REGION --platform=managed \
-  --service-account="keycloak-runner@$PROJECT.iam.gserviceaccount.com" \
+  --service-account="keycloak-runner@your-gcp-project-id.iam.gserviceaccount.com" \
   --add-cloudsql-instances="$SQL_CONN" \
   --port=8080 --cpu=2 --memory=2Gi \
   --min-instances=0 --max-instances=3 --timeout=300 \
   --args="start,--optimized" \
   --set-env-vars="KC_DB=postgres,KC_DB_URL=jdbc:postgresql:///keycloak?cloudSqlInstance=$SQL_CONN&socketFactory=com.google.cloud.sql.postgres.SocketFactory,KC_DB_USERNAME=keycloak,KC_HOSTNAME=auth.yourapp.com,KC_HOSTNAME_STRICT=true,KC_HTTP_ENABLED=true,KC_PROXY_HEADERS=xforwarded,KC_HEALTH_ENABLED=true,KC_METRICS_ENABLED=true,KC_BOOTSTRAP_ADMIN_USERNAME=admin" \
-  --set-secrets="KC_DB_PASSWORD=keycloak-db-password:latest,KC_BOOTSTRAP_ADMIN_PASSWORD=keycloak-bootstrap-password:latest"
+  --set-secrets="KC_DB_PASSWORD=keycloak-db-password:latest,KC_BOOTSTRAP_ADMIN_PASSWORD=yourapp-keycloak-bootstrap-password:latest"
 ```
 
 For Neon/Supabase, swap the JDBC URL and drop `--add-cloudsql-instances`. **For Supabase specifically, use the session-mode pooler + `prepareThreshold=0` per §A.2.3** — e.g. `jdbc:postgresql://<region>.pooler.supabase.com:5432/postgres?sslmode=require&prepareThreshold=0` (Neon: `jdbc:postgresql://HOST:5432/keycloak?sslmode=require`).
@@ -287,7 +287,7 @@ For a stateless function the default is fine. **For a JVM it is harmful:** the J
 
 **Apply all at once:**
 ```
-gcloud run services update yourappauth --region=<region> \
+gcloud run services update your-keycloak-service --region=<region> \
   --no-cpu-throttling --min-instances=1 --memory=2Gi --cpu=1
 ```
 - `--no-cpu-throttling` → CPU always allocated (switches to instance-based billing). **The highest-value single change.**
@@ -492,7 +492,7 @@ You don't need Nomad or Vault. ~30 min one-time setup.
      echo "KC_DB_HOST=$(gcloud secrets versions access latest --secret=keycloak-db-host)"
      echo "KC_DB_PASSWORD=$(gcloud secrets versions access latest --secret=keycloak-db-password)"
      echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
-     echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$(gcloud secrets versions access latest --secret=keycloak-bootstrap-password)"
+     echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$(gcloud secrets versions access latest --secret=yourapp-keycloak-bootstrap-password)"
    } > "$ENV_FILE"
    chmod 600 "$ENV_FILE"
    chown root:docker "$ENV_FILE"

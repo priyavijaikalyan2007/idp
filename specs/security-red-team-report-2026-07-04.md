@@ -2,8 +2,8 @@
 
 # Red-Team Security Report — Keycloak IdP
 
-**Date:** 2026-07-04  
-**Reviewer role:** Red-team security lead  
+**Date:** 2026-07-04
+**Reviewer role:** Red-team security lead
 **Scope reviewed:** repository history, tracked files, local untracked artifacts, Keycloak setup guide, Cloud Run revision YAML, shell scripts, Dockerfile, Maven SPI build, MCP SPI Java implementation, smoke-test posture, deferred hardening registers, and current upstream Keycloak release/security status.
 
 ## Remediation Status (updated 2026-07-11)
@@ -111,8 +111,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-001 — Keycloak Base Is Behind Current Security Release
 
-**Severity:** Critical  
-**Affected files:** `Dockerfile`, `src/providers/pom.xml`, `cloudrun.yaml`  
+**Severity:** Critical
+**Affected files:** `Dockerfile`, `src/providers/pom.xml`, `cloudrun.yaml`
 **Evidence:** `Dockerfile` uses `quay.io/keycloak/keycloak:26.6.0`; Maven property `keycloak.version` is `26.6.0`; deployed image is a custom build from that line. Upstream current is `26.6.4`. Keycloak release notes list multiple security fixes in later 26.6.x releases, including JWT algorithm-confusion authentication bypass, privilege escalations, DCR registration-access-token client takeover, XSS, request smuggling, SSRF, session fixation, token disclosure, and DoS fixes.
 
 **Impact:** Internet-facing IdP remains exposed to vulnerabilities fixed upstream after 26.6.0. Several listed fixes touch exactly this repo's active surface: OIDC, identity brokering, DCR/client registration, token handling, admin/API surfaces, and request parsing.
@@ -128,8 +128,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-002 — Local Keycloak DB Dump Present and World-Readable
 
-**Severity:** High  
-**Affected artifact:** `keycloak_neon.dump`  
+**Severity:** High
+**Affected artifact:** `keycloak_neon.dump`
 **Evidence:** Local file exists, ignored but untracked; file mode `-rw-r--r--`; file type is PostgreSQL custom database dump.
 
 **Impact:** If the dump is production or near-production, compromise of the developer machine or accidental copy/sync exposes identity data and likely credentials. Keycloak databases commonly include confidential client secrets, identity-provider config, offline sessions, user metadata, password hashes for any local users, DCR clients, and registration access tokens.
@@ -144,11 +144,11 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-003 — Bootstrap Admin Credentials Still Mounted in Cloud Run Config
 
-**Severity:** High  
-**Affected file:** `cloudrun.yaml`  
+**Severity:** High
+**Affected file:** `cloudrun.yaml`
 **Evidence:** `KC_BOOTSTRAP_ADMIN_USERNAME=admin` and `KC_BOOTSTRAP_ADMIN_PASSWORD` Secret Manager binding remain in the revision YAML. The setup guide explicitly says to remove bootstrap env vars after the real admin is created.
 
-**Live confirmation:** `gcloud run services describe yourappauth --region=your-region --project=your-gcp-project-id` shows both bootstrap env vars still present on the latest ready revision.
+**Live confirmation:** `gcloud run services describe your-keycloak-service --region=your-region --project=your-gcp-project-id` shows both bootstrap env vars still present on the latest ready revision.
 
 **Impact:** Bootstrap credentials should not remain part of steady-state runtime. Anyone with access to that Secret Manager secret or a future clean-database scenario has an admin bootstrap path. It also increases the number of high-value secrets mounted into the IdP process.
 
@@ -161,8 +161,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-004 — Production Uses the Default Compute Service Account
 
-**Severity:** High  
-**Affected file:** `cloudrun.yaml`  
+**Severity:** High
+**Affected file:** `cloudrun.yaml`
 **Evidence:** Cloud Run revision uses `123456789012-compute@developer.gserviceaccount.com` rather than a dedicated `keycloak-runner` service account.
 
 **Live confirmation:** the latest Cloud Run service template still uses `123456789012-compute@developer.gserviceaccount.com`.
@@ -178,8 +178,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-005 — DCR Redirect-Host and Protocol-Mapper Hardening Is Deferred
 
-**Severity:** High before untrusted DCR; Medium while only trusted users can register  
-**Affected files:** `specs/keycloak-setup-guide.md`, `specs/keycloak-tech-debt.md`  
+**Severity:** High before untrusted DCR; Medium while only trusted users can register
+**Affected files:** `specs/keycloak-setup-guide.md`, `specs/keycloak-tech-debt.md`
 **Evidence:** Trusted Hosts and Allowed Protocol Mapper Types are listed as GA blockers/deferred hardening. The setup guide also states Trusted Hosts can be deleted and reliance placed on `max-clients` plus WAF rate limiting.
 
 **Impact:** Anonymous DCR is an internet-facing control plane. Without redirect-host constraints, a malicious client can register redirect URIs on attacker-controlled infrastructure. Without mapper constraints, a malicious client can attempt claim injection through self-attached mappers; downstream validation may mitigate this, but Keycloak should reject it early.
@@ -193,8 +193,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-006 — Cloudflare/WAF Protection Is Currently DNS-Only
 
-**Severity:** High for public DCR/token exposure; Medium pre-launch  
-**Affected file:** `specs/keycloak-setup-guide.md`  
+**Severity:** High for public DCR/token exposure; Medium pre-launch
+**Affected file:** `specs/keycloak-setup-guide.md`
 **Evidence:** Setup guide says `auth.yourapp.com` currently runs DNS-only after Cloudflare broke admin/API requests. The guide recommends scoped rate limits later.
 
 **Impact:** Keycloak token, authorization, login, and DCR endpoints remain directly exposed to volumetric abuse at Cloud Run. Cloud Run maxScale is currently 1, which limits cost blowout but also makes availability easier to exhaust. `containerConcurrency=10`, `timeoutSeconds=300`, and expensive auth/token paths make this worth hardening before public traffic.
@@ -211,8 +211,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-007 — Setup Guide Contains Contradictory `mcp-default` Instructions
 
-**Severity:** High operational risk  
-**Affected file:** `specs/keycloak-setup-guide.md`  
+**Severity:** High operational risk
+**Affected file:** `specs/keycloak-setup-guide.md`
 **Evidence:** D.7/D.8 correctly say Option B must not make `mcp-default` realm-default. However D.4 still says the `mcp-default` Client Scope type is `Default` so it can be assigned realm-default, and E.2 checklist says realm-default Client Scopes should include `mcp-default` plus the Author bundle.
 
 **Impact:** If an operator follows the checklist, every client can acquire `mcp-default`. The SPI uses the presence of `mcp-default` to identify MCP clients. This breaks the discriminator and can route normal web clients into the MCP consent path or make MCP flow failures affect normal login.
@@ -226,8 +226,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-008 — MCP Picker Result Is Not Bound Strongly Enough to Original Request
 
-**Severity:** Medium now; High before public MCP if YourApp web is a large TCB  
-**Affected files:** `McpTenantPickerAuthenticator.java`, `McpPickerCallbackResourceProvider.java`, `HandoffTokenValidator.java`  
+**Severity:** Medium now; High before public MCP if YourApp web is a large TCB
+**Affected files:** `McpTenantPickerAuthenticator.java`, `McpPickerCallbackResourceProvider.java`, `HandoffTokenValidator.java`
 **Evidence:** Authenticator builds a picker request with `jti`, requested scopes, OAuth state, auth session ID, client ID, and tab ID. Callback validates the signed result, finds the auth session, checks user echo, and writes `chosenTenantId`/`grantedScopes`. It does not store the request `jti`/nonce/requested scope set in the auth session and does not compare `picker_request_jti` to server-side state.
 
 **Impact:** The SPI trusts YourApp web to echo and constrain everything correctly. If the web consent endpoint has a bug, is compromised, or signs a result for the wrong request, Keycloak will accept any HMAC-valid result for the referenced user/auth session. The protocol spec says the result `jti` should match the request `jti`; the implementation does not enforce that independently.
@@ -241,8 +241,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-009 — `granted_scopes` Are Written Directly to Access Token Scope
 
-**Severity:** Medium now; High if YourApp web has a signing/authorization bug  
-**Affected files:** `McpPickerCallbackResourceProvider.java`, `McpScopeOverrideMapper.java`  
+**Severity:** Medium now; High if YourApp web has a signing/authorization bug
+**Affected files:** `McpPickerCallbackResourceProvider.java`, `McpScopeOverrideMapper.java`
 **Evidence:** Callback writes `yourapp_scopes = String.join(" ", token.getGrantedScopes())`; scope override mapper sets the access-token `scope` claim directly from that note.
 
 **Impact:** A single bug in the consent service can mint arbitrary scope strings into Keycloak-issued access tokens. Downstream resource servers may treat unknown or elevated scopes inconsistently.
@@ -256,8 +256,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-010 — Replay Cache Is In-Memory and Single-Instance Only
 
-**Severity:** Medium  
-**Affected file:** `ReplayCache.java`  
+**Severity:** Medium
+**Affected file:** `ReplayCache.java`
 **Evidence:** Replay cache is a per-JVM `LinkedHashMap`. The code comment acknowledges multi-instance Keycloak would need backing storage. Cloud Run currently has `maxScale: 1`, but earlier docs/scripts discuss higher scaling and migration scenarios.
 
 **Impact:** A picker-result token can potentially be replayed after container restart or against another instance if scaling changes. The token TTL is short, but the path writes session notes and resumes auth, so replay guarantees should not silently depend on single-instance runtime shape.
@@ -270,8 +270,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-011 — `yourapp.web.host` Is Not Syntax-Validated or Allowlisted
 
-**Severity:** Medium  
-**Affected file:** `McpTenantPickerAuthenticator.java`  
+**Severity:** Medium
+**Affected file:** `McpTenantPickerAuthenticator.java`
 **Evidence:** Authenticator reads `yourapp.web.host` from admin config and constructs a redirect URI by string concatenation.
 
 **Impact:** Misconfiguration or admin compromise can redirect signed picker-request tokens to an unintended host. The token is HMAC-protected but contains user/client/auth-session metadata and OAuth state. This is a privacy leak and can become a phishing/control-plane issue.
@@ -287,8 +287,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-012 — Admin API Service Account Role Model Is Inconsistent and Likely Over-Broad
 
-**Severity:** Medium to High depending on deployment  
-**Affected files:** `specs/keycloak.prd.md`, `specs/keycloak.web.mcp.md`, `smoke.sh`  
+**Severity:** Medium to High depending on deployment
+**Affected files:** `specs/keycloak.prd.md`, `specs/keycloak.web.mcp.md`, `smoke.sh`
 **Evidence:** PRD/smoke tests intentionally forbid `manage-clients`, while the web MCP spec says Option B post-DCR provisioning needs `manage-clients`. The same `yourapp-{env}-admin-api` service account also has powerful user and IdP management roles.
 
 **Impact:** If the broad admin API client secret leaks, attackers can modify users and IdP settings, and if `manage-clients` is added to the same client, they can also mutate clients and flow bindings. Conversely, without `manage-clients`, Option B provisioning cannot work.
@@ -305,8 +305,8 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 
 ### RT-013 — Automated Security Update Coverage Is Misconfigured
 
-**Severity:** Medium  
-**Affected file:** `.github/dependabot.yml`  
+**Severity:** Medium
+**Affected file:** `.github/dependabot.yml`
 **Evidence:** Dependabot is configured only for `pip` in `/`. This repo's live dependencies are Docker base images and Maven dependencies.
 
 **Impact:** Security updates for Keycloak base images and Maven/test dependencies will not be surfaced automatically. This likely contributed to the stale `26.6.0` posture.
@@ -320,12 +320,12 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 2. Add a scheduled job that checks Keycloak latest 26.x patch release.
 3. Treat Keycloak patch releases as security-relevant by default.
 
-**Follow-up completed:** Dependabot alerts and automated security fixes were enabled through the GitHub API. `.github/dependabot.yml` was updated to cover Docker, Maven, and GitHub Actions. CodeQL and Dependency Review workflows were added. GitHub API rejected secret scanning / push protection for this private repository with `Secret scanning is not available for this repository`; enabling that requires the relevant GitHub Code Security / Advanced Security plan or organization setting.
+**Follow-up completed:** Dependabot alerts and automated security fixes were enabled through the GitHub API. `.github/dependabot.yml` was updated to cover Docker, Maven, and GitHub Actions. CodeQL and Dependency Review workflows were added. GitHub API rejected secret scanning / push protection for this repository with `Secret scanning is not available for this repository`; enabling that requires the relevant GitHub Code Security / Advanced Security plan or organization setting.
 
 ### RT-014 — `SECURITY.md` Describes the Wrong Project
 
-**Severity:** Low to Medium  
-**Affected file:** `SECURITY.md`  
+**Severity:** Low to Medium
+**Affected file:** `SECURITY.md`
 **Evidence:** It says the project is a client-side UI theme/component library with no backend/API/auth/database. This repository is an IdP with Keycloak, Java SPIs, OAuth/MCP, Cloud Run, and DB-backed identity state.
 
 **Impact:** Vulnerability reporters and internal responders get the wrong scope, wrong threat model, and wrong expected vulnerability classes.
@@ -333,7 +333,7 @@ After the initial report, Gitleaks `8.30.1` and TruffleHog `3.95.8` were install
 **Recommended remediation:**
 
 1. Rewrite `SECURITY.md` for this IdP.
-2. Include private reporting path, supported Keycloak versions, urgent rotation contacts, and what to include for auth/OAuth reports.
+2. Include repositoryrting path, supported Keycloak versions, urgent rotation contacts, and what to include for auth/OAuth reports.
 3. Explicitly state no public GitHub issues for vulnerabilities.
 
 ## Positive Controls Observed

@@ -2267,7 +2267,7 @@ elif ! command -v gcloud >/dev/null 2>&1; then
 else
     CR_PROJECT="${CLOUD_RUN_PROJECT:-your-gcp-project-id}"
     CR_REGION="${CLOUD_RUN_REGION:-your-region}"
-    CR_SERVICE="${CLOUD_RUN_SERVICE:-yourappauth}"
+    CR_SERVICE="${CLOUD_RUN_SERVICE:-your-keycloak-service}"
     CR_ENV=$(gcloud run services describe "$CR_SERVICE" --region "$CR_REGION" \
         --project "$CR_PROJECT" \
         --format='value(spec.template.spec.containers[0].env[].name)' 2>/dev/null || true)
@@ -2294,7 +2294,7 @@ elif ! command -v gcloud >/dev/null 2>&1; then
 else
     CR_PROJECT="${CLOUD_RUN_PROJECT:-your-gcp-project-id}"
     CR_REGION="${CLOUD_RUN_REGION:-your-region}"
-    CR_SERVICE="${CLOUD_RUN_SERVICE:-yourappauth}"
+    CR_SERVICE="${CLOUD_RUN_SERVICE:-your-keycloak-service}"
     CR_SA=$(gcloud run services describe "$CR_SERVICE" --region "$CR_REGION" \
         --project "$CR_PROJECT" \
         --format='value(spec.template.spec.serviceAccountName)' 2>/dev/null || true)
@@ -2302,9 +2302,9 @@ else
             --project "$CR_PROJECT" --format='value(metadata.name)' >/dev/null 2>&1; then
         record_skip "Dedicated runtime SA" "could not describe Cloud Run service ${CR_SERVICE} (permissions? wrong project/region?) — verify manually"
     elif [[ -z "$CR_SA" ]]; then
-        record_fail "Dedicated runtime SA" "serviceAccountName is empty on ${CR_SERVICE} — Cloud Run falls back to the default compute SA (over-privileged). Set it to keycloak-runner@${CR_PROJECT}.iam.gserviceaccount.com (RT-004, setup guide A.4)"
+        record_fail "Dedicated runtime SA" "serviceAccountName is empty on ${CR_SERVICE} — Cloud Run falls back to the default compute SA (over-privileged). Set it to keycloak-runner@your-gcp-project-id.iam.gserviceaccount.com (RT-004, setup guide A.4)"
     elif [[ "$CR_SA" == *"-compute@developer.gserviceaccount.com" ]]; then
-        record_fail "Dedicated runtime SA" "runs as the default compute SA (${CR_SA}) — over-privileged and shared. Swap to the dedicated keycloak-runner@${CR_PROJECT}.iam.gserviceaccount.com with only per-secret secretAccessor (RT-004, setup guide A.4)"
+        record_fail "Dedicated runtime SA" "runs as the default compute SA (${CR_SA}) — over-privileged and shared. Swap to the dedicated keycloak-runner@your-gcp-project-id.iam.gserviceaccount.com with only per-secret secretAccessor (RT-004, setup guide A.4)"
     else
         record_pass "Dedicated runtime SA" "runs as dedicated SA ${CR_SA} (not the default compute SA) (RT-004)"
     fi

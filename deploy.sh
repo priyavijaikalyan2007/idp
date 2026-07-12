@@ -19,7 +19,7 @@ set -e
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 BUILD_INFO="${SCRIPT_DIR}/build.json"
 
-SERVICE_NAME="yourappauth"
+SERVICE_NAME="your-keycloak-service"
 
 # ----------------------------------------------------- build + push (chain)
 

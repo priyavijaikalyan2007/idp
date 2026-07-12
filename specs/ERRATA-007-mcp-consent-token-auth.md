@@ -1,7 +1,7 @@
 # Errata 007 — `/mcp/consent` must authenticate from the signed handoff token, not an app session
 
 **Date:** 2026-07-08
-**Status:** Root cause confirmed in production (Keycloak log + app log + `chrome.har`). **The Keycloak / SPI side is complete and correct end-to-end. The remaining fix is entirely app-side (YourAppApi).**
+**Status:** Root cause confirmed from end-to-end Keycloak and app traces. **The Keycloak / SPI side is complete and correct end-to-end. The remaining fix is entirely app-side (YourAppApi).**
 **Applies to:** `YOURAPP_WEB_MCP_ENDPOINTS.md` (the `/mcp/consent` wizard) — the app-side companion to the SPI handoff.
 **Companion to:** ERRATA-002 (the `/mcp/consent` split — this corrects a gap in it), ERRATA-003 (correlation claims), ERRATA-004 (resume re-entrancy), ERRATA-005 (post-broker picker). With 001–006 in place the whole chain works **except** the `/mcp/consent` page's own auth model.
 
@@ -24,9 +24,9 @@ The SPI redirects the browser to `https://<host>/mcp/consent?token=<picker-reque
 
 It is HMAC-signed per-realm, `aud`-scoped to `yourapp-web-mcp-consent`, single-use (`jti`), and **carries the authenticated user** (`sub` / `yourapp_sub`). The app already validates it to read the user and requested scopes. **That token IS the authentication for this page.** Requiring a *separate* app session on top of it is the defect.
 
-### What actually breaks (observed failure mode)
+### What actually breaks
 
-`chrome.har` + `idp.log` + `app.log`, fresh (cookieless) run:
+Fresh (cookieless) run:
 
 1. `login-actions/post-broker-login` → **302 → `prod.yourapp.com/mcp/consent?token=…`** — picker fired correctly (Keycloak side ✅).
 2. `GET /mcp/consent` (200) → `GET /api/v1/auth/me` — the app checks for an **app** session, finds none valid.

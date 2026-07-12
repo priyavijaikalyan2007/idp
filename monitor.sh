@@ -9,7 +9,7 @@ set -e  # Exit on error
 
 PROJECT_ID="your-gcp-project-id"
 REGION="your-region"
-SERVICE_NAME="yourappauth"
+SERVICE_NAME="your-keycloak-service"
 
 echo "====================================================================================="
 echo "=== Starting log streaming ==="
