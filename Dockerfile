@@ -2,7 +2,7 @@
 # silently change the base. Keep the :26.6.4 tag for readability; Docker resolves
 # to the digest. Update BOTH FROM lines (builder + runtime) together when bumping —
 # resolve with: docker buildx imagetools inspect quay.io/keycloak/keycloak:<tag>
-FROM quay.io/keycloak/keycloak:26.6.4@sha256:0aae0de7fca85525f727d3354df17896092de8bb26ae4c12d89c77e5df8cbce4 AS builder
+FROM quay.io/keycloak/keycloak:26.7.2-2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067 AS builder
 
 # Build-time settings (these get compiled into the artifact)
 ENV KC_DB=postgres
@@ -47,7 +47,7 @@ COPY ./target/themes/    /opt/keycloak/themes/
 
 RUN /opt/keycloak/bin/kc.sh build
 
-FROM quay.io/keycloak/keycloak:26.6.4@sha256:0aae0de7fca85525f727d3354df17896092de8bb26ae4c12d89c77e5df8cbce4
+FROM quay.io/keycloak/keycloak:26.7.2-2@sha256:9d1f1b2b7261ff53c66cb1092dfcdc34a5fb77e81f9e6a6e75b8b6a795de8067
 
 COPY --from=builder /opt/keycloak/ /opt/keycloak/
 
